@@ -33,6 +33,36 @@ public static class TalkTools
         [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => ConversationReader.Read(PackageTools.ParseGame(game), package, export, language));
 
+    [McpServerTool(Name = "conv_add_node", Destructive = true),
+     Description("Adds an LE1 conversation line by copying a template node (E<n> NPC line or R<n> Shepard line): new text strref and "
+                 + "export id, no links, plot cleared. Also copies the template's node data (ConvNode, Interp with cameras/gestures, "
+                 + "EndCurrentConvNode) with the VO track set to the strref, and its FaceFX lines to FXA_<strref>[_M] without sound, "
+                 + "so lips move. Write the text with tlk_set and link the node with conv_link. Backs the package up first and refuses files inside the game install.")]
+    public static ConvNodeAdded ConvAddNode(
+        [Description("Package holding the conversation. File name or full path.")] string package,
+        [Description("BioConversation export (UIndex, path or unique name).")] string export,
+        [Description("Node to copy, E<n> or R<n> as conv_read prints them. Pick one whose length and gestures fit the new line.")] string template,
+        [Description("String id of the new line's text (subtitle, VO track and FaceFX name).")] int strRef,
+        [Description("Line duration in seconds (InterpData length). Default: the template's.")] float? length = null,
+        [Description("Keep the template's plot condition and transition.")] bool keepPlot = false,
+        [Description("Game: LE1.")] string game = "LE1")
+        => ToolErrors.Run(() => ConversationEditor.AddNode(PackageTools.ParseGame(game), package, export, template, strRef, length, keepPlot));
+
+    [McpServerTool(Name = "conv_link", Destructive = true),
+     Description("Adds or removes one LE1 conversation link: from 'start' to E<n> (starting list), E<n> to R<n> (wheel choice with "
+                 + "paraphrase strref and category), R<n> to E<n> (what the NPC answers). Re-adding an E → R link updates it. "
+                 + "Backs the package up first and refuses files inside the game install.")]
+    public static ConvLinkResult ConvLink(
+        [Description("Package holding the conversation. File name or full path.")] string package,
+        [Description("BioConversation export (UIndex, path or unique name).")] string export,
+        [Description("start, E<n> or R<n>.")] string from,
+        [Description("E<n> or R<n>.")] string to,
+        [Description("E → R only: wheel text strref.")] int? paraphrase = null,
+        [Description("E → R only: wheel slot category: DEFAULT, AGREE, DISAGREE, FRIENDLY, HOSTILE, INVESTIGATE...")] string? category = null,
+        [Description("Remove the link instead.")] bool remove = false,
+        [Description("Game: LE1.")] string game = "LE1")
+        => ToolErrors.Run(() => ConversationEditor.Link(PackageTools.ParseGame(game), package, export, from, to, paraphrase, category, remove));
+
     [McpServerTool(Name = "facefx_get", ReadOnly = true),
      Description("Lists the lip-sync lines inside a FaceFXAnimSet (e.g. a conversation's FXA_<conv>_Owner_F): name, id, path, curve and key counts, length.")]
     public static FaceFxSetLines FaceFxGet(

@@ -40,40 +40,56 @@ public static class FaceFxSets
         {
             var set = ExportInspector.Resolve(pcc, export);
             if (set.ClassName != "FaceFXAnimSet") throw new ArgumentException($"#{set.UIndex} is a {set.ClassName}, not a FaceFXAnimSet.");
-
-            var bin = ObjectBinary.From<FaceFXAnimSet>(set);
-            var created = new List<FaceFXLine>();
-            var replaced = new List<string>();
-            foreach (var copy in copies)
-            {
-                var source = bin.Lines.FirstOrDefault(l => l.NameAsString == copy.Source)
-                             ?? throw new ArgumentException($"#{set.UIndex} has no line '{copy.Source}'. It has: {string.Join(", ", bin.Lines.Select(l => l.NameAsString))}.");
-                if (bin.Lines.RemoveAll(l => l.NameAsString == copy.Name) > 0) replaced.Add(copy.Name);
-
-                var line = source.Clone();
-                var nameIndex = bin.Names.IndexOf(copy.Name);
-                if (nameIndex < 0)
-                {
-                    bin.Names.Add(copy.Name);
-                    nameIndex = bin.Names.Count - 1;
-                }
-                line.NameIndex = nameIndex;
-                line.NameAsString = copy.Name;
-                if (!withSound)
-                {
-                    line.Index = -1;
-                    line.Path = "";
-                    line.ID = "";
-                }
-                bin.Lines.Add(line);
-                created.Add(line);
-            }
-
-            set.WriteBinary(bin);
-            return (ExportInspector.Row(set), created.Select(l => Info(l, bin.Lines.IndexOf(l))).ToList(), replaced, pcc.FilePath);
+            var (created, replaced, _) = CopyIn(set, copies, withSound, skipMissing: false);
+            return (ExportInspector.Row(set), created, replaced, pcc.FilePath);
         });
 
         return new FaceFxCopyResult(path, row, created, replaced, backup);
+    }
+
+    /// <summary>Copies lines inside an already open set. A missing source line throws, or is reported when <paramref name="skipMissing"/>.</summary>
+    internal static (List<FaceFxLineInfo> Created, List<string> Replaced, List<string> Missing) CopyIn(
+        ExportEntry set, IReadOnlyList<FaceFxLineCopy> copies, bool withSound, bool skipMissing)
+    {
+        var bin = ObjectBinary.From<FaceFXAnimSet>(set);
+        var created = new List<FaceFXLine>();
+        var replaced = new List<string>();
+        var missing = new List<string>();
+        foreach (var copy in copies)
+        {
+            var source = bin.Lines.FirstOrDefault(l => l.NameAsString == copy.Source);
+            if (source is null)
+            {
+                if (skipMissing)
+                {
+                    missing.Add(copy.Source);
+                    continue;
+                }
+                throw new ArgumentException($"#{set.UIndex} has no line '{copy.Source}'. It has: {string.Join(", ", bin.Lines.Select(l => l.NameAsString))}.");
+            }
+            if (bin.Lines.RemoveAll(l => l.NameAsString == copy.Name) > 0) replaced.Add(copy.Name);
+
+            var line = source.Clone();
+            var nameIndex = bin.Names.IndexOf(copy.Name);
+            if (nameIndex < 0)
+            {
+                bin.Names.Add(copy.Name);
+                nameIndex = bin.Names.Count - 1;
+            }
+            line.NameIndex = nameIndex;
+            line.NameAsString = copy.Name;
+            if (!withSound)
+            {
+                line.Index = -1;
+                line.Path = "";
+                line.ID = "";
+            }
+            bin.Lines.Add(line);
+            created.Add(line);
+        }
+
+        if (created.Count > 0) set.WriteBinary(bin);
+        return (created.Select(l => Info(l, bin.Lines.IndexOf(l))).ToList(), replaced, missing);
     }
 
     private static FaceFxLineInfo Info(FaceFXLine l, int i) => new(
