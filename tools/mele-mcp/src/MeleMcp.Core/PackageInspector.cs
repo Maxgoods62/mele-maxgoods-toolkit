@@ -17,13 +17,19 @@ public sealed record PackageSummary(
 
 public static class PackageInspector
 {
-    public static PackageSummary Summarize(MEGame game, string fileOrPath, int topClasses = 15)
+    /// <summary>
+    /// Fully loads a package (not quickLoad, so the export table is decompressed and readable). Caller disposes it.
+    /// </summary>
+    public static IMEPackage Open(MEGame game, string fileOrPath)
     {
         LecHost.EnsureInitialized();
         var path = GamePaths.ResolvePackage(game, fileOrPath);
+        return MEPackageHandler.OpenMEPackage(path, forceLoadFromDisk: true);
+    }
 
-        // Full load (not quickLoad) so the export table is decompressed and readable.
-        using var pcc = MEPackageHandler.OpenMEPackage(path, forceLoadFromDisk: true);
+    public static PackageSummary Summarize(MEGame game, string fileOrPath, int topClasses = 15)
+    {
+        using var pcc = Open(game, fileOrPath);
 
         var classes = pcc.Exports
             .GroupBy(e => e.ClassName)
@@ -34,7 +40,7 @@ public static class PackageInspector
             .ToList();
 
         return new PackageSummary(
-            Path: path,
+            Path: pcc.FilePath,
             Game: pcc.Game.ToString(),
             FileSize: pcc.FileSize,
             IsCompressed: pcc.IsCompressed,

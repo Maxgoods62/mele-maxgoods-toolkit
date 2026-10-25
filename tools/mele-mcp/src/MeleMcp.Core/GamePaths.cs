@@ -21,6 +21,9 @@ public static partial class GamePaths
         return $"{char.ToUpperInvariant(m.Groups[1].Value[0])}:{rest}";
     }
 
+    /// <summary>Forgets the cached file lists, so files installed since the last lookup are found.</summary>
+    public static void RefreshLoadedFiles() => MELoadedFiles.InvalidateCaches();
+
     /// <summary>
     /// Resolves a package reference to a full path: an existing path is used as-is, otherwise it is treated as a file name
     /// and looked up in the game's loaded files (highest mounted copy, DLC mods included).
