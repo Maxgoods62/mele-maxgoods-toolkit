@@ -142,13 +142,21 @@ public static class GameLink
     /// The interop ASI serves precached bytes only for names it cannot find on disk, so the copy goes in under a new name
     /// (<c>&lt;level&gt;_LIVE&lt;hhmmss&gt;</c>) after the original and any earlier live copy are streamed out.
     /// The game's own stream triggers can bring the original back when the player moves to another area.
+    /// The bytes must be uncompressed (as LEX sends them): the engine reads a precached package through a memory reader that
+    /// cannot decompress, falls back to opening the file by name, and since that file is not on disk the load never finishes.
     /// </summary>
     public static HotReloadResult HotReload(MEGame game, string package, string? level)
     {
-        var path = GamePaths.ResolvePackage(game, package);
+        string path;
+        byte[] bytes;
+        using (var pcc = PackageInspector.Open(game, package))
+        {
+            path = pcc.FilePath;
+            using var uncompressed = pcc.SaveToStream(compress: false);
+            bytes = uncompressed.ToArray();
+        }
         var original = level ?? Path.GetFileNameWithoutExtension(path);
         var liveName = $"{original}_LIVE{DateTime.Now:HHmmss}";
-        var bytes = File.ReadAllBytes(path);
         var steps = new List<string>();
 
         using (var doc = JsonDocument.Parse(ReadLevelsJson(game)))
@@ -162,7 +170,9 @@ public static class GameLink
             }
         }
         GameBridge.SendPackage(game, liveName, bytes);
-        steps.Add($"PRECACHE_FILE {liveName} {bytes.Length}");
+        steps.Add($"PRECACHE_FILE {liveName} {bytes.Length} (uncompressed)");
+        // The ASI adds the bytes to the precache map from a game-thread action; LEX waits the same 500 ms before streaming.
+        Thread.Sleep(500);
         GameBridge.Send(game, $"STREAMLEVELIN {liveName}");
         steps.Add($"STREAMLEVELIN {liveName}");
         return new HotReloadResult(liveName, path, bytes.Length, steps);

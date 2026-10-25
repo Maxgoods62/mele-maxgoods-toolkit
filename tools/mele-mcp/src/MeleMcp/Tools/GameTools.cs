@@ -72,7 +72,8 @@ public static class GameTools
     [McpServerTool(Name = "game_hot_reload"),
      Description("Swaps a streamed level in the running game for a package file, without restarting. The copy loads under a new name "
                  + "(<level>_LIVE<hhmmss>, since the game prefers files on disk) after the original is streamed out; use that name with game_actor_*. "
-                 + "Pass the mod's library path to test an edit before installing it. Moving to another area may stream the original back in.")]
+                 + "Pass the mod's library path to test an edit before installing it. LE1: any streaming refresh (BioTriggerStream touch, Kismet "
+                 + "SetStreamingState) unloads the copy and the LE1CP Sideloader re-forces its own levels; on the Normandy this happened within 4 s.")]
     public static HotReloadResult GameHotReload(
         [Description("Package path (Windows or /mnt/<drive>) or file name.")] string package,
         [Description("Level name in game if it differs from the file name.")] string? level = null,

@@ -15,7 +15,7 @@ public static class PackageWriter
     public static (T Result, string BackupPath) Edit<T>(MEGame game, string fileOrPath, Func<IMEPackage, T> mutate)
     {
         using var pcc = PackageInspector.Open(game, fileOrPath);
-        EnsureWritable(pcc);
+        EnsureWritable(pcc.Game, pcc.FilePath);
         var result = mutate(pcc);
         var backup = Backup(pcc.FilePath);
         pcc.Save();
@@ -26,12 +26,12 @@ public static class PackageWriter
     /// The game install is a deploy target, never an edit target: a file name can resolve to the base game or to another
     /// mod's installed copy (e.g. LE1CP overrides many level files). Edits go to the mod's source folder in the M3 library.
     /// </summary>
-    private static void EnsureWritable(IMEPackage pcc)
+    internal static void EnsureWritable(MEGame game, string path)
     {
-        var gameRoot = MEDirectories.GetDefaultGamePath(pcc.Game);
-        if (gameRoot != null && pcc.FilePath.StartsWith(Path.GetFullPath(gameRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        var gameRoot = MEDirectories.GetDefaultGamePath(game);
+        if (gameRoot != null && path.StartsWith(Path.GetFullPath(gameRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException($"Refusing to modify a file inside the game install ({pcc.FilePath}). Edit the mod's copy in the M3 library, then install or copy it.");
+            throw new InvalidOperationException($"Refusing to modify a file inside the game install ({path}). Edit the mod's copy in the M3 library, then install or copy it.");
         }
     }
 

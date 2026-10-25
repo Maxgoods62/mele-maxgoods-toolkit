@@ -39,6 +39,15 @@ public static class ExportTools
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => ExportInspector.GetReferencers(PackageTools.ParseGame(game), package, export));
 
+    [McpServerTool(Name = "export_decompile", ReadOnly = true),
+     Description("Decompiles a Class, State, Function or ScriptStruct export to UnrealScript (LEX script editor view). "
+                 + "Use it to read game or mod logic, e.g. SFXGame.pcc SideloaderFramework. The first call on a big package takes a few seconds.")]
+    public static string ExportDecompile(
+        [Description(PackageDescription)] string package,
+        [Description(ExportDescription)] string export,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => ScriptDecompiler.Decompile(PackageTools.ParseGame(game), package, export));
+
     private const string WriteRule =
         " Backs the package up first. Refuses files inside the game install: edit the mod's copy in the M3 library.";
 

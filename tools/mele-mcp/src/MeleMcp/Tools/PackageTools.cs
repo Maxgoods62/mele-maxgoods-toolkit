@@ -26,6 +26,14 @@ public static class PackageTools
         [Description("Maximum files returned (FilesScanned still counts all).")] int limit = 100)
         => ToolErrors.Run(() => NameFinder.Find(ParseGame(game), nameContains, fileFilter, limit));
 
+    [McpServerTool(Name = "level_new", Destructive = false),
+     Description("Creates an empty level package (TheWorld.PersistentLevel with its WorldInfo) for new actors, e.g. a file the LE1CP Sideloader loads. "
+                 + "The file name becomes the level name. Refuses an existing file and anything inside the game install.")]
+    public static NewLevelResult LevelNew(
+        [Description("New .pcc path (Windows or /mnt/<drive>), usually in the mod's CookedPCConsole folder in the M3 library.")] string path,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => LevelCreator.Create(ParseGame(game), path));
+
     internal static MEGame ParseGame(string game) => game.Trim().ToUpperInvariant() switch
     {
         "LE1" => MEGame.LE1,
