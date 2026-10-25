@@ -25,6 +25,21 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `export_clone` | Duplicate an export and its children (references inside the copy relinked); a level actor is added to the level's `Actors` list |
 | `export_import` | Copy an export from another package with everything it references (LEX "clone all references"); globally loaded classes and assets become imports. Optional add to `Actors`. Refuses if the target already has that path |
 
+**Live link** (`game_*`, through ME3Tweaks' LEX Interop ASI, same protocol as LEX):
+
+| Tool | What it does | Tested on LE1 |
+|---|---|---|
+| `game_status` | Game running, interop pipe present, reply round trip | ✅ |
+| `game_actors` | Every visible level with its actors (name, tag), filters | ✅ 21 levels, 1,051 actors |
+| `game_actor_get` / `game_actor_set` | Live location, rotation, scale, hidden; move/turn/hide one actor (not saved) | ✅ |
+| `game_player_location` | Shepard's position and rotation (reported only after a change, so it may ask you to take a step) | ✅ |
+| `game_console`, `game_stream_level`, `game_remote_event` | Fire-and-forget commands | sent, effect not checked |
+| `game_hot_reload` | Swap a streamed level for a package file under the name `<level>_LIVE<hhmmss>` | ❌ not proven, see below |
+
+Requirements: the **LEX Interop ASI** (not listed in M3's ASI Manager; install it from LEX → Live Level Editor → requirements → "Interop ASI", which asks M3 to install ASI group 42), and **LEX closed**. The game sends replies to the first window titled "Legendary Explorer", and the server owns a hidden one.
+
+Hot-reload notes: the ASI serves precached bytes only for package names **not found on disk** (`FindPackageFile` hook), so reloading under the same name silently loads the disk file. The rename version is written but untested. **Never fire LE1CP framework events by hand** (`Poll_NPC_*`, `Live_NPC_*`): it re-spawned several NPC files twice and hung LE1 in a loading loop. Streaming a framework-managed `BIONPC_*` file out and in also leaves the framework's NPC dormant (Chakwas vanished).
+
 **Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
 
 ## Layout
