@@ -1,0 +1,4 @@
+[submodule "tools/mele-mcp/external/LegendaryExplorer"]
+	path = tools/mele-mcp/external/LegendaryExplorer
+	url = https://github.com/ME3Tweaks/LegendaryExplorer.git
+	shallow = true
