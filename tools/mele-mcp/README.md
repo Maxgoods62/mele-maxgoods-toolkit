@@ -39,6 +39,14 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 2. `./scripts/deploy.sh` (about 5 s; optional argument: a package for the `pkg_info` smoke call).
 3. In Claude Code: `/mcp` → `mele` → Reconnect (the deploy stopped the old process).
 
+## Known LEC 6.5 traps for upcoming tools
+
+From [docs/06 §B.1](../../docs/06-le1-first-mod.md#b1-how-lec-65-resolves-le1-dlc-mod-files):
+
+- `AutoloadIni` round-trips lose `PlotManagerConsequenceMap<n>`, `DotU<n>` and `GlobalPackages<n>`. Write our own `AutoLoad.ini` reader/writer before `dlc_new`.
+- LEC treats `DLC_MOD*` as a mod folder, but the game's ASIs need `DLC_MOD_` (case-sensitive). Match the game.
+- File lookups are cached (`GamePaths.ResolvePackage`). Any tool that installs or copies files must call `MELoadedFiles.InvalidateCaches()`.
+
 ## Gotchas found in the M0 spike
 
 | Symptom | Cause | Fix in place |

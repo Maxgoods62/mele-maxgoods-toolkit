@@ -32,7 +32,9 @@ public static partial class GamePaths
 
         var fileName = Path.GetFileName(candidate);
         if (!Path.HasExtension(fileName)) fileName += ".pcc";
-        if (MELoadedFiles.TryGetHighestMountedFile(game, fileName, out var found)) return found;
+        // Cached lookup: TryGetHighestMountedFile forces a full rescan on every call. Tools that install or copy files
+        // must call MELoadedFiles.InvalidateCaches() afterwards.
+        if (MELoadedFiles.GetFilesLoadedInGame(game).TryGetValue(fileName, out var found)) return found;
 
         throw new FileNotFoundException($"'{fileOrPath}' is not an existing path and no file named '{fileName}' is loaded by {game}.");
     }
