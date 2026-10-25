@@ -29,6 +29,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `export_rename` | Rename an export (children follow). Use it after cloning or importing a forced export (actor type, conversation package): two loaded files with the same path share one object |
 | `tlk_get` / `tlk_set` | Read, add or replace strings in an LE1 package's `BioTlkFile` exports (all of them by default: male/female copies, every language of a conversation's set) |
 | `conv_read` | LE1 conversation as a text graph: start entries, entries and wheel choices, replies, plot conditions/transitions, node data (interp length, VO track and its strref) |
+| `facefx_get` / `facefx_copy_lines` | List the lip-sync lines of a `FaceFXAnimSet` (name, sound cue path and index, length); copy lines under new names, silent by default (LE1 plays `FXA_<strref>[_M]` for a VO track) |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
 | `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
 
@@ -50,13 +51,13 @@ Hot-reload notes:
 - The bytes must be **uncompressed** (LEX sends `SaveToStream(false)`). Sending a compressed file hung LE1: the engine's memory reader cannot decompress, falls back to opening the file by name, and that file is not on disk.
 - On LE1 + LE1CP the copy does not last. `BioTriggerStream.Touch`/`UnTouch` and Kismet `BioSeqAct_SetStreamingState` re-apply the area's streaming state (hand-streamed levels unload) and then call `SideloaderFramework.RunSideloader`, which re-forces every Sideloader level by name (`ClientUpdateLevelStreamingStatus`). Tested on the Normandy: reverted in 2–4 s with Shepard standing still. **Never fire LE1CP framework events by hand** (`Poll_NPC_*`, `Live_NPC_*`): it re-spawned several NPC files twice and hung LE1 in a loading loop. Streaming a framework-managed `BIONPC_*` file out and in also leaves the framework's NPC dormant (Chakwas vanished).
 
-**Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_set_ids`, `kismet_*`, `level_new`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
+**Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_set_ids`, `facefx_copy_lines`, `kismet_*`, `level_new`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
 
 ## Layout
 
 | Path | Content |
 |---|---|
-| `src/MeleMcp.Core/` | Facade over LEC (`LecHost` init, `GamePaths`, `PackageInspector`, `ExportInspector`, `NameFinder`, `ScriptDecompiler`, `LevelCreator`, `TalkFiles`, `ConversationReader`/`ConversationEditor`, `KismetEditor`). Writes go through `PackageWriter.Edit` (guard, mutate, backup, save). Live link: `GameBridge` (pipe + reply window), `GameLink` (commands). No MCP dependency. |
+| `src/MeleMcp.Core/` | Facade over LEC (`LecHost` init, `GamePaths`, `PackageInspector`, `ExportInspector`, `NameFinder`, `ScriptDecompiler`, `LevelCreator`, `TalkFiles`, `ConversationReader`/`ConversationEditor`, `FaceFxSets`, `KismetEditor`). Writes go through `PackageWriter.Edit` (guard, mutate, backup, save). Live link: `GameBridge` (pipe + reply window), `GameLink` (commands). No MCP dependency. |
 | `src/MeleMcp/` | stdio MCP host (`Program.cs`) and tool classes (`Tools/`) |
 | `external/LegendaryExplorer/` | LEX submodule, pinned at tag `6.5.0.6522` (commit `43bf73a`) |
 | `scripts/deploy.sh` | Stop running server → publish to `D:\MELE\tools\mele-mcp` → smoke test |

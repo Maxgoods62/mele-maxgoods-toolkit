@@ -33,6 +33,27 @@ public static class TalkTools
         [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => ConversationReader.Read(PackageTools.ParseGame(game), package, export, language));
 
+    [McpServerTool(Name = "facefx_get", ReadOnly = true),
+     Description("Lists the lip-sync lines inside a FaceFXAnimSet (e.g. a conversation's FXA_<conv>_Owner_F): name, id, path, curve and key counts, length.")]
+    public static FaceFxSetLines FaceFxGet(
+        [Description("Package holding the FaceFXAnimSet. File name or full path.")] string package,
+        [Description("FaceFXAnimSet export (UIndex, path or unique name).")] string export,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => FaceFxSets.Get(PackageTools.ParseGame(game), package, export));
+
+    [McpServerTool(Name = "facefx_copy_lines", Destructive = true),
+     Description("Copies FaceFX lines of a FaceFXAnimSet under new names. LE1 plays the line named FXA_<strref> (female Shepard sets) "
+                 + "or FXA_<strref>_M (male sets) for a VO track, so copying FXA_152036 to FXA_74210010 gives a node with new strref 74210010 "
+                 + "the template's lip movement. By default the copy drops its sound cue, so the template voice does not play. "
+                 + "Backs the package up first and refuses files inside the game install.")]
+    public static FaceFxCopyResult FaceFxCopyLines(
+        [Description("Package holding the FaceFXAnimSet. File name or full path.")] string package,
+        [Description("FaceFXAnimSet export (UIndex, path or unique name).")] string export,
+        [Description("Copies: each has source (existing line name) and name (new line name).")] FaceFxLineCopy[] lines,
+        [Description("Keep the source line's sound cue (plays the template voice).")] bool withSound = false,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => FaceFxSets.CopyLines(PackageTools.ParseGame(game), package, export, lines, withSound));
+
     [McpServerTool(Name = "conv_set_ids", Destructive = true),
      Description("Gives an LE1 BioConversation a new m_nResRefID and renumbers its node ids (entry/reply nExportID and the matching "
                  + "BioSeqEvt_ConvNode m_nNodeID/m_nConvResRefID), as LEX's ChangeConvoIDandConvNodeIDs. Run it on a conversation copied "
