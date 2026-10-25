@@ -1,56 +1,48 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
-using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Unreal;
 
 namespace MeleMcp.Core;
 
-public sealed record PropertyEdit(string Path, int UIndex, string Export, string PropertyPath, string OldValue, string NewValue, string BackupPath);
+public sealed record PropertyChange(string Export, string PropertyPath, string Value);
+
+public sealed record AppliedChange(int UIndex, string Export, string PropertyPath, string OldValue, string NewValue);
+
+public sealed record PropertyEdits(string Path, IReadOnlyList<AppliedChange> Changes, string BackupPath);
 
 public static partial class PropertyEditor
 {
-    /// <summary>Backups go outside the mod folder, otherwise M3 would install them into the game.</summary>
-    public const string BackupDirEnvVar = "MELE_BACKUP_DIR";
-    private const string DefaultBackupDir = @"D:\MELE\backups\mele-mcp";
-
     [GeneratedRegex(@"^(?<name>[^.\[\]]+)(\[(?<index>\d+)\])?$")]
     private static partial Regex Segment();
 
     /// <summary>
-    /// Sets one leaf property addressed by a path such as <c>VectorParameterValues[11].ParameterValue.G</c>,
-    /// after copying the package to the backup folder.
+    /// Sets leaf properties addressed by paths such as <c>VectorParameterValues[11].ParameterValue.G</c>, then saves once.
+    /// All changes are validated before anything is written: one bad path leaves the file untouched.
     /// </summary>
-    public static PropertyEdit SetProperty(MEGame game, string fileOrPath, string export, string propertyPath, string value)
+    public static PropertyEdits SetProperties(MEGame game, string fileOrPath, IReadOnlyList<PropertyChange> changes)
     {
-        using var pcc = PackageInspector.Open(game, fileOrPath);
-        EnsureWritable(pcc);
-        var exp = ExportInspector.Resolve(pcc, export);
+        if (changes.Count == 0) throw new ArgumentException("No changes given.");
 
-        var props = exp.GetProperties();
-        var leaf = Navigate(props, propertyPath);
-        var oldValue = ExportInspector.FormatScalar(pcc, leaf);
-        Assign(pcc, leaf, value);
-
-        var backup = Backup(pcc.FilePath);
-        exp.WriteProperties(props);
-        pcc.Save();
-
-        return new PropertyEdit(pcc.FilePath, exp.UIndex, exp.InstancedFullPath, propertyPath, oldValue,
-            ExportInspector.FormatScalar(pcc, leaf), backup);
-    }
-
-    /// <summary>
-    /// The game install is a deploy target, never an edit target: a file name can resolve to the base game or to another
-    /// mod's installed copy (e.g. LE1CP overrides many level files). Edits go to the mod's source folder in the M3 library.
-    /// </summary>
-    private static void EnsureWritable(IMEPackage pcc)
-    {
-        var gameRoot = MEDirectories.GetDefaultGamePath(pcc.Game);
-        if (gameRoot != null && pcc.FilePath.StartsWith(Path.GetFullPath(gameRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        var (applied, backup) = PackageWriter.Edit(game, fileOrPath, pcc =>
         {
-            throw new InvalidOperationException($"Refusing to modify a file inside the game install ({pcc.FilePath}). Edit the mod's copy in the M3 library, then install or copy it.");
-        }
+            var touched = new Dictionary<ExportEntry, PropertyCollection>();
+            var results = new List<AppliedChange>();
+            foreach (var change in changes)
+            {
+                var exp = ExportInspector.Resolve(pcc, change.Export);
+                if (!touched.TryGetValue(exp, out var props)) touched[exp] = props = exp.GetProperties();
+
+                var leaf = Navigate(props, change.PropertyPath);
+                var oldValue = ExportInspector.FormatScalar(pcc, leaf);
+                Assign(pcc, leaf, change.Value);
+                results.Add(new AppliedChange(exp.UIndex, exp.InstancedFullPath, change.PropertyPath, oldValue, ExportInspector.FormatScalar(pcc, leaf)));
+            }
+            foreach (var (exp, props) in touched) exp.WriteProperties(props);
+            return (results, pcc.FilePath);
+        });
+
+        return new PropertyEdits(applied.FilePath, applied.results, backup);
     }
 
     private static Property Navigate(PropertyCollection props, string propertyPath)
@@ -105,15 +97,5 @@ public static partial class PropertyEditor
             default:
                 throw new ArgumentException($"Cannot set a {leaf.PropType} directly. Address one of its fields, e.g. ParameterValue.G.");
         }
-    }
-
-    private static string Backup(string path)
-    {
-        var dir = Environment.GetEnvironmentVariable(BackupDirEnvVar);
-        dir = string.IsNullOrWhiteSpace(dir) ? DefaultBackupDir : GamePaths.ToWindowsPath(dir);
-        Directory.CreateDirectory(dir);
-        var target = System.IO.Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss-fff}_{System.IO.Path.GetFileName(path)}");
-        File.Copy(path, target);
-        return target;
     }
 }

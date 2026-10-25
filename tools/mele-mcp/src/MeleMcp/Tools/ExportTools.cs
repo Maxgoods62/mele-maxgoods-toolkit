@@ -39,14 +39,34 @@ public static class ExportTools
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => ExportInspector.GetReferencers(PackageTools.ParseGame(game), package, export));
 
+    private const string WriteRule =
+        " Backs the package up first. Refuses files inside the game install: edit the mod's copy in the M3 library.";
+
     [McpServerTool(Name = "export_set", Destructive = true),
-     Description("Sets one leaf property of an export and saves the package, after copying it to the backup folder. "
-                 + "Refuses base-game files: edit a copy inside a DLC_MOD_ folder. Returns old and new value and the backup path.")]
-    public static PropertyEdit ExportSet(
+     Description("Sets one leaf property of an export and saves the package." + WriteRule + " Returns old and new value and the backup path.")]
+    public static PropertyEdits ExportSet(
         [Description(PackageDescription)] string package,
         [Description(ExportDescription)] string export,
         [Description("Dot path to a leaf property, with [i] for array elements, e.g. VectorParameterValues[11].ParameterValue.G")] string propertyPath,
         [Description("New value: number, True/False, name, string, $123 for a TLK string ref, #123 for an object reference (0 = None).")] string value,
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
-        => ToolErrors.Run(() => PropertyEditor.SetProperty(PackageTools.ParseGame(game), package, export, propertyPath, value));
+        => ToolErrors.Run(() => PropertyEditor.SetProperties(PackageTools.ParseGame(game), package, [new PropertyChange(export, propertyPath, value)]));
+
+    [McpServerTool(Name = "export_set_batch", Destructive = true),
+     Description("Sets several leaf properties (any exports of one package) and saves once. All paths are validated before writing." + WriteRule)]
+    public static PropertyEdits ExportSetBatch(
+        [Description(PackageDescription)] string package,
+        [Description("Changes: each has export (UIndex/path/name), propertyPath (dot path, [i] for arrays) and value (same formats as export_set).")] PropertyChange[] changes,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => PropertyEditor.SetProperties(PackageTools.ParseGame(game), package, changes));
+
+    [McpServerTool(Name = "export_clone", Destructive = true),
+     Description("Duplicates an export and all its children; references inside the copy are relinked to the copied objects. "
+                 + "For a level actor (e.g. a BioPawn under TheWorld.PersistentLevel) the copy is added to the level's Actors list." + WriteRule)]
+    public static CloneResult ExportClone(
+        [Description(PackageDescription)] string package,
+        [Description(ExportDescription)] string export,
+        [Description("Add the copy to TheWorld.PersistentLevel's Actors list (required for an actor to exist in game).")] bool addToLevelActors = true,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => ExportCloner.CloneTree(PackageTools.ParseGame(game), package, export, addToLevelActors));
 }

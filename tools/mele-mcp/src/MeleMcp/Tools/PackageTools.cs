@@ -16,6 +16,16 @@ public static class PackageTools
         [Description("How many export classes to list.")] int topClasses = 15)
         => ToolErrors.Run(() => PackageInspector.Summarize(ParseGame(game), package, topClasses));
 
+    [McpServerTool(Name = "pkg_find_name", ReadOnly = true),
+     Description("Finds loaded packages whose name table contains a substring: tags, object names, Kismet variable names... "
+                 + "Answers 'which files mention X'. Narrow with fileFilter (wildcards * and ?), a full scan of LE1 takes a while.")]
+    public static NameSearchResult PkgFindName(
+        [Description("Case-insensitive substring of a name, e.g. nor10_doctor.")] string nameContains,
+        [Description("File name wildcard, e.g. BIOA_NOR10*. Default: all packages.")] string fileFilter = "*",
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1",
+        [Description("Maximum files returned (FilesScanned still counts all).")] int limit = 100)
+        => ToolErrors.Run(() => NameFinder.Find(ParseGame(game), nameContains, fileFilter, limit));
+
     internal static MEGame ParseGame(string game) => game.Trim().ToUpperInvariant() switch
     {
         "LE1" => MEGame.LE1,

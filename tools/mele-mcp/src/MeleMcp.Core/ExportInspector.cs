@@ -35,6 +35,11 @@ public static class ExportInspector
 
         var sb = new StringBuilder();
         sb.Append('#').Append(exp.UIndex).Append(' ').Append(exp.ClassName).Append(' ').AppendLine(exp.InstancedFullPath);
+        sb.Append("  [header] NetIndex=").Append(exp.NetIndex)
+          .Append(" ObjectFlags=").Append(exp.ObjectFlags)
+          .Append(" ExportFlags=").Append(exp.ExportFlags)
+          .Append(" Archetype=").Append(DescribeEntry(pcc, exp.idxArchetype))
+          .Append(" DataSize=").Append(exp.DataSize).AppendLine();
         foreach (var prop in exp.GetProperties())
         {
             Write(sb, pcc, Label(prop), prop, depth: 1);
@@ -74,7 +79,7 @@ public static class ExportInspector
         };
     }
 
-    private static ExportRow Row(IEntry e) => new(e.UIndex, e.ClassName, e.InstancedFullPath);
+    internal static ExportRow Row(IEntry e) => new(e.UIndex, e.ClassName, e.InstancedFullPath);
 
     private static string Label(Property p) =>
         p.StaticArrayIndex > 0 ? $"{p.Name.Instanced}[{p.StaticArrayIndex}]" : p.Name.Instanced;

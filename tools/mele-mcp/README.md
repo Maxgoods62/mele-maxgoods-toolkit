@@ -17,17 +17,20 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `le_refresh_files` | Forget the cached game/DLC file list (call after installing or copying files) |
 | `pkg_info` | Package summary: names/imports/exports, embedded LE1 talk files, top export classes. Takes a file name (highest mounted copy) or a Windows or `/mnt/<drive>/` path |
 | `pkg_search` | Exports filtered by exact class and/or path substring → UIndex, class, instanced full path |
-| `export_get` | One export's properties as an indented tree; object references resolved to class, path, UIndex |
+| `pkg_find_name` | Loaded packages whose name table contains a substring (tags, object and Kismet names), optional file wildcard. Partial load: no export data read |
+| `export_get` | One export's header (NetIndex, flags, archetype, size) and properties as an indented tree; object references resolved to class, path, UIndex |
 | `export_refs` | Exports in the same package that reference an export, and via which property |
-| `export_set` | Set one leaf property by path (`VectorParameterValues[11].ParameterValue.G`), save. Backup first to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) |
+| `export_set` | Set one leaf property by path (`VectorParameterValues[11].ParameterValue.G`), save |
+| `export_set_batch` | Several leaf properties, any exports of one package, validated together, one save |
+| `export_clone` | Duplicate an export and its children (references inside the copy relinked); a level actor is added to the level's `Actors` list |
 
-**Write rule:** `export_set` refuses any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
+**Write rule:** the write tools (`export_set*`, `export_clone`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
 
 ## Layout
 
 | Path | Content |
 |---|---|
-| `src/MeleMcp.Core/` | Facade over LEC (`LecHost` init, `GamePaths`, `PackageInspector`). No MCP dependency. |
+| `src/MeleMcp.Core/` | Facade over LEC (`LecHost` init, `GamePaths`, `PackageInspector`, `ExportInspector`, `NameFinder`). Writes go through `PackageWriter.Edit` (guard, mutate, backup, save). No MCP dependency. |
 | `src/MeleMcp/` | stdio MCP host (`Program.cs`) and tool classes (`Tools/`) |
 | `external/LegendaryExplorer/` | LEX submodule, pinned at tag `6.5.0.6522` (commit `43bf73a`) |
 | `scripts/deploy.sh` | Stop running server → publish to `D:\MELE\tools\mele-mcp` → smoke test |
