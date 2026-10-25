@@ -51,8 +51,11 @@ public static class ExportTools
     private const string WriteRule =
         " Backs the package up first. Refuses files inside the game install: edit the mod's copy in the M3 library.";
 
+    private const string MissingRule =
+        " A property the export lacks (still at its class default, e.g. Originator on a new Kismet event) is created when its class declares it.";
+
     [McpServerTool(Name = "export_set", Destructive = true),
-     Description("Sets one leaf property of an export and saves the package." + WriteRule + " Returns old and new value and the backup path.")]
+     Description("Sets one leaf property of an export and saves the package." + MissingRule + WriteRule + " Returns old and new value and the backup path.")]
     public static PropertyEdits ExportSet(
         [Description(PackageDescription)] string package,
         [Description(ExportDescription)] string export,
@@ -62,7 +65,7 @@ public static class ExportTools
         => ToolErrors.Run(() => PropertyEditor.SetProperties(PackageTools.ParseGame(game), package, [new PropertyChange(export, propertyPath, value)]));
 
     [McpServerTool(Name = "export_set_batch", Destructive = true),
-     Description("Sets several leaf properties (any exports of one package) and saves once. All paths are validated before writing." + WriteRule)]
+     Description("Sets several leaf properties (any exports of one package) and saves once. All paths are validated before writing." + MissingRule + WriteRule)]
     public static PropertyEdits ExportSetBatch(
         [Description(PackageDescription)] string package,
         [Description("Changes: each has export (UIndex/path/name), propertyPath (dot path, [i] for arrays) and value (same formats as export_set).")] PropertyChange[] changes,
@@ -78,6 +81,16 @@ public static class ExportTools
         [Description("Add the copy to TheWorld.PersistentLevel's Actors list (required for an actor to exist in game).")] bool addToLevelActors = true,
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => ExportCloner.CloneTree(PackageTools.ParseGame(game), package, export, addToLevelActors));
+
+    [McpServerTool(Name = "export_rename", Destructive = true),
+     Description("Renames an export (children move with it). Use it after export_clone/export_import of a forced-export object "
+                 + "(actor type, conversation package) so it gets its own path: two loaded files with the same path share one object." + WriteRule)]
+    public static RenameResult ExportRename(
+        [Description(PackageDescription)] string package,
+        [Description(ExportDescription)] string export,
+        [Description("New object name; a trailing _<n> becomes the instance number, as in LEX.")] string newName,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => ExportCloner.Rename(PackageTools.ParseGame(game), package, export, newName));
 
     [McpServerTool(Name = "export_import", Destructive = true),
      Description("Copies an export from another package into the target package, with everything it references (LEX 'clone all references'). "

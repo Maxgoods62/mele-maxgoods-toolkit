@@ -1,5 +1,6 @@
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Packages.CloningImportingAndRelinking;
+using LegendaryExplorerCore.Unreal;
 
 namespace MeleMcp.Core;
 
@@ -36,4 +37,30 @@ public static class ExportCloner
 
         return new CloneResult(path, source, copy, count, added, backup);
     }
+
+    /// <summary>
+    /// Renames an export; its children move with it. Use it to give a copied forced-export object (actor type,
+    /// conversation package) its own path: two loaded files with the same forced-export path share one object.
+    /// </summary>
+    public static RenameResult Rename(MEGame game, string fileOrPath, string export, string newName)
+    {
+        var ((before, after, path), backup) = PackageWriter.Edit(game, fileOrPath, pcc =>
+        {
+            var target = ExportInspector.Resolve(pcc, export);
+            var oldRow = ExportInspector.Row(target);
+            var name = NameReference.FromInstancedString(newName);
+            var newPath = target.Parent is null ? name.Instanced : $"{target.Parent.InstancedFullPath}.{name.Instanced}";
+            if (pcc.FindEntry(newPath) is { } existing)
+            {
+                throw new ArgumentException($"{newPath} already exists (#{existing.UIndex}).");
+            }
+
+            target.ObjectName = name;
+            return (oldRow, ExportInspector.Row(target), pcc.FilePath);
+        });
+
+        return new RenameResult(path, before, after, backup);
+    }
 }
+
+public sealed record RenameResult(string Path, ExportRow Before, ExportRow After, string BackupPath);

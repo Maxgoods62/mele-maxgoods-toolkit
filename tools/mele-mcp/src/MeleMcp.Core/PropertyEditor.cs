@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Unreal;
+using LegendaryExplorerCore.Unreal.ObjectInfo;
 
 namespace MeleMcp.Core;
 
@@ -33,7 +34,7 @@ public static partial class PropertyEditor
                 var exp = ExportInspector.Resolve(pcc, change.Export);
                 if (!touched.TryGetValue(exp, out var props)) touched[exp] = props = exp.GetProperties();
 
-                var leaf = Navigate(props, change.PropertyPath);
+                var leaf = Navigate(pcc, exp, props, change.PropertyPath);
                 var oldValue = ExportInspector.FormatScalar(pcc, leaf);
                 Assign(pcc, leaf, change.Value);
                 results.Add(new AppliedChange(exp.UIndex, exp.InstancedFullPath, change.PropertyPath, oldValue, ExportInspector.FormatScalar(pcc, leaf)));
@@ -45,9 +46,10 @@ public static partial class PropertyEditor
         return new PropertyEdits(applied.FilePath, applied.results, backup);
     }
 
-    private static Property Navigate(PropertyCollection props, string propertyPath)
+    private static Property Navigate(IMEPackage pcc, ExportEntry exp, PropertyCollection props, string propertyPath)
     {
         var scope = props;
+        var container = exp.ClassName;
         Property? current = null;
         var segments = propertyPath.Split('.');
         for (var s = 0; s < segments.Length; s++)
@@ -57,6 +59,7 @@ public static partial class PropertyEditor
 
             var name = m.Groups["name"].Value;
             current = scope.FirstOrDefault(p => p.Name.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase))
+                ?? AddFromClassInfo(pcc, scope, name, container, s == 0 ? exp : null)
                 ?? throw new ArgumentException($"No property '{name}' here. Available: {string.Join(", ", scope.Where(p => p is not NoneProperty).Select(p => p.Name.Instanced))}");
 
             if (m.Groups["index"].Success)
@@ -69,11 +72,26 @@ public static partial class PropertyEditor
 
             if (s < segments.Length - 1)
             {
-                scope = current is StructProperty st ? st.Properties
-                    : throw new ArgumentException($"'{segments[s]}' is a {current.PropType}, not a struct, so the path cannot continue.");
+                if (current is not StructProperty st) throw new ArgumentException($"'{segments[s]}' is a {current.PropType}, not a struct, so the path cannot continue.");
+                scope = st.Properties;
+                container = st.StructType;
             }
         }
         return current!;
+    }
+
+    /// <summary>
+    /// A property still at its class default is not serialized, so a fresh object (kismet_add) lacks e.g. Originator or ObjValue.
+    /// Creates it with its default value when the class or struct declares it.
+    /// </summary>
+    private static Property? AddFromClassInfo(IMEPackage pcc, PropertyCollection scope, string name, string container, ExportEntry? exp)
+    {
+        var info = GlobalUnrealObjectInfo.GetPropertyInfo(pcc.Game, name, container, containingExport: exp);
+        if (info is null) return null;
+        var prop = GlobalUnrealObjectInfo.GetDefaultProperty(pcc.Game, name, info, null, pcc);
+        if (prop is null) return null;
+        scope.AddOrReplaceProp(prop);
+        return prop;
     }
 
     private static void Assign(IMEPackage pcc, Property leaf, string value)
