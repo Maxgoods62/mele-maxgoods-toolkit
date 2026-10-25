@@ -23,8 +23,9 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `export_set` | Set one leaf property by path (`VectorParameterValues[11].ParameterValue.G`), save |
 | `export_set_batch` | Several leaf properties, any exports of one package, validated together, one save |
 | `export_clone` | Duplicate an export and its children (references inside the copy relinked); a level actor is added to the level's `Actors` list |
+| `export_import` | Copy an export from another package with everything it references (LEX "clone all references"); globally loaded classes and assets become imports. Optional add to `Actors`. Refuses if the target already has that path |
 
-**Write rule:** the write tools (`export_set*`, `export_clone`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
+**Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
 
 ## Layout
 

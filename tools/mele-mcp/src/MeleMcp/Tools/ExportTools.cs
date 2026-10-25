@@ -69,4 +69,16 @@ public static class ExportTools
         [Description("Add the copy to TheWorld.PersistentLevel's Actors list (required for an actor to exist in game).")] bool addToLevelActors = true,
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => ExportCloner.CloneTree(PackageTools.ParseGame(game), package, export, addToLevelActors));
+
+    [McpServerTool(Name = "export_import", Destructive = true),
+     Description("Copies an export from another package into the target package, with everything it references (LEX 'clone all references'). "
+                 + "Assets from globally loaded files become imports. Returns the new export and the relink report." + WriteRule)]
+    public static PortResult ExportImport(
+        [Description("Source package: " + PackageDescription)] string sourcePackage,
+        [Description("Export in the source package: " + ExportDescription)] string export,
+        [Description("Target package (written): " + PackageDescription)] string targetPackage,
+        [Description("Parent in the target (UIndex or path). Default: the export with the source parent's path, e.g. TheWorld.PersistentLevel.")] string? targetParent = null,
+        [Description("Add the copy to the target level's Actors list (for actors).")] bool addToLevelActors = false,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => ExportPorter.Port(PackageTools.ParseGame(game), sourcePackage, export, targetPackage, targetParent, addToLevelActors));
 }
