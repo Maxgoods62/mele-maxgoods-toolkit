@@ -39,7 +39,7 @@ public static class ExportInspector
           .Append(" ObjectFlags=").Append(exp.ObjectFlags)
           .Append(" ExportFlags=").Append(exp.ExportFlags)
           .Append(" Archetype=").Append(DescribeEntry(pcc, exp.idxArchetype))
-          .Append(" DataSize=").Append(exp.DataSize).AppendLine();
+          .Append(" DataOffset=").Append(exp.DataOffset).Append(" DataSize=").Append(exp.DataSize).AppendLine();
         foreach (var prop in exp.GetProperties())
         {
             Write(sb, pcc, Label(prop), prop, depth: 1);
@@ -64,7 +64,8 @@ public static class ExportInspector
     {
         if (int.TryParse(export.TrimStart('#'), out var uIndex))
         {
-            return pcc.GetUExport(uIndex) ?? throw new ArgumentException($"No export with UIndex {uIndex} (exports are 1..{pcc.ExportCount}).");
+            // GetUExport indexes the list directly and throws ArgumentOutOfRangeException, so check the range first.
+            return pcc.IsUExport(uIndex) ? pcc.GetUExport(uIndex) : throw new ArgumentException($"No export with UIndex {uIndex} (exports are 1..{pcc.ExportCount}).");
         }
 
         var byPath = pcc.Exports.Where(e => e.InstancedFullPath.Equals(export, StringComparison.OrdinalIgnoreCase)).ToList();
