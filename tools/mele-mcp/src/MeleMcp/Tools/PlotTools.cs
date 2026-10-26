@@ -55,13 +55,4 @@ public static class PlotTools
         [Description("Plot package, instead of the file's 'package'.")] string? package = null,
         [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => PlotBuilder.Build(PackageTools.ParseGame(game), file, package));
-
-    [McpServerTool(Name = "mod_build", Destructive = true),
-     Description("Builds every YAML file in a mod's source folder: plot files (with transitions, consequences or quests) through plot_build, "
-                 + "level files (with npcs) through level_build, then conversation files (with 'conversation') through conv_build. Stops at "
-                 + "the first error, naming the file; files built before it stay saved.")]
-    public static ModBuildResult ModBuild(
-        [Description("Folder with the mod's YAML files, e.g. the repo's mods/<name>.")] string folder,
-        [Description("Game: LE1.")] string game = "LE1")
-        => ToolErrors.Run(() => ModBuilder.Build(PackageTools.ParseGame(game), folder));
 }
