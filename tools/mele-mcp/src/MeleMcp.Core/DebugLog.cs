@@ -56,6 +56,19 @@ public static partial class DebugLog
         return path;
     }
 
+    /// <summary>
+    /// Makes the DebugLogger write out what it holds: it flushes on warnings and errors, otherwise only every 5 s, so a
+    /// LogInternal answer can sit in its buffer. A getall answer is logged as an error, which flushes everything before it.
+    /// </summary>
+    internal static void Flush(MEGame game) => GameLink.Console(game, FlushCommand);
+
+    internal const string FlushCommand = "getall BioWorldInfo bHasPathNodes";
+
+    /// <summary>A line of FlushCommand's answer.</summary>
+    internal static bool IsFlushLine(string line) =>
+        line.Contains("appLogErrorf: ", StringComparison.Ordinal)
+        && (line.EndsWith(".bHasPathNodes = True", StringComparison.Ordinal) || line.EndsWith(".bHasPathNodes = False", StringComparison.Ordinal));
+
     /// <summary>The log's size now: where the next lines will start.</summary>
     internal static long Length(string path) => new FileInfo(path).Length;
 

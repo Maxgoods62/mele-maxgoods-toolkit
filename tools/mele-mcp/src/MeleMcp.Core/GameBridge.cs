@@ -23,6 +23,14 @@ public static class GameBridge
         [MEGame.LE3] = ("MassEffect3", 0x02AC00C5),
     };
 
+    /// <summary>
+    /// LEX Interop runs queued commands from its ProcessEvent hook, before the original call. A console command goes through
+    /// ProcessEvent itself, so commands queued together run nested, the last one first. A gap lets each one run alone.
+    /// </summary>
+    private const int MinGapMs = 50;
+    private static readonly object SendGate = new();
+    private static long _lastSend;
+
     public static string PipeName(MEGame game) => $"LEX_{game}_COMM_PIPE";
 
     /// <summary>The game's process name, e.g. MassEffect1.</summary>
@@ -42,20 +50,37 @@ public static class GameBridge
     public static void Send(MEGame game, string command)
     {
         if (command.Length >= 1024) throw new ArgumentException("Interop commands must be shorter than 1024 characters.");
-        using var pipe = Connect(game);
-        // Same framing as LEX: the trailing \r keeps old interop ASIs from reading past the end.
-        pipe.Write(Encoding.ASCII.GetBytes(command + "\0\r"));
-        pipe.Flush();
+        Paced(() =>
+        {
+            using var pipe = Connect(game);
+            // Same framing as LEX: the trailing \r keeps old interop ASIs from reading past the end.
+            pipe.Write(Encoding.ASCII.GetBytes(command + "\0\r"));
+            pipe.Flush();
+        });
     }
 
     /// <summary>Hands a package to the game from memory; the game's package lookup then finds it instead of the file on disk.</summary>
-    public static void SendPackage(MEGame game, string packageName, ReadOnlySpan<byte> data)
+    public static void SendPackage(MEGame game, string packageName, byte[] data)
     {
-        using var pipe = Connect(game);
-        pipe.Write(Encoding.ASCII.GetBytes($"PRECACHE_FILE {packageName} {data.Length}\0"));
-        pipe.Flush();
-        pipe.Write(data);
-        pipe.Flush();
+        Paced(() =>
+        {
+            using var pipe = Connect(game);
+            pipe.Write(Encoding.ASCII.GetBytes($"PRECACHE_FILE {packageName} {data.Length}\0"));
+            pipe.Flush();
+            pipe.Write(data);
+            pipe.Flush();
+        });
+    }
+
+    private static void Paced(Action send)
+    {
+        lock (SendGate)
+        {
+            var wait = _lastSend + MinGapMs - Environment.TickCount64;
+            if (wait > 0) Thread.Sleep((int)wait);
+            send();
+            _lastSend = Environment.TickCount64;
+        }
     }
 
     /// <summary>Sends a command and waits for the first reply that matches, ignoring replies that arrived before it.</summary>

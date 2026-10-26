@@ -34,6 +34,20 @@ public static class GameTools
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => LiveProperties.Get(PackageTools.ParseGame(game), className, property, nameContains, timeoutSeconds));
 
+    [McpServerTool(Name = "game_plot", Destructive = true),
+     Description("Reads, or reads then sets, LE1 plot variables in the running game (a save must be loaded), through BioWare's cheat "
+                 + "execs DumpPlotManagerValueByIndex / InitPlotManagerValueByIndex; answers come from the DebugLogger ASI's log. By id or "
+                 + "by name from LEX's plot databases (base game + ModPlotsLE1). Setting changes only the value: no transition, consequence "
+                 + "or journal update runs, and the change is saved with the next save. Test a conversation branch or quest step without replaying.")]
+    public static PlotValues GamePlot(
+        [Description("bool, int or float.")] string kind = "bool",
+        [Description("Plot ids, e.g. [8421, 8422].")] int[]? ids = null,
+        [Description("Also every id whose LEX database path contains this, e.g. Paragon.")] string? name = null,
+        [Description("Set this value after reading the current one (one id; Was holds the old value): True/False or 1/0 for a bool, a number for int and float. Omit to only read.")] string? value = null,
+        [Description("Seconds to wait for the answers (for each of read and set).")] double timeoutSeconds = 4,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LivePlot.Run(PackageTools.ParseGame(game), kind, ids ?? [], name, value, timeoutSeconds));
+
     [McpServerTool(Name = "game_log", ReadOnly = true),
      Description("Reads the DebugLogger ASI's log of the current or last game session (Binaries\\Win64\\Logs\\DebugLogger.log): UnrealScript "
                  + "LogInternal lines, warnings, and script errors with their arguments and locals. Filters: from the last load of a map, "

@@ -62,6 +62,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `game_console`, `game_stream_level`, `game_remote_event` | Fire-and-forget commands | sent, effect not checked |
 | `game_hot_reload` | Swap a streamed level for a package file under the name `<level>_LIVE<hhmmss>` | ⚠️ loads, but reverted within 2–4 s, see below |
 | `game_get` | A property of every live object of a class (subclasses too), through the console's `getall`, read back from `DebugLogger.log`: values, structs, arrays (one element per line); a wrong name returns the game's "Unrecognized ..." | ✅ `bTickIsDisabled`, `Location`, `StreamingStates` |
+| `game_plot` | LE1 plot bools, ints and floats in the running game, by id or by name from LEX's plot databases (base game + `ModPlotsLE1`); reads, then sets one id (`Was` keeps the old value); no transition or consequence runs. With MeleBridge: the plot table's own `GetBool`/`SetBool` (and Int, Float), answered on the pipe (`via: MeleBridge`). Without: BioWare's cheat execs `DumpPlotManagerValueByIndex` / `InitPlotManagerValueByIndex`, whose LogInternal answers are read from `DebugLogger.log`; that ASI writes info lines out only on a warning or every 5 s, so the wait sends a `getall` (logged as an error) each second. Commands queued together over LEX run nested, last first (LEX Interop runs them inside its `ProcessEvent` hook), so `GameBridge` leaves 50 ms between sends and the set waits for the read | ✅ both paths: ints 46/47 four times in a row, 10 bools, `Paragon` by name, bool 8440 False→True→False; 0.8 s through the bridge |
 | `game_log` | The DebugLogger ASI's log (`Binaries\Win64\Logs\DebugLogger.log`): from the last load of a map, errors only, text filter. Reads the file, no pipe | ✅ found the stasis in 06 §A.24 |
 | `game_kismet_log` | The Kismet Logger ASI's trace (`Binaries\Win64\Logs\KismetLogger.log`): every sequence op activated, in order, with level, instanced path (for `export_get`) and input pin; text filter, last N seconds, grouped with counts. Needs that ASI (M3 ASI Manager, dev-only). Conversation node ops show under the conversation's `_N` package | ✅ Dorn's squad prefab and conversation traced; paths resolve in `export_get` |
 | `game_screenshot` | PNG of the game window's client area (PrintWindow with `PW_RENDERFULLCONTENT`, so a covered windowed game still captures; screen copy as fallback), scaled to 1280 wide by default; returns the WSL path to open with Read | ✅ windowed, freighter |
@@ -73,6 +74,20 @@ Hot-reload notes:
 - The ASI serves precached bytes only for package names **not found on disk** (`FindPackageFile` hook), so reloading under the same name silently loads the disk file. Hence the `_LIVE` name.
 - The bytes must be **uncompressed** (LEX sends `SaveToStream(false)`). Sending a compressed file hung LE1: the engine's memory reader cannot decompress, falls back to opening the file by name, and that file is not on disk.
 - On LE1 + LE1CP the copy does not last. `BioTriggerStream.Touch`/`UnTouch` and Kismet `BioSeqAct_SetStreamingState` re-apply the area's streaming state (hand-streamed levels unload) and then call `SideloaderFramework.RunSideloader`, which re-forces every Sideloader level by name (`ClientUpdateLevelStreamingStatus`). Tested on the Normandy: reverted in 2–4 s with Shepard standing still. **Never fire LE1CP framework events by hand** (`Poll_NPC_*`, `Live_NPC_*`): it re-spawned several NPC files twice and hung LE1 in a loading loop. Streaming a framework-managed `BIONPC_*` file out and in also leaves the framework's NPC dormant (Chakwas vanished).
+
+**Live objects** (`live_*`, through our own ASI, [MeleBridge](../mele-bridge/README.md): request/reply on one pipe, run on the game thread, LEX may stay open):
+
+| Tool | What it does | Tested on LE1 |
+|---|---|---|
+| `live_find` | Live objects by class (subclasses, any package), name and path filters; paths for the tools below | ✅ 4 pawns in the freighter, the plot table |
+| `live_get` | One object's properties, all or one by path (`Location.X`, `Arr[2]`): enums as names, objects as paths, structs nested | ✅ pawn `Location`, `Tag`, `Physics` = `PHYS_Walking`, all 26 KB |
+| `live_set` | One property of one object in memory (JSON value; struct members, `Arr[i]`); returns the new value | ✅ `DrawScale` 1.5 then back to 1.0; a wrong name returns "no property 'Nope' in BioPawn". `bHidden true` changed the value but Dorn stayed visible: components take it in at attach time. `live_call SetHidden [true]` hid him (after setting the field back to false: SetHidden does nothing when the value does not change); his name and Talk prompt stay |
+| `live_call` | An UnrealScript function on one object through `ProcessEvent`, args as JSON; return and out values | ✅ `BioGlobalVariableTable.GetInt 46` = 272, `SetBool 8440` true then false |
+| `live_describe` | A class's chain, typed properties with their declaring class, function signatures | ✅ `BioGlobalVariableTable`, `BioPawn` |
+| `live_console` | A console command (player chain, cheats included) and what it printed or logged, read from the DebugLogger log between the command and a flushing `getall` | ✅ `getall BioPawn bTickIsDisabled`, `DumpPlotManagerValueByIndex 47 int` |
+| `live_watch` | `ProcessEvent` calls of functions for N seconds: time, object, class, params, Kismet input pin; overrides match (`Actor.Tick` catches `BioPawn.Tick`) | ✅ `Engine.Actor.Tick` |
+
+Requirements: `MeleBridge.asi` (`tools/mele-bridge/build.sh --install`, game closed). `game_plot` uses it when it is there.
 
 **Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_*` writers, `facefx_copy_lines`, `kismet_*`, `level_new`, `plot_map_new`, `plot_event_set`, `quest_set`, `plot_build`, `level_build`, `mod_build`) back the package up (and `AutoLoad.ini`, which `plot_build` edits) to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install it (`mod_install`, through M3) or copy it into the game.
 
@@ -219,7 +234,7 @@ A usable is made targetable (its behavior's `m_bTargetable` override: vanilla te
 
 | Path | Content |
 |---|---|
-| `src/MeleMcp.Core/` | Facade over LEC (`LecHost` init, `GamePaths`, `PackageInspector`, `ExportInspector`, `NameFinder`, `ScriptDecompiler`, `LevelCreator`, `TalkFiles`, `ConversationReader`/`ConversationEditor`, `FaceFxSets`, `KismetEditor`). Writes go through `PackageWriter.Edit` (guard, mutate, backup, save). Live link: `GameBridge` (pipe + reply window), `GameLink` (commands). No MCP dependency. |
+| `src/MeleMcp.Core/` | Facade over LEC (`LecHost` init, `GamePaths`, `PackageInspector`, `ExportInspector`, `NameFinder`, `ScriptDecompiler`, `LevelCreator`, `TalkFiles`, `ConversationReader`/`ConversationEditor`, `FaceFxSets`, `KismetEditor`). Writes go through `PackageWriter.Edit` (guard, mutate, backup, save). Live link: `GameBridge` (pipe + reply window), `GameLink` (commands), `LiveBridge` (MeleBridge client). No MCP dependency. |
 | `src/MeleMcp/` | stdio MCP host (`Program.cs`) and tool classes (`Tools/`) |
 | `external/LegendaryExplorer/` | LEX submodule, pinned at tag `6.5.0.6522` (commit `43bf73a`) |
 | `scripts/deploy.sh` | Stop running server → publish to `D:\MELE\tools\mele-mcp` → smoke test |
