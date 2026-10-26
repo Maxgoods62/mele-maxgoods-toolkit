@@ -14,7 +14,7 @@ public sealed record ModBuildResult(string Folder, IReadOnlyList<PlotBuildResult
 public static class ModBuilder
 {
     private static readonly string[] PlotKeys = ["transitions", "consequences", "quests"];
-    private static readonly string[] LevelKeys = ["npcs", "usables", "streaming", "startPoints"];
+    private static readonly string[] LevelKeys = ["npcs", "usables", "streaming", "characterLights", "startPoints", "squad"];
 
     public static ModBuildResult Build(MEGame game, string folder)
     {

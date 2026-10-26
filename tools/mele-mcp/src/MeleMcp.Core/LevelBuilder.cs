@@ -17,14 +17,14 @@ public sealed record BuiltNpc(string Name, ExportRow Pawn, string Action, IReadO
 /// <param name="Action">found (an actor of the level has the tag), imported (copied from the template's package) or cloned (from an actor of the level).</param>
 public sealed record BuiltUsable(string Name, ExportRow Actor, string Action, IReadOnlyList<string> Changes);
 
-/// <param name="LevelChanges">What this build changed in the level itself (streamed files, post-process, start points).</param>
+/// <param name="LevelChanges">What this build changed in the level itself (streamed files, post-process, character lights, start points, squad).</param>
 /// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
 public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, IReadOnlyList<BuiltUsable> Usables, int StringCount, IReadOnlyList<string> TlkFiles,
     string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
 
 /// <summary>
 /// Builds a Game 1 level from a YAML file. The level itself: vanilla sub-levels it shows and their stream volume, its
-/// post-process, start points (see <see cref="LevelStreams"/>). Its NPCs: the pawn (found by tag, else imported from a
+/// post-process, character lights, start points (see <see cref="LevelStreams"/>), the squad spawned on load (<see cref="SquadSpawns"/>). Its NPCs: the pawn (found by tag, else imported from a
 /// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
 /// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. A missing level is
 /// created, and the LE1CP Sideloader config that loads it is written.
@@ -79,8 +79,10 @@ public static class LevelBuilder
         public Source? LightTemplate;
         public LevelStreams.Spec? Streaming;
         public (string Package, int Line)? PostProcess;
+        public List<Source> CharacterLights = [];
         public Source? StartPointTemplate;
         public List<LevelStreams.StartPoint> StartPoints = [];
+        public (string Package, int Line)? Squad;
         public List<NpcSpec> Npcs = [];
         public List<UsableSpec> Usables = [];
         public readonly Dictionary<int, Dictionary<string, string>> Strings = [];
@@ -119,8 +121,17 @@ public static class LevelBuilder
             using var cache = new PackageCache();
             if (spec.Streaming is { } streaming) LevelStreams.SetStreaming(game, pcc, level, streaming, cache, levelChanges);
             if (spec.PostProcess is { } post) LevelStreams.SetPostProcess(game, pcc, level, post.Package, post.Line, levelChanges);
+            foreach (var light in spec.CharacterLights)
+            {
+                LevelStreams.SetLight(game, pcc, level, light.Package ?? throw new ArgumentException($"line {light.Line}: a character light needs a 'package'."), light.Actor, light.Line, levelChanges);
+            }
             var template = spec.StartPointTemplate is { } t ? (t.Package ?? throw new ArgumentException($"line {t.Line}: 'startPointTemplate' needs a 'package'."), t.Actor) : ((string, string)?)null;
             foreach (var start in spec.StartPoints) LevelStreams.SetStartPoint(game, pcc, level, start, template, levelChanges);
+            if (spec.Squad is { } squad)
+            {
+                var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {squad.Line}: the level has no {MainSequence}.");
+                SquadSpawns.Set(game, pcc, sequence, squad.Package, spec.Streaming?.Levels ?? [], squad.Line, cache, levelChanges);
+            }
             var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
             return (builtNpcs, spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList());
         });
@@ -540,7 +551,7 @@ public static class LevelBuilder
     {
         var spec = new Spec();
         foreach (var (key, value) in Entries(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "streaming", "postProcess",
-                     "startPointTemplate", "startPoints", "npcs", "usables"))
+                     "characterLights", "startPointTemplate", "startPoints", "squad", "npcs", "usables"))
         {
             switch (key)
             {
@@ -551,7 +562,14 @@ public static class LevelBuilder
                 case "lightTemplate": spec.LightTemplate = SourceOf(value); break;
                 case "streaming": spec.Streaming = StreamingOf(value); break;
                 case "postProcess": spec.PostProcess = (Scalar(value), (int)value.Start.Line); break;
+                case "characterLights": spec.CharacterLights = Sequence(value).Select(SourceOf).ToList(); break;
                 case "startPointTemplate": spec.StartPointTemplate = SourceOf(value); break;
+                case "squad":
+                    if (value is not YamlMappingNode squad) throw Fail(value, "'squad' is {package: <mission map with BioWare's party prefab>}.");
+                    string? squadPackage = null;
+                    foreach (var (k, v) in Entries(squad, "package")) squadPackage = Scalar(v);
+                    spec.Squad = (squadPackage ?? throw Fail(value, "'squad' needs 'package'."), (int)value.Start.Line);
+                    break;
                 case "startPoints":
                     if (value is not YamlMappingNode starts) throw Fail(value, "'startPoints' maps tags to {location: [x, y, z], yaw: <degrees>}.");
                     spec.StartPoints = starts.Children.Select(c => StartPointOf(Scalar(c.Key), c.Value)).ToList();

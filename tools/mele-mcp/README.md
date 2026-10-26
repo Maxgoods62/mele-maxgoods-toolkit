@@ -144,7 +144,7 @@ Every event and quest in the file replaces the package's; the others are kept an
 
 ## level_build YAML
 
-Examples: [`mods/claude-chakwas/level.yaml`](../../mods/claude-chakwas/level.yaml) (an NPC), [`mods/claude-chakwas/cabin.yaml`](../../mods/claude-chakwas/cabin.yaml) (a location). Every top-level key but `package` is optional.
+Examples: [`mods/claude-chakwas/level.yaml`](../../mods/claude-chakwas/level.yaml) (an NPC), [`mods/claude-chakwas/cabin.yaml`](../../mods/claude-chakwas/cabin.yaml) (a location), [`mods/claude-chakwas/freighter.yaml`](../../mods/claude-chakwas/freighter.yaml) (a location with the squad). Every top-level key but `package` is optional.
 
 ```yaml
 package: 'D:\...\CookedPCConsole\ClaudeNPC_NOR10.pcc'   # created (empty level) if missing; full path only
@@ -161,6 +161,9 @@ postProcess: BIOA_NOR00.pcc                                          # copy that
 startPointTemplate: { package: BIOA_NOR00.pcc, actor: BioStartPoint_23 }   # imported for a start point the level does not have
 startPoints:
   start_cld00: { location: [-6266.2, 12822.5, -36737], yaw: 0 }   # Tag → at <map> start_cld00
+characterLights:               # light actors copied as they are, e.g. a map's character lights from its _DSG file
+  - { package: BIOA_FRE31_00_DSG.pcc, actor: StaticLightCollectionActor_68 }
+squad: { package: BIOA_FRE31.pcc }   # party selection on load, then the picked henchmen spawn and follow (that file's squad prefab)
 
 npcs:
   reyes:                       # a label for the result
@@ -195,7 +198,9 @@ Every value given is enforced; a value left out stays as it is. Only values that
 
 A usable is made targetable (its behavior's `m_bTargetable` override: vanilla terminals wait for their story's Kismet). `goTo` Kismet in `Main_Sequence`: `BioSeqEvt_ArtPlaceableUsed` (Originator = the usable) → `BioSeqAct_AreaTransition`.
 
-`streaming` gives the volume one `Default` state whose `VisibleChunkNames` are the `levels`: they show while the player is inside it, including when spawned there. The volume is found again by its source name; a start point by its tag, and it is put on the level's navigation list.
+`streaming` gives the volume one `Default` state whose `VisibleChunkNames` are the `levels`: they show while the player is inside it, including when spawned there. Its `InChunkName` is the first level: without one, pawns that touch the volume stay in stasis (no AI, no light update). The volume is found again by its source name; a start point by its tag, and it is put on the level's navigation list, blocked (`bBlocked`): it has no paths, so it must not be where AI paths start. The level's `BioWorldInfo` says it has a path network (`bPathsRebuilt`, `bHasPathNodes`), as vanilla persistent levels do.
+
+`squad` Kismet in `Main_Sequence`: level loaded and visible → `SeqAct_WaitForLevelsVisible` (the `streaming` levels) → cinematic mode on → black screen → party selection screen → cinematic mode off → remote event `Hench_SetupSquad`, which runs the copied squad prefab (the `SequenceReference` around the package's `BioSeqAct_ShowPartySelectionGUI`); its `Setup Done` → screen back on.
 
 `idle` Kismet in `Main_Sequence`: level loaded and visible → prefab `In`; with a conversation, use → `BioSeqAct_LeaveActionStation` and conversation `Out` (its end: the start action is latent) → prefab `In`. The prefab's `Teleport`, `Snap To Pose`, `Coll/PhysOFF` and `SnapToFloor` get a false bool, so she stays where `location` puts her. A new `pose` replaces the prefab (the old one is trashed, as LEX does).
 

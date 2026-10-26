@@ -1,6 +1,5 @@
 using LegendaryExplorerCore.Kismet;
 using LegendaryExplorerCore.Packages;
-using LegendaryExplorerCore.Packages.CloningImportingAndRelinking;
 using LegendaryExplorerCore.Unreal;
 
 namespace MeleMcp.Core;
@@ -43,14 +42,13 @@ internal static class IdleStations
         }
         if (station is null)
         {
-            station = Import(game, pcc, sequence, idle);
+            station = KismetPrefabs.Import(game, pcc, sequence, idle.Package, source => Prefab(source, idle));
             changes.Add($"idle {idle.Pose} (prefab from {idle.Package})");
         }
 
         SetVariables(sequence, station, pawnVar, idle, cache, changes);
 
-        var loaded = objects.FirstOrDefault(o => o.ClassName == "SeqEvent_LevelLoaded") ?? SequenceObjectCreator.CreateSequenceObject(sequence, "SeqEvent_LevelLoaded", cache);
-        Link(loaded, "Loaded and Visible", station, changes, "Kismet: level loaded → idle");
+        KismetPrefabs.Link(KismetPrefabs.LevelLoaded(sequence, cache), "Loaded and Visible", station, changes, "Kismet: level loaded → idle");
         if (use is not null && start is not null)
         {
             var leave = objects.FirstOrDefault(o => o.ClassName == "BioSeqAct_LeaveActionStation" && Holds(o, "Pawn", pawn));
@@ -59,40 +57,21 @@ internal static class IdleStations
                 leave = SequenceObjectCreator.CreateSequenceObject(sequence, "BioSeqAct_LeaveActionStation", cache);
                 KismetHelper.CreateVariableLink(leave, "Pawn", pawnVar);
             }
-            Link(use, "Out", leave, changes, "Kismet: use → leave idle");
-            Link(start, "Out", station, changes, "Kismet: conversation end → idle");
+            KismetPrefabs.Link(use, "Out", leave, changes, "Kismet: use → leave idle");
+            KismetPrefabs.Link(start, "Out", station, changes, "Kismet: conversation end → idle");
         }
     }
 
-    /// <summary>
-    /// Copies the first prefab of the package whose station enters <see cref="Spec.Pose"/>. The source is opened fresh and changed
-    /// in memory only: its links to the vanilla Kismet around it are cut first, or the import would copy that Kismet too.
-    /// </summary>
-    private static ExportEntry Import(MEGame game, IMEPackage pcc, ExportEntry sequence, Spec idle)
+    /// <summary>The first prefab of the source whose station enters <see cref="Spec.Pose"/>.</summary>
+    private static ExportEntry Prefab(IMEPackage source, Spec idle)
     {
-        using var source = PackageInspector.Open(game, idle.Package);
         var station = source.Exports.FirstOrDefault(e => e.ClassName == "BioSeqAct_ActionStation"
                                                          && string.Equals(EntrancePose(e), idle.Pose, StringComparison.OrdinalIgnoreCase))
                       ?? throw new ArgumentException($"line {idle.Line}: {idle.Package} has no action station entering pose '{idle.Pose}'. "
                                                      + $"Poses there: {string.Join(", ", source.Exports.Where(e => e.ClassName == "BioSeqAct_ActionStation").Select(EntrancePose).OfType<string>().Distinct().Order())}.");
         IEntry? prefab = station;
         while (prefab is not null && prefab.ClassName != "SequenceReference") prefab = prefab.Parent;
-        if (prefab is not ExportEntry reference) throw new ArgumentException($"line {idle.Line}: the {idle.Pose} station in {idle.Package} is not inside a prefab (SequenceReference).");
-
-        KismetHelper.RemoveAllLinks(reference);
-        var props = reference.GetProperties();
-        props.RemoveNamedProperty("ParentSequence");
-        reference.WriteProperties(props);
-        // A free name: an import onto an existing path links to it instead of copying.
-        var index = 1;
-        while (pcc.FindEntry($"{sequence.InstancedFullPath}.{new NameReference("SequenceReference", index).Instanced}") is not null) index++;
-        reference.ObjectName = new NameReference("SequenceReference", index);
-
-        var rop = new RelinkerOptionsPackage { Cache = new PackageCache() };
-        EntryImporter.ImportAndRelinkEntries(EntryImporter.PortingOption.CloneAllDependencies, reference, pcc, sequence, true, rop, out var entry);
-        var copy = entry as ExportEntry ?? throw new InvalidOperationException("The import did not create an export.");
-        KismetHelper.AddObjectToSequence(copy, sequence);
-        return copy;
+        return prefab as ExportEntry ?? throw new ArgumentException($"line {idle.Line}: the {idle.Pose} station in {idle.Package} is not inside a prefab (SequenceReference).");
     }
 
     /// <summary>Pawn, the switches (off) and the given weights; every other slot empty. Writes only when a slot differs.</summary>
@@ -145,15 +124,6 @@ internal static class IdleStations
         {
             if (KismetHelper.FindVariableConnectionsToNode(variable, objects).Count == 0) KismetHelper.RemoveFromSequence(variable, trash: true);
         }
-    }
-
-    private static void Link(ExportEntry from, string output, ExportEntry to, List<string> changes, string change)
-    {
-        var index = KismetHelper.GetOutputLinkNames(from).IndexOf(output);
-        if (index < 0) throw new InvalidOperationException($"#{from.UIndex} {from.ClassName} has no output '{output}'.");
-        if (KismetHelper.GetOutputLinksOfNode(from)[index].Any(o => o.LinkedOp == to && o.InputLinkIdx == 0)) return;
-        KismetHelper.CreateOutputLink(from, output, to, 0);
-        changes.Add(change);
     }
 
     private static bool Holds(ExportEntry obj, string slot, ExportEntry pawn) =>

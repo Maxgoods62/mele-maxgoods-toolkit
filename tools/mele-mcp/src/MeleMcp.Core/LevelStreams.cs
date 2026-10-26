@@ -8,7 +8,7 @@ namespace MeleMcp.Core;
 
 /// <summary>
 /// What makes a level of its own a place to go: vanilla sub-levels it shows (a Normandy room, by its _ART and _LAY files),
-/// its post-process, and start points. Game 1 shows sub-levels the BioWare way: BioWorldInfo.StreamingLevels lists them
+/// its post-process, character lights, and start points. Game 1 shows sub-levels the BioWare way: BioWorldInfo.StreamingLevels lists them
 /// (LevelStreamingKismet), and a BioTriggerStream volume makes them visible while the player is inside it. The volume is a
 /// copy of the vanilla one around the same room, so it has the room's place and shape.
 /// </summary>
@@ -61,15 +61,45 @@ internal static class LevelStreams
             throw new ArgumentException($"line {spec.Line}: the level's {volume.InstancedFullPath} is a {volume.ClassName}, not a BioTriggerStream.");
         }
 
-        // One state, the one a volume applies when the player enters it.
+        // One state, the one a volume applies when the player enters it. Its InChunkName is the chunk (files by name prefix)
+        // the volume is in, which every vanilla volume names: pawns that touch the volume go through its stasis check
+        // (BioTriggerStream.DoStasis), and without it they stay in stasis, not ticking: no AI, no light update.
         var visible = new ArrayProperty<NameProperty>(spec.Levels.Select(l => new NameProperty(l)), "VisibleChunkNames");
         var states = new ArrayProperty<StructProperty>("StreamingStates")
         {
-            new("BioStreamingState", [visible, new NameProperty("Default", "StateName")]),
+            new("BioStreamingState", [visible, new NameProperty("Default", "StateName"), new NameProperty(spec.Levels[0], "InChunkName")]),
         };
         var props = volume.GetProperties();
         props.AddOrReplaceProp(states);
         if (Write(volume, props)) changes.Add($"stream volume shows {string.Join(", ", spec.Levels)}");
+
+        // The shown files bring their path network (PathNodes, ReachSpecs). Every vanilla persistent level says it has one,
+        // even with no node of its own (BIOA_NOR00, BIOA_FRE31).
+        var infoProps = worldInfo.GetProperties();
+        infoProps.AddOrReplaceProp(new BoolProperty(true, "bPathsRebuilt"));
+        infoProps.AddOrReplaceProp(new BoolProperty(true, "bHasPathNodes"));
+        if (Write(worldInfo, infoProps)) changes.Add("has a path network (bPathsRebuilt, bHasPathNodes)");
+    }
+
+    /// <summary>
+    /// A light actor copied from another level, e.g. the character lights a vanilla map keeps in its _DSG file: lights of
+    /// the dynamic channels only, which light pawns and not the walls. A level that shows the map's _LAY file but not its
+    /// _DSG (scripts, enemies) has none.
+    /// </summary>
+    internal static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, string package, string actor, int line, List<string> changes)
+    {
+        // Found again by its name: an import keeps the source's.
+        var name = actor.Contains('.') ? actor[(actor.LastIndexOf('.') + 1)..] : actor;
+        if (pcc.FindExport($"{LevelPath}.{name}") is { } existing)
+        {
+            if (!existing.ClassName.Contains("Light")) throw new ArgumentException($"line {line}: the level's {existing.InstancedFullPath} is a {existing.ClassName}, not a light.");
+            return;
+        }
+        using var source = PackageInspector.Open(game, package);
+        var original = Resolve(source, actor, line);
+        if (!original.ClassName.Contains("Light")) throw new ArgumentException($"line {line}: {original.InstancedFullPath} is a {original.ClassName}, not a light.");
+        Import(pcc, level, original);
+        changes.Add($"lights (copy of {package} {original.ObjectName.Instanced})");
     }
 
     /// <summary>The DefaultPostProcessSettings of another level's BioWorldInfo: its color grading, bloom and depth of field.</summary>
@@ -95,9 +125,12 @@ internal static class LevelStreams
             using var source = PackageInspector.Open(game, package);
             var original = Resolve(source, actor, start.Line);
             if (original.ClassName != "BioStartPoint") throw new ArgumentException($"line {start.Line}: {original.InstancedFullPath} is a {original.ClassName}, not a BioStartPoint.");
-            // The next point of the vanilla list is not ours: cut it, or the import would copy the whole list.
+            // Its navigation links are the vanilla level's (the next point of its list, its paths): cut them, or the import
+            // would copy the whole list and the path network around it.
             var originalProps = original.GetProperties();
             originalProps.RemoveNamedProperty("nextNavigationPoint");
+            originalProps.RemoveNamedProperty("PathList");
+            originalProps.RemoveNamedProperty("bHasCrossLevelPaths");
             original.WriteProperties(originalProps);
             original.ObjectName = pcc.GetNextIndexedName("BioStartPoint");
             point = Import(pcc, level, original);
@@ -106,6 +139,9 @@ internal static class LevelStreams
 
         var props = point.GetProperties();
         props.AddOrReplaceProp(new NameProperty(start.Tag, "Tag"));
+        // Without its paths it is a dead end, and the henchmen spawned next to it start their paths from it (their anchor,
+        // the nearest usable navigation point): "destination blocked". Blocked, it is no anchor, and they start from the shown files' nodes.
+        props.AddOrReplaceProp(new BoolProperty(true, "bBlocked"));
         props.AddOrReplaceProp(CommonStructs.Vector3Prop(start.Location, "Location"));
         if (start.Yaw is { } yaw) props.AddOrReplaceProp(CommonStructs.RotatorProp(new Rotator(0, (int)Math.Round(yaw * 65536 / 360), 0), "Rotation"));
         if (Write(point, props)) changes.Add($"start point {start.Tag}");
