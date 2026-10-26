@@ -10,13 +10,15 @@ namespace MeleMcp.Core;
 /// <param name="Action">added (copied from its template), found (a node with its strref already exists) or existing (named E&lt;n&gt;/R&lt;n&gt;).</param>
 public sealed record BuiltNode(string Name, string Label, string Action, int? StrRef, IReadOnlyList<string> Changes);
 
-public sealed record ConvBuildResult(string Path, ExportRow Conversation, IReadOnlyList<BuiltNode> Nodes, IReadOnlyList<string> Start,
+/// <param name="Created">The copy of the 'from' template, when the package had no conversation of that name.</param>
+public sealed record ConvBuildResult(string Path, ExportRow Conversation, ConvCreated? Created, IReadOnlyList<BuiltNode> Nodes, IReadOnlyList<string> Start,
     int StringCount, IReadOnlyList<string> TlkFiles, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
 
 /// <summary>
 /// Builds a Game 1 conversation from a YAML file: lines (copied from template nodes), text in every language, plot
-/// conditions and transitions, wheels, replies' next lines and the starting list. Running it again changes nothing new:
-/// a line is found by its strref, and every list given in the file replaces the one in the conversation.
+/// conditions and transitions, wheels, replies' next lines and the starting list. A missing conversation is copied from
+/// the file's 'from' template. Running it again changes nothing new: the conversation is found by its name, a line by
+/// its strref, and every list given in the file replaces the one in the conversation.
 /// </summary>
 public static partial class ConversationBuilder
 {
@@ -36,6 +38,8 @@ public static partial class ConversationBuilder
     private sealed record WheelSpec(int? StrRef, string? Category, Dictionary<string, string>? Text, int Line);
 
     private sealed record Choice(Ref To, WheelSpec? Override);
+
+    private sealed record FromSpec(string Package, string Conversation, int ResRef, int NodeIds);
 
     private sealed class NodeSpec
     {
@@ -58,6 +62,7 @@ public static partial class ConversationBuilder
     {
         public string? Package;
         public string? Conversation;
+        public FromSpec? From;
         public string DefaultLanguage = "INT";
         public List<string> GlobalTlk = [];
         public List<Ref>? Start;
@@ -83,16 +88,28 @@ public static partial class ConversationBuilder
         var backups = new List<string>();
         var tlkFiles = new List<string>();
 
-        var ((row, built, start, path), backup) = PackageWriter.Edit(game, package, pcc =>
+        var ((row, created, built, start, path), backup) = PackageWriter.Edit(game, package, pcc =>
         {
-            var conv = ExportInspector.Resolve(pcc, conversation);
+            var conv = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioConversation" && (e.ObjectName.Instanced.Equals(conversation, StringComparison.OrdinalIgnoreCase)
+                                                                                           || e.InstancedFullPath.Equals(conversation, StringComparison.OrdinalIgnoreCase)));
+            ConvCreated? created = null;
+            if (conv is null && spec.From is { } from)
+            {
+                (conv, created) = ConversationEditor.CreateIn(game, pcc, from.Package, from.Conversation, conversation, from.ResRef, from.NodeIds);
+                notes.Add($"Created {conv.InstancedFullPath} from {from.Conversation}: {created.NewExports} exports, resref {from.ResRef}, node ids from {from.NodeIds}, plot removed from {created.PlotCleared} nodes.");
+            }
+            if (conv is null && !conversation.StartsWith('#'))
+            {
+                throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no BioConversation '{conversation}'. Give 'from' (a conversation to copy, with resref and nodeIds) to create it.");
+            }
+            conv ??= ExportInspector.Resolve(pcc, conversation);
             if (conv.ClassName != "BioConversation") throw new ArgumentException($"#{conv.UIndex} is a {conv.ClassName}, not a BioConversation.");
 
-            var labels = PlaceNodes(pcc, conv, spec, notes, out var actions);
-            var built = ApplyFields(game, conv, spec, labels, actions, strings, notes);
+            var labels = PlaceNodes(pcc, conv, spec, notes, out var placed);
+            var built = ApplyFields(game, conv, spec, labels, placed, strings, notes);
             var start = ApplyStart(conv, spec, labels);
             tlkFiles.AddRange(WriteLocalStrings(pcc, conv, strings, spec.DefaultLanguage));
-            return (ExportInspector.Row(conv), built, start, pcc.FilePath);
+            return (ExportInspector.Row(conv), created, built, start, pcc.FilePath);
         });
         backups.Add(backup);
 
@@ -104,14 +121,19 @@ public static partial class ConversationBuilder
             tlkFiles.Add($"{Path.GetFileName(globalPath)} ({language})");
         }
 
-        return new ConvBuildResult(path, row, built, start, strings.Count, tlkFiles, notes, backups);
+        return new ConvBuildResult(path, row, created, built, start, strings.Count, tlkFiles, notes, backups);
     }
 
-    /// <summary>Pass 1: gives every node a label, adding the ones whose strref is not in the conversation yet.</summary>
-    private static Dictionary<string, string> PlaceNodes(IMEPackage pcc, ExportEntry conv, Spec spec, List<string> notes, out Dictionary<string, string> actions)
+    private sealed record Placed(string Action, List<string> Changes);
+
+    /// <summary>
+    /// Pass 1: gives every node a label, adding the ones whose strref is not in the conversation yet, and moves an
+    /// existing node to its 'strref' (with its voice track and lip sync).
+    /// </summary>
+    private static Dictionary<string, string> PlaceNodes(IMEPackage pcc, ExportEntry conv, Spec spec, List<string> notes, out Dictionary<string, Placed> placed)
     {
         var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        actions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        placed = new Dictionary<string, Placed>(StringComparer.OrdinalIgnoreCase);
         foreach (var node in spec.Nodes)
         {
             var props = conv.GetProperties();
@@ -119,8 +141,16 @@ public static partial class ConversationBuilder
             {
                 var (isReply, index) = ConversationEditor.ParseNode(node.Name);
                 if (index >= ConversationEditor.NodeList(props, isReply).Count) throw new ArgumentException($"line {node.Line}: {node.Name} does not exist.");
-                labels[node.Name] = node.Name.ToUpperInvariant();
-                actions[node.Name] = "existing";
+                var label = node.Name.ToUpperInvariant();
+                var changes = new List<string>();
+                if (node.StrRef is { } strRef && ConversationEditor.SetTextIn(pcc, conv, label, strRef) is { } retext)
+                {
+                    changes.Add($"strref ${retext.OldStrRef} → ${strRef}");
+                    if (retext.FaceFxLines.Count > 0) changes.Add($"lip sync {string.Join(", ", retext.FaceFxLines)}");
+                    notes.AddRange(retext.Notes.Select(n => $"{node.Name}: {n}"));
+                }
+                labels[node.Name] = label;
+                placed[node.Name] = new Placed("existing", changes);
                 continue;
             }
 
@@ -129,7 +159,7 @@ public static partial class ConversationBuilder
             if (found >= 0)
             {
                 labels[node.Name] = $"{(node.IsReply ? 'R' : 'E')}{found}";
-                actions[node.Name] = "found";
+                placed[node.Name] = new Placed("found", []);
                 continue;
             }
 
@@ -141,14 +171,14 @@ public static partial class ConversationBuilder
             }
             var added = ConversationEditor.AddNodeIn(pcc, conv, templateLabel, node.StrRef!.Value, node.Length, keepPlot: false);
             labels[node.Name] = added.Label;
-            actions[node.Name] = "added";
+            placed[node.Name] = new Placed("added", []);
             notes.AddRange(added.Notes.Select(n => $"{node.Name}: {n}"));
         }
         return labels;
     }
 
     /// <summary>Pass 2: plot fields, wheels, next lines and lengths; collects the strings to write.</summary>
-    private static List<BuiltNode> ApplyFields(MEGame game, ExportEntry conv, Spec spec, Dictionary<string, string> labels, Dictionary<string, string> actions,
+    private static List<BuiltNode> ApplyFields(MEGame game, ExportEntry conv, Spec spec, Dictionary<string, string> labels, Dictionary<string, Placed> placed,
                                                Dictionary<int, Dictionary<string, string>> strings, List<string> notes)
     {
         // Wheel text and category already used for each reply, for choices that do not give them.
@@ -173,7 +203,7 @@ public static partial class ConversationBuilder
             var (isReply, index) = ConversationEditor.ParseNode(label);
             var props = conv.GetProperties();
             var n = ConversationEditor.NodeList(props, isReply)[index].Properties;
-            var changes = new List<string>();
+            var changes = placed[node.Name].Changes;
             var strRef = n.GetProp<StringRefProperty>("srText")?.Value;
 
             if (node.Text is { } text)
@@ -241,12 +271,12 @@ public static partial class ConversationBuilder
             }
             conv.WriteProperties(props);
 
-            if (node.Length is { } length && actions[node.Name] != "added")
+            if (node.Length is { } length && placed[node.Name].Action != "added")
             {
                 if (ConversationEditor.SetLengthIn(conv, isReply, index, length)) changes.Add($"length {length.ToString(CultureInfo.InvariantCulture)} s");
                 else notes.Add($"{node.Name}: no node data, length not set.");
             }
-            built.Add(new BuiltNode(node.Name, label, actions[node.Name], strRef, changes));
+            built.Add(new BuiltNode(node.Name, label, placed[node.Name].Action, strRef, changes));
         }
         return built;
     }
@@ -304,12 +334,13 @@ public static partial class ConversationBuilder
     {
         var root = Root(yaml);
         var spec = new Spec();
-        foreach (var (key, value) in Entries(root, "package", "conversation", "defaultLanguage", "globalTlk", "start", "nodes"))
+        foreach (var (key, value) in Entries(root, "package", "conversation", "from", "defaultLanguage", "globalTlk", "start", "nodes"))
         {
             switch (key)
             {
                 case "package": spec.Package = Scalar(value); break;
                 case "conversation": spec.Conversation = Scalar(value); break;
+                case "from": spec.From = FromOf(value); break;
                 case "defaultLanguage": spec.DefaultLanguage = Language(Scalar(value)); break;
                 case "globalTlk": spec.GlobalTlk = Sequence(value).Select(Scalar).ToList(); break;
                 case "start": spec.Start = Sequence(value).Select(RefOf).ToList(); break;
@@ -327,7 +358,7 @@ public static partial class ConversationBuilder
     private static NodeSpec ParseNode(string name, YamlNode body)
     {
         var node = new NodeSpec { Name = name, Line = (int)body.Start.Line, Existing = NodeLabel().IsMatch(name) };
-        var entries = body is YamlMappingNode m ? Entries(m, "entry", "reply", "template", "length", "text", "if", "transition", "wheel", "replies", "then").ToList()
+        var entries = body is YamlMappingNode m ? Entries(m, "entry", "reply", "strref", "template", "length", "text", "if", "transition", "wheel", "replies", "then").ToList()
                       : throw Fail(body, $"node '{name}' must be a mapping.");
         foreach (var (key, value) in entries)
         {
@@ -337,6 +368,10 @@ public static partial class ConversationBuilder
                     if (node.Existing) throw Fail(value, $"{name} already exists; '{key}' (strref of a new line) is for new nodes.");
                     if (node.StrRef is not null) throw Fail(value, "a node is either an entry or a reply.");
                     node.IsReply = key == "reply";
+                    node.StrRef = Int(value);
+                    break;
+                case "strref":
+                    if (!node.Existing) throw Fail(value, $"'strref' gives an existing E<n>/R<n> node new text; a new line gives its strref in 'entry' or 'reply'.");
                     node.StrRef = Int(value);
                     break;
                 case "template": node.Template = RefOf(value); break;
@@ -353,6 +388,29 @@ public static partial class ConversationBuilder
         else if (node.StrRef is null) throw Fail(body, $"new node '{name}' needs 'entry: <strref>' (NPC line) or 'reply: <strref>' (Shepard line).");
         if (node.Wheel is not null && !node.IsReply) throw Fail(body, $"'{name}' is an entry; only replies have wheel text.");
         return node;
+    }
+
+    /// <summary>{package, conversation, resref, nodeIds}: the conversation to copy when the package has none of that name.</summary>
+    private static FromSpec FromOf(YamlNode value)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, "'from' is a mapping: {package: <file>, conversation: <name>, resref: <id>, nodeIds: <first id>}.");
+        string? package = null, conversation = null;
+        int? resRef = null, nodeIds = null;
+        foreach (var (key, v) in Entries(m, "package", "conversation", "resref", "nodeIds"))
+        {
+            switch (key)
+            {
+                case "package": package = Scalar(v); break;
+                case "conversation": conversation = Scalar(v); break;
+                case "resref": resRef = Int(v); break;
+                case "nodeIds": nodeIds = Int(v); break;
+            }
+        }
+        // Each conversation needs its own resref and node ids: a ConvNode event fires on the conversation and node with its numbers.
+        return new FromSpec(package ?? throw Fail(value, "'from' needs 'package' (the file with the template conversation)."),
+            conversation ?? throw Fail(value, "'from' needs 'conversation' (the template's name)."),
+            resRef is > 0 ? resRef.Value : throw Fail(value, "'from' needs 'resref': a positive id of its own (mount × 100 + n, e.g. 742101)."),
+            nodeIds is > 0 ? nodeIds.Value : throw Fail(value, "'from' needs 'nodeIds': the first of its own node ids (e.g. 74210100)."));
     }
 
     private static Choice ChoiceOf(YamlNode value)

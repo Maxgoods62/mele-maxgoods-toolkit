@@ -14,8 +14,9 @@ namespace MeleMcp.Core;
 /// <param name="Changes">What this build changed; empty when the level already matched the file.</param>
 public sealed record BuiltNpc(string Name, ExportRow Pawn, string Action, IReadOnlyList<string> Changes);
 
+/// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
 public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<BuiltNpc> Npcs, int StringCount, IReadOnlyList<string> TlkFiles,
-    string? SideloaderConfig, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
+    string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
 
 /// <summary>
 /// Builds the NPCs of a Game 1 level from a YAML file: the pawn (found by tag, else imported from a template), position,
@@ -85,11 +86,12 @@ public static class LevelBuilder
         }
 
         var backups = new List<string>();
+        var missing = new List<string>();
         var (npcs, backup) = PackageWriter.Edit(game, package, pcc =>
         {
             var level = pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no {LevelPath}; is it a level?");
             using var cache = new PackageCache();
-            return spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, notes)).ToList();
+            return spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
         });
         backups.Add(backup);
 
@@ -106,10 +108,10 @@ public static class LevelBuilder
         }
 
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
-        return new LevelBuildResult(package, create, npcs, spec.Strings.Count, tlkFiles, config, notes, backups);
+        return new LevelBuildResult(package, create, npcs, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
     }
 
-    private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache, List<string> notes)
+    private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache, List<string> missing, List<string> notes)
     {
         var changes = new List<string>();
         var tag = npc.Tag ?? throw new ArgumentException($"line {npc.Line}: '{npc.Name}' needs a 'tag' (how the build finds her again).");
@@ -145,7 +147,12 @@ public static class LevelBuilder
 
         SetColors(pcc, pawn, props, npc, changes, notes);
         foreach (var light in npc.Lights) SetLight(game, pcc, level, spec, npc, light, origin, rotation.Yaw, cache, changes);
-        if (npc.Conversation is { } conversation) LinkConversation(pcc, pawn, conversation, npc.Line, cache, changes);
+        if (npc.Conversation is { } conversation && !LinkConversation(pcc, pawn, conversation, npc.Line, cache, changes))
+        {
+            // The conversation's own file creates it in this level; the level is built first so that it exists.
+            missing.Add(conversation);
+            notes.Add($"{npc.Name}: the level has no BioConversation '{conversation}' yet. Build it (conv_build; 'from' copies a template), then this file again to start it when Shepard uses her.");
+        }
 
         return new BuiltNpc(npc.Name, ExportInspector.Row(pawn), action, changes);
     }
@@ -290,12 +297,15 @@ public static class LevelBuilder
         else if (dirty || moved) changes.Add($"light {light.Tag}");
     }
 
-    /// <summary>Main_Sequence: Shepard uses the pawn (BioSeqEvt_OnPlayerActivate) → BioSeqAct_StartConversation, Owner = the pawn.</summary>
-    private static void LinkConversation(IMEPackage pcc, ExportEntry pawn, string name, int line, PackageCache cache, List<string> changes)
+    /// <summary>
+    /// Main_Sequence: Shepard uses the pawn (BioSeqEvt_OnPlayerActivate) → BioSeqAct_StartConversation, Owner = the pawn.
+    /// False when the level has no conversation of that name.
+    /// </summary>
+    private static bool LinkConversation(IMEPackage pcc, ExportEntry pawn, string name, int line, PackageCache cache, List<string> changes)
     {
         var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {line}: the level has no {MainSequence}.");
-        var conversation = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioConversation" && e.ObjectName.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase))
-                           ?? throw new ArgumentException($"line {line}: the level has no BioConversation '{name}' (bring one in with export_import, then build it with conv_build).");
+        var conversation = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioConversation" && e.ObjectName.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (conversation is null) return false;
         var objects = KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().ToList();
 
         bool Holds(IEntry? variable) => variable is ExportEntry { ClassName: "SeqVar_Object" } v && v.GetProperty<ObjectProperty>("ObjValue")?.Value == pawn.UIndex;
@@ -326,6 +336,7 @@ public static class LevelBuilder
             KismetHelper.CreateOutputLink(use, "Out", start, 0);
             changes.Add("Kismet: use → start");
         }
+        return true;
     }
 
     /// <summary>ConfigDelta .m3cd next to the level: LE1CP's Sideloader loads it with the files whose names start with a prefix. M3 merges it at install.</summary>

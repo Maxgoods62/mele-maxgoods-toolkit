@@ -41,7 +41,8 @@ public static class KismetTools
      Description("Builds the NPCs of an LE1 level from a YAML file: the pawn (found by tag, else imported from a template pawn with everything "
                  + "it references, or cloned from an actor of the level), location and yaw, shown and active, own name (a renamed copy of its actor "
                  + "type, text written to the GlobalTlk), skin/hair/eye colors on its own materials, fill lights at offsets that turn with her, and "
-                 + "the Main_Sequence Kismet that starts her conversation when Shepard uses her. Creates a missing level (full path) and the "
+                 + "the Main_Sequence Kismet that starts her conversation when Shepard uses her (a conversation the level does not have yet is "
+                 + "listed in MissingConversations: build it, then the level again). Creates a missing level (full path) and the "
                  + "Sideloader ConfigDelta that loads it. Only changed values are written; running it twice changes nothing. See the tool README "
                  + "for the format. Backs every file up first and refuses files inside the game install.")]
     public static LevelBuildResult LevelBuild(

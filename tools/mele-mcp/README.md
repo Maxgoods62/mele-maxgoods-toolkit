@@ -30,7 +30,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `tlk_get` / `tlk_set` | Read, add or replace strings in an LE1 package's `BioTlkFile` exports (all of them by default: male/female copies, every language of a conversation's set) |
 | `conv_read` | LE1 conversation as a text graph: start entries, entries and wheel choices, replies, plot conditions/transitions, node data (interp length, VO track and its strref) |
 | `conv_add_node` | Append a line copied from a template node (E or R): new strref and export id, plot cleared, node data (ConvNode → Interp → InterpData → EndCurrentConvNode) and FaceFX lines copied, VO track set to the strref |
-| `conv_build` | Build a conversation from a YAML file ([format below](#conv_build-yaml)): new lines from templates, text in every language, plot conditions and transitions, wheels, next lines, starting list, in one save; running it again changes nothing new |
+| `conv_build` | Build a conversation from a YAML file ([format below](#conv_build-yaml)): a missing conversation copied from a `from` template (own names, resref and node ids, vanilla plot removed), new text for kept nodes (voice track and lip sync follow), new lines from templates, text in every language, plot conditions and transitions, wheels, next lines, starting list, in one save; running it again changes nothing new |
 | `conv_link` | Add or remove a link: start → E, E → R (wheel choice: paraphrase strref, category), R → E |
 | `facefx_get` / `facefx_copy_lines` | List the lip-sync lines of a `FaceFXAnimSet` (name, sound cue path and index, length); copy lines under new names, silent by default (LE1 plays `FXA_<strref>[_M]` for a VO track) |
 | `plot_map_get` | State events of an LE1 `BioStateEventMap` (base game: `BIOC_Materials.pcc` `PlotManagerAuto.StateTransitionMap`): id and elements (`bool 8421 = True [v0]`, `int 47 += 2 [v1]`, consequence, function), filters by id range or by the variable written |
@@ -40,8 +40,8 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `quest_map_get` | An LE1 journal map (`BioQuestMap`): quests with goals, tasks and plot items (strrefs with their global text, states, InstanceVersions) and the evaluations a plot change runs |
 | `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
 | `plot_build` | Build a DLC plot package from a YAML file ([format below](#plot_build-yaml)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
-| `level_build` | Build a level's NPCs from a YAML file ([format below](#level_build-yaml)): pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation, the Sideloader config; creates a missing level; writes only what differs |
-| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels through `level_build`, then conversations through `conv_build` |
+| `level_build` | Build a level's NPCs from a YAML file ([format below](#level_build-yaml)): pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), the Sideloader config; creates a missing level; writes only what differs |
+| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
 | `mod_install` | Install a mod with ME3Tweaks Mod Manager (`--installmod`, optional `--bootgame`): DLC copy, Coalesced merge of ConfigDelta files, AutoTOC. Waits on M3's log, then compares every mod file with its installed copy. Refuses while the game runs |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
 | `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
@@ -73,13 +73,19 @@ Example: [`mods/claude-chakwas/ClaudeReyes_dlg.yaml`](../../mods/claude-chakwas/
 
 ```yaml
 package: 'D:\...\CookedPCConsole\ClaudeNPC_NOR10.pcc'   # absolute, relative to this file, or a loaded file name
-conversation: ClaudeReyes_dlg
+conversation: ClaudeReyes_dlg   # found by name (or path); created from 'from' when the package has none
+from:                          # optional: the conversation to copy the first time
+  package: BIOA_NOR10_11_DSG_LOC_FR.pcc   # a loaded file name or a path
+  conversation: nor20_req_officer_dlg
+  resref: 742101               # its own m_nResRefID
+  nodeIds: 74210100            # its own node ids, from here
 defaultLanguage: fr            # text for TLKs whose language the node does not give (en = INT)
 globalTlk: [DLC_MOD_X_GlobalTlk.pcc, DLC_MOD_X_GlobalTlk_FR.pcc]   # optional; language from the file suffix
 start: [warm_hello, E16]       # replaces m_StartingList; first entry whose condition passes plays
 
 nodes:
   E16:                         # E<n>/R<n>: a node that exists; only the keys given change
+    strref: 74210010           # new text strref; its VO track and FaceFX line (FXA_<strref>[_M], silent) follow
     transition: 8421
     replies: [R1, normandy, R5]
   normandy:                    # a name: a new line, found again by its strref on the next build
@@ -100,7 +106,9 @@ nodes:
       - { to: R5, category: DEFAULT, paraphrase: 74210014 }   # or set them per choice
 ```
 
-Text goes to every `BioTlkFile` of the conversation's TLK set: its own language, else the language it shows (FE → FR, GE → DE, IE → IT, RA → RU, PLPC → PL), else `defaultLanguage`. Errors name the YAML line. All target files are checked before any is written.
+Text goes to every `BioTlkFile` of the conversation's TLK set: its own language, else the language it shows (FE → FR, GE → DE, IE → IT, RA → RU, PLPC → PL), else `defaultLanguage`. A TLK whose strings already match is left as it is. Errors name the YAML line. All target files are checked before any is written.
+
+`from` copies the template's package (`<name>_D`: the conversation and its TLK set) with everything it references (the `<name>_N` node data, FaceFX sets, sounds), then renames the packages to `<base>_D` / `<base>_N`, the conversation to `conversation` and the set to `TlkSet_<base>` (base: `conversation` without `_dlg`), gives it `resref` and node ids from `nodeIds`, and removes every node's plot condition and transition. It refuses when the package already has the template's package or the new names. The template's nodes stay in the file; the ones the YAML does not reach are never played.
 
 ## plot_build YAML
 
@@ -156,7 +164,7 @@ npcs:
     skin: [0.4, 0.19, 0.1]     # [r, g, b] or [r, g, b, a]
     hair: [0.4, 0.02, 0.8]
     eyes: [0.03, 0.15, 0.6]
-    conversation: ClaudeReyes_dlg   # a BioConversation in the level; Shepard uses her → it starts
+    conversation: ClaudeReyes_dlg   # a BioConversation in the level; Shepard uses her → it starts (missing: noted, linked on a later build)
     lights:
       - { tag: claude_npc_01_light, offset: [0, 0, 120], radius: 180, brightness: 1.2 }   # offset: forward, right, up; turns with her
 ```

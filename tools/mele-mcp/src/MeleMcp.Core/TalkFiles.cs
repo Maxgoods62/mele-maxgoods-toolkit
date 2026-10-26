@@ -53,7 +53,7 @@ public static class TalkFiles
         return new TlkEdits(path, files, backup);
     }
 
-    /// <summary>Adds or replaces strings in one BioTlkFile export of an open package.</summary>
+    /// <summary>Adds or replaces strings in one BioTlkFile export of an open package. Leaves the export as it is when every string already has its text.</summary>
     internal static List<TlkStringChange> WriteIn(ExportEntry target, IReadOnlyList<TlkString> strings)
     {
         var tlk = new ME1TalkFile(target);
@@ -63,6 +63,8 @@ public static class TalkFiles
             tlk.ReplaceString(s.Id, s.Text, addIfNotFound: true);
             return new TlkStringChange(s.Id, old, s.Text);
         }).ToList();
+        // Re-encoding builds a new Huffman tree, which can differ in bytes from the one the file has (vanilla TLKs do).
+        if (changes.All(c => c.OldText == c.NewText)) return changes;
 
         var huffman = new HuffmanCompression();
         huffman.LoadInputData(tlk.StringRefs);

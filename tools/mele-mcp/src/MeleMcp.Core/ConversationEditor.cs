@@ -18,6 +18,12 @@ public sealed record ConvIdsResult(string Path, ExportRow Conversation, int? Old
 public sealed record ConvNodeAdded(string Path, ExportRow Conversation, string Node, int ExportId, int StrRef, float? Length,
     IReadOnlyList<ExportRow> NodeData, IReadOnlyList<string> FaceFxLines, IReadOnlyList<string> Notes, string BackupPath);
 
+/// <param name="Template">The copied conversation, as a path in <paramref name="TemplatePackage"/>.</param>
+/// <param name="Renamed">old path → new name, for the packages, the conversation and its TLK set.</param>
+/// <param name="PlotCleared">Nodes whose vanilla plot condition or transition was removed.</param>
+public sealed record ConvCreated(string Template, string TemplatePackage, int NewExports, int NewImports, IReadOnlyList<string> Renamed,
+    int? OldResRefId, int ResRefId, int NodeIds, int PlotCleared);
+
 public sealed record ConvLinkResult(string Path, ExportRow Conversation, string Change, string BackupPath);
 
 /// <summary>Edits Game 1 conversations.</summary>
@@ -39,49 +45,157 @@ public static partial class ConversationEditor
 
         var ((row, oldResRefId, nodeIds, path), backup) = PackageWriter.Edit(game, fileOrPath, pcc =>
         {
-            var conv = ExportInspector.Resolve(pcc, export);
-            if (conv.ClassName != "BioConversation") throw new ArgumentException($"#{conv.UIndex} is a {conv.ClassName}, not a BioConversation.");
-
-            var props = conv.GetProperties();
-            var sequence = props.GetProp<ObjectProperty>("m_pEvtSystemSeq")?.ResolveToEntry(pcc) as ExportEntry
-                           ?? throw new ArgumentException($"#{conv.UIndex} has no node data sequence (m_pEvtSystemSeq).");
-            var oldResRef = props.GetProp<IntProperty>("m_nResRefID")?.Value;
-            props.AddOrReplaceProp(new IntProperty(resRefId, "m_nResRefID"));
-
-            var remap = new Dictionary<int, int>();
-            int Map(int old)
-            {
-                if (!remap.TryGetValue(old, out var id))
-                {
-                    id = nodeIdBase + remap.Count;
-                    remap[old] = id;
-                }
-                return id;
-            }
-
-            var convNodes = KismetHelper.GetAllSequenceElements(sequence).OfType<ExportEntry>().Where(e => e.ClassName == "BioSeqEvt_ConvNode");
-            foreach (var node in convNodes)
-            {
-                var nodeProps = node.GetProperties();
-                if (nodeProps.GetProp<IntProperty>("m_nNodeID") is not { } nodeId) continue;
-                nodeProps.AddOrReplaceProp(new IntProperty(Map(nodeId.Value), "m_nNodeID"));
-                nodeProps.AddOrReplaceProp(new IntProperty(resRefId, "m_nConvResRefID"));
-                node.WriteProperties(nodeProps);
-            }
-
-            foreach (var list in new[] { "m_EntryList", "m_ReplyList" })
-            {
-                foreach (var node in props.GetProp<ArrayProperty<StructProperty>>(list)?.ToList() ?? [])
-                {
-                    if (node.GetProp<IntProperty>("nExportID") is { } exportId) exportId.Value = Map(exportId.Value);
-                }
-            }
-
-            conv.WriteProperties(props);
-            return (ExportInspector.Row(conv), oldResRef, remap.Select(p => new NodeIdChange(p.Key, p.Value)).ToList(), pcc.FilePath);
+            var conv = Conversation(pcc, export);
+            var (oldResRef, nodeIds) = SetIdsIn(pcc, conv, resRefId, nodeIdBase);
+            return (ExportInspector.Row(conv), oldResRef, nodeIds, pcc.FilePath);
         });
 
         return new ConvIdsResult(path, row, oldResRefId, resRefId, nodeIds, backup);
+    }
+
+    /// <summary>SetIds inside an open package. Returns the old resref and the node id changes.</summary>
+    internal static (int? OldResRef, List<NodeIdChange> NodeIds) SetIdsIn(IMEPackage pcc, ExportEntry conv, int resRefId, int nodeIdBase)
+    {
+        var props = conv.GetProperties();
+        var sequence = props.GetProp<ObjectProperty>("m_pEvtSystemSeq")?.ResolveToEntry(pcc) as ExportEntry
+                       ?? throw new ArgumentException($"#{conv.UIndex} has no node data sequence (m_pEvtSystemSeq).");
+        var oldResRef = props.GetProp<IntProperty>("m_nResRefID")?.Value;
+        props.AddOrReplaceProp(new IntProperty(resRefId, "m_nResRefID"));
+
+        var remap = new Dictionary<int, int>();
+        int Map(int old)
+        {
+            if (!remap.TryGetValue(old, out var id))
+            {
+                id = nodeIdBase + remap.Count;
+                remap[old] = id;
+            }
+            return id;
+        }
+
+        var convNodes = KismetHelper.GetAllSequenceElements(sequence).OfType<ExportEntry>().Where(e => e.ClassName == "BioSeqEvt_ConvNode");
+        foreach (var node in convNodes)
+        {
+            var nodeProps = node.GetProperties();
+            if (nodeProps.GetProp<IntProperty>("m_nNodeID") is not { } nodeId) continue;
+            nodeProps.AddOrReplaceProp(new IntProperty(Map(nodeId.Value), "m_nNodeID"));
+            nodeProps.AddOrReplaceProp(new IntProperty(resRefId, "m_nConvResRefID"));
+            node.WriteProperties(nodeProps);
+        }
+
+        foreach (var list in NodeLists(props))
+        {
+            foreach (var node in list)
+            {
+                if (node.GetProp<IntProperty>("nExportID") is { } exportId) exportId.Value = Map(exportId.Value);
+            }
+        }
+
+        conv.WriteProperties(props);
+        return (oldResRef, remap.Select(p => new NodeIdChange(p.Key, p.Value)).ToList());
+    }
+
+    /// <summary>
+    /// Copies a template conversation into an open package, under its own names and ids (A.10 by hand): its package
+    /// (`&lt;base&gt;_D`: the BioConversation and its TLK set) is imported with everything it references (the node data package
+    /// `&lt;base&gt;_N`, FaceFX sets, sounds), then renamed after <paramref name="name"/> (base = the name without `_dlg`). The
+    /// packages, the conversation and the TLK set are forced exports: two loaded files with the same path share one object.
+    /// Then SetIds, and every node's plot condition and transition are removed, so the copy neither reads nor writes
+    /// vanilla plot.
+    /// </summary>
+    internal static (ExportEntry Conversation, ConvCreated Created) CreateIn(MEGame game, IMEPackage pcc, string templatePackage, string template,
+        string name, int resRefId, int nodeIdBase)
+    {
+        if (name.Contains('.')) throw new ArgumentException($"A new conversation needs a plain name, not the path '{name}'.");
+        using var source = PackageInspector.Open(game, templatePackage);
+        var conv = Conversation(source, template);
+        var props = conv.GetProperties();
+        var top = Top(conv);
+        if (top == conv) throw new ArgumentException($"{conv.InstancedFullPath} is not inside a package; copy a conversation that is (e.g. <name>_D.<name>_dlg).");
+        var nodeData = props.GetProp<ObjectProperty>("m_pEvtSystemSeq")?.ResolveToEntry(source) is { } seq ? Top(seq) : null;
+        var tlkSet = props.GetProp<ObjectProperty>("m_oTlkFileSet")?.ResolveToEntry(source);
+
+        var baseName = name.EndsWith("_dlg", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
+        var renames = new List<(string Path, string Name)> { (conv.InstancedFullPath, name) };
+        if (tlkSet is not null) renames.Add((tlkSet.InstancedFullPath, $"TlkSet_{baseName}"));
+        renames.Add((top.InstancedFullPath, $"{baseName}_D"));
+        if (nodeData is not null && nodeData != top) renames.Add((nodeData.InstancedFullPath, $"{baseName}_N"));
+
+        // An entry already at a template path would be linked to instead of copied; a new top name must be free.
+        foreach (var path in renames.Select(r => r.Path).Where(p => !p.Contains('.')))
+        {
+            if (pcc.FindEntry(path) is { } existing) throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} already has {existing.InstancedFullPath} (#{existing.UIndex}): the copy would link to it. Rename it first.");
+        }
+        foreach (var free in new[] { $"{baseName}_D", $"{baseName}_N" })
+        {
+            if (pcc.FindEntry(free) is { } existing) throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} already has {existing.InstancedFullPath} (#{existing.UIndex}); pick another conversation name.");
+        }
+
+        var (exportsBefore, importsBefore) = (pcc.ExportCount, pcc.ImportCount);
+        var rop = new RelinkerOptionsPackage { Cache = new PackageCache() };
+        EntryImporter.ImportAndRelinkEntries(EntryImporter.PortingOption.CloneAllDependencies, top, pcc, null, true, rop, out _);
+
+        // Look every entry up before renaming: a renamed package changes its children's paths.
+        var found = renames.Select(r => (Entry: pcc.FindEntry(r.Path) ?? throw new InvalidOperationException($"The import did not bring {r.Path}."), r.Path, r.Name)).ToList();
+        var copy = (ExportEntry)found[0].Entry;
+        foreach (var (entry, _, newName) in found) entry.ObjectName = NameReference.FromInstancedString(newName);
+
+        var (oldResRef, nodeIds) = SetIdsIn(pcc, copy, resRefId, nodeIdBase);
+        var copyProps = copy.GetProperties();
+        var cleared = 0;
+        foreach (var node in NodeLists(copyProps).SelectMany(l => l))
+        {
+            var p = node.Properties;
+            if (p.GetProp<IntProperty>("nConditionalFunc")?.Value is null or -1 && p.GetProp<IntProperty>("nStateTransition")?.Value is null or -1) continue;
+            p.AddOrReplaceProp(new IntProperty(-1, "nConditionalFunc"));
+            p.AddOrReplaceProp(new IntProperty(-1, "nStateTransition"));
+            cleared++;
+        }
+        copy.WriteProperties(copyProps);
+
+        return (copy, new ConvCreated(conv.InstancedFullPath, source.FilePath, pcc.ExportCount - exportsBefore, pcc.ImportCount - importsBefore,
+            found.Select(f => $"{f.Path} → {f.Name}").ToList(), oldResRef, resRefId, nodeIds.Count, cleared));
+    }
+
+    private static IEntry Top(IEntry entry)
+    {
+        while (entry.Parent is { } parent) entry = parent;
+        return entry;
+    }
+
+    internal sealed record NodeRetext(int OldStrRef, List<string> FaceFxLines, List<string> Notes);
+
+    /// <summary>
+    /// Gives an existing node (E&lt;n&gt;/R&lt;n&gt;) a new text strref: srText, the VO tracks of its node data (subtitle timing),
+    /// and its FaceFX lines copied from the old strref to the new one without sound (lip sync). Null when it already has it.
+    /// </summary>
+    internal static NodeRetext? SetTextIn(IMEPackage pcc, ExportEntry conv, string label, int strRef)
+    {
+        var props = conv.GetProperties();
+        var (isReply, index) = ParseNode(label);
+        var list = NodeList(props, isReply);
+        if (index >= list.Count) throw new ArgumentException($"{label} does not exist: the conversation has {list.Count} {(isReply ? "replies" : "entries")}.");
+        var node = list[index].Properties;
+        var old = node.GetProp<StringRefProperty>("srText")?.Value ?? 0;
+        if (old == strRef) return null;
+
+        var notes = new List<string>();
+        var faceFx = new List<string>();
+        var parsed = new ConversationExtended(conv);
+        parsed.LoadConversation();
+        if (parsed.ParseSingleNodeInterpData((isReply ? parsed.ReplyList : parsed.EntryList)[index]) is not { } interpData)
+        {
+            notes.Add($"{label} has no node data: no subtitle timing or lip sync.");
+        }
+        else
+        {
+            var voStrRef = SetVoStrRef(pcc, interpData, strRef, notes);
+            var speaker = isReply ? -2 : node.GetProp<IntProperty>("nSpeakerIndex")?.Value ?? -1;
+            if ((voStrRef ?? old) is > 0 and var from) faceFx.AddRange(CopyFaceFx(pcc, props, speaker, from, strRef, notes));
+        }
+        node.AddOrReplaceProp(new StringRefProperty(strRef, "srText"));
+        conv.WriteProperties(props);
+        return new NodeRetext(old, faceFx, notes);
     }
 
     /// <summary>
@@ -339,16 +453,22 @@ public static partial class ConversationEditor
 
         if (length is { } seconds) newInterpData.WriteProperty(new FloatProperty(seconds, "InterpLength"));
 
+        return (created, SetVoStrRef(pcc, newInterpData, strRef, notes));
+    }
+
+    /// <summary>Points the VO tracks under an InterpData at <paramref name="strRef"/>. Returns the strref the first one had.</summary>
+    private static int? SetVoStrRef(IMEPackage pcc, ExportEntry interpData, int strRef, List<string> notes)
+    {
         int? oldStrRef = null;
-        var prefix = newInterpData.InstancedFullPath + ".";
+        var prefix = interpData.InstancedFullPath + ".";
         var vo = pcc.Exports.Where(x => x.ClassName == "BioEvtSysTrackVOElements" && x.InstancedFullPath.StartsWith(prefix, StringComparison.Ordinal)).ToList();
-        if (vo.Count == 0) notes.Add("The template's node data has no VO track: no subtitle timing or lip sync from strref.");
+        if (vo.Count == 0) notes.Add("The node data has no VO track: no subtitle timing or lip sync from strref.");
         foreach (var track in vo)
         {
             oldStrRef ??= track.GetProperty<IntProperty>("m_nStrRefID")?.Value;
             track.WriteProperty(new IntProperty(strRef, "m_nStrRefID"));
         }
-        return (created, oldStrRef);
+        return oldStrRef;
     }
 
     private static void RequireOutput(ExportEntry obj, string link)

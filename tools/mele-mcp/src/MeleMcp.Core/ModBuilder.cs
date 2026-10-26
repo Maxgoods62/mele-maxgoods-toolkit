@@ -3,10 +3,14 @@ using YamlDotNet.RepresentationModel;
 
 namespace MeleMcp.Core;
 
+/// <param name="LevelsAgain">Level files built again after the conversations, for NPCs whose conversation they created.</param>
 public sealed record ModBuildResult(string Folder, IReadOnlyList<PlotBuildResult> Plots, IReadOnlyList<LevelBuildResult> Levels, IReadOnlyList<ConvBuildResult> Conversations,
-    IReadOnlyList<string> Skipped);
+    IReadOnlyList<LevelBuildResult> LevelsAgain, IReadOnlyList<string> Skipped);
 
-/// <summary>Builds every YAML file of a mod's source folder: plot files (transitions, consequences, quests), levels (npcs), then conversations.</summary>
+/// <summary>
+/// Builds every YAML file of a mod's source folder: plot files (transitions, consequences, quests), levels (npcs), then
+/// conversations, then again the levels whose NPCs named a conversation the level did not have yet.
+/// </summary>
 public static class ModBuilder
 {
     private static readonly string[] PlotKeys = ["transitions", "consequences", "quests"];
@@ -34,11 +38,13 @@ public static class ModBuilder
         }
 
         // Plot files first (one can create the plot package whose transitions the conversations run), then levels (one can
-        // create the level a conversation lives in), then conversations.
+        // create the level a conversation lives in), then conversations (one can be created in that level), then the
+        // levels that could not start a conversation yet.
         var plotResults = plots.Select(f => Named(f, () => PlotBuilder.Build(game, f, null))).ToList();
-        var levelResults = levels.Select(f => Named(f, () => LevelBuilder.Build(game, f, null))).ToList();
+        var levelResults = levels.Select(f => (File: f, Result: Named(f, () => LevelBuilder.Build(game, f, null)))).ToList();
         var conversationResults = conversations.Select(f => Named(f, () => ConversationBuilder.Build(game, f, null))).ToList();
-        return new ModBuildResult(dir, plotResults, levelResults, conversationResults, skipped);
+        var again = levelResults.Where(l => l.Result.MissingConversations.Count > 0).Select(l => Named(l.File, () => LevelBuilder.Build(game, l.File, null))).ToList();
+        return new ModBuildResult(dir, plotResults, levelResults.Select(l => l.Result).ToList(), conversationResults, again, skipped);
     }
 
     /// <summary>Errors name the file they come from; files built before it stay saved.</summary>
