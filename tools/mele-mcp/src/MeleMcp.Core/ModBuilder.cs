@@ -3,9 +3,10 @@ using YamlDotNet.RepresentationModel;
 
 namespace MeleMcp.Core;
 
-public sealed record ModBuildResult(string Folder, IReadOnlyList<PlotBuildResult> Plots, IReadOnlyList<ConvBuildResult> Conversations, IReadOnlyList<string> Skipped);
+public sealed record ModBuildResult(string Folder, IReadOnlyList<PlotBuildResult> Plots, IReadOnlyList<LevelBuildResult> Levels, IReadOnlyList<ConvBuildResult> Conversations,
+    IReadOnlyList<string> Skipped);
 
-/// <summary>Builds every YAML file of a mod's source folder: plot files (transitions, consequences, quests), then conversations.</summary>
+/// <summary>Builds every YAML file of a mod's source folder: plot files (transitions, consequences, quests), levels (npcs), then conversations.</summary>
 public static class ModBuilder
 {
     private static readonly string[] PlotKeys = ["transitions", "consequences", "quests"];
@@ -16,6 +17,7 @@ public static class ModBuilder
         if (!Directory.Exists(dir)) throw new DirectoryNotFoundException($"No folder {dir}.");
 
         var plots = new List<string>();
+        var levels = new List<string>();
         var conversations = new List<string>();
         var skipped = new List<string>();
         var files = Directory.EnumerateFiles(dir)
@@ -26,14 +28,17 @@ public static class ModBuilder
             var root = Named(file, () => YamlFiles.Root(File.ReadAllText(file)));
             var keys = root.Children.Keys.OfType<YamlScalarNode>().Select(k => k.Value).ToHashSet();
             if (keys.Contains("conversation")) conversations.Add(file);
+            else if (keys.Contains("npcs")) levels.Add(file);
             else if (keys.Overlaps(PlotKeys)) plots.Add(file);
-            else skipped.Add($"{Path.GetFileName(file)}: no 'conversation' and no {string.Join("/", PlotKeys)}.");
+            else skipped.Add($"{Path.GetFileName(file)}: no 'conversation', 'npcs' or {string.Join("/", PlotKeys)}.");
         }
 
-        // Plot files first: one can create the plot package whose transitions the conversations run.
+        // Plot files first (one can create the plot package whose transitions the conversations run), then levels (one can
+        // create the level a conversation lives in), then conversations.
         var plotResults = plots.Select(f => Named(f, () => PlotBuilder.Build(game, f, null))).ToList();
+        var levelResults = levels.Select(f => Named(f, () => LevelBuilder.Build(game, f, null))).ToList();
         var conversationResults = conversations.Select(f => Named(f, () => ConversationBuilder.Build(game, f, null))).ToList();
-        return new ModBuildResult(dir, plotResults, conversationResults, skipped);
+        return new ModBuildResult(dir, plotResults, levelResults, conversationResults, skipped);
     }
 
     /// <summary>Errors name the file they come from; files built before it stay saved.</summary>

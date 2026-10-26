@@ -58,8 +58,8 @@ public static class PlotTools
 
     [McpServerTool(Name = "mod_build", Destructive = true),
      Description("Builds every YAML file in a mod's source folder: plot files (with transitions, consequences or quests) through plot_build, "
-                 + "then conversation files (with 'conversation') through conv_build. Stops at the first error, naming the file; files "
-                 + "built before it stay saved.")]
+                 + "level files (with npcs) through level_build, then conversation files (with 'conversation') through conv_build. Stops at "
+                 + "the first error, naming the file; files built before it stay saved.")]
     public static ModBuildResult ModBuild(
         [Description("Folder with the mod's YAML files, e.g. the repo's mods/<name>.")] string folder,
         [Description("Game: LE1.")] string game = "LE1")

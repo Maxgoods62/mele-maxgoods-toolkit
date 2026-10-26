@@ -40,7 +40,8 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `quest_map_get` | An LE1 journal map (`BioQuestMap`): quests with goals, tasks and plot items (strrefs with their global text, states, InstanceVersions) and the evaluations a plot change runs |
 | `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
 | `plot_build` | Build a DLC plot package from a YAML file ([format below](#plot_build-yaml)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
-| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, then conversations through `conv_build` |
+| `level_build` | Build a level's NPCs from a YAML file ([format below](#level_build-yaml)): pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation, the Sideloader config; creates a missing level; writes only what differs |
+| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels through `level_build`, then conversations through `conv_build` |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
 | `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
 
@@ -62,7 +63,7 @@ Hot-reload notes:
 - The bytes must be **uncompressed** (LEX sends `SaveToStream(false)`). Sending a compressed file hung LE1: the engine's memory reader cannot decompress, falls back to opening the file by name, and that file is not on disk.
 - On LE1 + LE1CP the copy does not last. `BioTriggerStream.Touch`/`UnTouch` and Kismet `BioSeqAct_SetStreamingState` re-apply the area's streaming state (hand-streamed levels unload) and then call `SideloaderFramework.RunSideloader`, which re-forces every Sideloader level by name (`ClientUpdateLevelStreamingStatus`). Tested on the Normandy: reverted in 2–4 s with Shepard standing still. **Never fire LE1CP framework events by hand** (`Poll_NPC_*`, `Live_NPC_*`): it re-spawned several NPC files twice and hung LE1 in a loading loop. Streaming a framework-managed `BIONPC_*` file out and in also leaves the framework's NPC dormant (Chakwas vanished).
 
-**Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_*` writers, `facefx_copy_lines`, `kismet_*`, `level_new`, `plot_map_new`, `plot_event_set`, `quest_set`, `plot_build`, `mod_build`) back the package up (and `AutoLoad.ini`, which `plot_build` edits) to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
+**Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_*` writers, `facefx_copy_lines`, `kismet_*`, `level_new`, `plot_map_new`, `plot_event_set`, `quest_set`, `plot_build`, `level_build`, `mod_build`) back the package up (and `AutoLoad.ini`, which `plot_build` edits) to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
 
 ## conv_build YAML
 
@@ -131,6 +132,35 @@ quests:
 
 Every event and quest in the file replaces the package's; the others are kept and listed in `notes`. Ids, states and conditionals take `none` for -1. Errors name the YAML line. All target files (package, GlobalTlk files, `AutoLoad.ini`) are checked before any is written. `mod_build folder=<dir>` runs every YAML of a folder: plot files first, then conversations.
 
+## level_build YAML
+
+Example: [`mods/claude-chakwas/level.yaml`](../../mods/claude-chakwas/level.yaml).
+
+```yaml
+package: 'D:\...\CookedPCConsole\ClaudeNPC_NOR10.pcc'   # created (empty level) if missing; full path only
+sideloader: [BIOA_NOR10_07]    # optional: ConfigDelta .m3cd so LE1CP loads the level with files starting so (M3 merges it at install)
+defaultLanguage: fr
+globalTlk: [DLC_MOD_X_GlobalTlk.pcc, DLC_MOD_X_GlobalTlk_FR.pcc]   # where the NPC's name goes
+lightTemplate: { package: BIOA_NOR10_07_DSG.pcc, actor: PointLightToggleable_7 }   # copied when the level has no light yet
+
+npcs:
+  reyes:                       # a label for the result
+    tag: claude_npc_01         # Tag and UniqueTag: how the build finds her again
+    template: { package: BIONPC_Chakwas.pcc, actor: BioPawn_3 }   # imported when no pawn has the tag; or an actor of this level to clone
+    location: [-3965, 13160, -36739.445]
+    yaw: 90                    # degrees: 0 faces +X, 90 faces +Y
+    active: true               # default: shown (bHidden=False) and behavior on (bActive=True)
+    name: { type: ClaudeNurseReyes, strref: 74210001, fr: "Infirmière Reyes", en: "Nurse Reyes" }   # own actor type copy
+    skin: [0.4, 0.19, 0.1]     # [r, g, b] or [r, g, b, a]
+    hair: [0.4, 0.02, 0.8]
+    eyes: [0.03, 0.15, 0.6]
+    conversation: ClaudeReyes_dlg   # a BioConversation in the level; Shepard uses her → it starts
+    lights:
+      - { tag: claude_npc_01_light, offset: [0, 0, 120], radius: 180, brightness: 1.2 }   # offset: forward, right, up; turns with her
+```
+
+Every value given is enforced; a value left out stays as it is. Only values that differ are written, so a rebuild changes nothing. Errors name the YAML line.
+
 ## Layout
 
 | Path | Content |
@@ -162,6 +192,7 @@ From [docs/06 §B.1](../../docs/06-le1-first-mod.md#b1-how-lec-65-resolves-le1-d
 - `AutoloadIni` round-trips lose `PlotManagerConsequenceMap<n>`, `DotU<n>` and `GlobalPackages<n>`. Write our own `AutoLoad.ini` reader/writer before `dlc_new`.
 - LEC treats `DLC_MOD*` as a mod folder, but the game's ASIs need `DLC_MOD_` (case-sensitive). Match the game.
 - File lookups are cached (`GamePaths.ResolvePackage`). Any tool that installs or copies files must call `MELoadedFiles.InvalidateCaches()`.
+- `CommonStructs.LinearColorProp(r, g, b, a)` writes `r` into all four channels. Build the `LinearColor` struct by hand (`level_build` does).
 
 ## Gotchas found in the M0 spike
 
