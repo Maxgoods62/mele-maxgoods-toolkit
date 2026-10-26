@@ -1,0 +1,168 @@
+using System.Numerics;
+using LegendaryExplorerCore.Packages;
+using LegendaryExplorerCore.Packages.CloningImportingAndRelinking;
+using LegendaryExplorerCore.Unreal;
+using LegendaryExplorerCore.Unreal.BinaryConverters;
+
+namespace MeleMcp.Core;
+
+/// <summary>
+/// What makes a level of its own a place to go: vanilla sub-levels it shows (a Normandy room, by its _ART and _LAY files),
+/// its post-process, and start points. Game 1 shows sub-levels the BioWare way: BioWorldInfo.StreamingLevels lists them
+/// (LevelStreamingKismet), and a BioTriggerStream volume makes them visible while the player is inside it. The volume is a
+/// copy of the vanilla one around the same room, so it has the room's place and shape.
+/// </summary>
+internal static class LevelStreams
+{
+    private const string LevelPath = "TheWorld.PersistentLevel";
+
+    /// <param name="Volume">The vanilla BioTriggerStream to copy, e.g. the cabin's on the Normandy.</param>
+    /// <param name="Levels">Files shown inside the volume, by name without extension, e.g. BIOA_NOR10_09_LAY.</param>
+    internal sealed record Spec(string Package, string Volume, List<string> Levels, int Line);
+
+    /// <param name="Yaw">Degrees: 0 faces +X, 90 faces +Y.</param>
+    internal sealed record StartPoint(string Tag, Vector3 Location, float? Yaw, int Line);
+
+    internal static void SetStreaming(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, PackageCache cache, List<string> changes)
+    {
+        var world = pcc.FindExport("TheWorld") ?? throw new ArgumentException($"line {spec.Line}: the level has no TheWorld.");
+        var worldInfo = WorldInfo(pcc, level);
+        var listed = worldInfo.GetProperty<ArrayProperty<ObjectProperty>>("StreamingLevels") ?? new ArrayProperty<ObjectProperty>("StreamingLevels");
+        var listDirty = false;
+        foreach (var name in spec.Levels)
+        {
+            var streaming = pcc.Exports.FirstOrDefault(e => e.Parent == world && e.ClassName == "LevelStreamingKismet"
+                                                           && e.GetProperty<NameProperty>("PackageName")?.Value.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase) == true);
+            if (streaming is null)
+            {
+                streaming = pcc.CreateExport("LevelStreamingKismet", "LevelStreamingKismet", world, cache: cache);
+                streaming.WriteProperty(new NameProperty(name, "PackageName"));
+                changes.Add($"streams {name}");
+            }
+            if (listed.Any(o => o.Value == streaming.UIndex)) continue;
+            listed.Add(new ObjectProperty(streaming));
+            listDirty = true;
+        }
+        if (listDirty) worldInfo.WriteProperty(listed);
+
+        // Found again by its name: an import keeps the source's.
+        var volumeName = spec.Volume.Contains('.') ? spec.Volume[(spec.Volume.LastIndexOf('.') + 1)..] : spec.Volume;
+        var volume = pcc.FindExport($"{LevelPath}.{volumeName}");
+        if (volume is null)
+        {
+            using var source = PackageInspector.Open(game, spec.Package);
+            var original = Resolve(source, spec.Volume, spec.Line);
+            if (original.ClassName != "BioTriggerStream") throw new ArgumentException($"line {spec.Line}: {original.InstancedFullPath} is a {original.ClassName}, not a BioTriggerStream.");
+            volume = Import(pcc, level, original);
+            changes.Add($"stream volume (copy of {spec.Package} {original.ObjectName.Instanced})");
+        }
+        else if (volume.ClassName != "BioTriggerStream")
+        {
+            throw new ArgumentException($"line {spec.Line}: the level's {volume.InstancedFullPath} is a {volume.ClassName}, not a BioTriggerStream.");
+        }
+
+        // One state, the one a volume applies when the player enters it.
+        var visible = new ArrayProperty<NameProperty>(spec.Levels.Select(l => new NameProperty(l)), "VisibleChunkNames");
+        var states = new ArrayProperty<StructProperty>("StreamingStates")
+        {
+            new("BioStreamingState", [visible, new NameProperty("Default", "StateName")]),
+        };
+        var props = volume.GetProperties();
+        props.AddOrReplaceProp(states);
+        if (Write(volume, props)) changes.Add($"stream volume shows {string.Join(", ", spec.Levels)}");
+    }
+
+    /// <summary>The DefaultPostProcessSettings of another level's BioWorldInfo: its color grading, bloom and depth of field.</summary>
+    internal static void SetPostProcess(MEGame game, IMEPackage pcc, ExportEntry level, string package, int line, List<string> changes)
+    {
+        using var source = PackageInspector.Open(game, package);
+        var sourceInfo = source.Exports.FirstOrDefault(e => e.ClassName == "BioWorldInfo") ?? throw new ArgumentException($"line {line}: {package} has no BioWorldInfo.");
+        var settings = sourceInfo.GetProperty<StructProperty>("DefaultPostProcessSettings") ?? throw new ArgumentException($"line {line}: {package}'s BioWorldInfo has no DefaultPostProcessSettings.");
+        var worldInfo = WorldInfo(pcc, level);
+        var props = worldInfo.GetProperties();
+        props.AddOrReplaceProp(settings);
+        if (Write(worldInfo, props)) changes.Add($"post-process of {package}");
+    }
+
+    /// <summary>A start point found by tag, else imported from the template; on the level's navigation list, as cooked levels have them.</summary>
+    internal static void SetStartPoint(MEGame game, IMEPackage pcc, ExportEntry level, StartPoint start, (string Package, string Actor)? template, List<string> changes)
+    {
+        var point = pcc.Exports.FirstOrDefault(e => e.Parent == level && e.ClassName == "BioStartPoint"
+                                                    && e.GetProperty<NameProperty>("Tag")?.Value.Instanced.Equals(start.Tag, StringComparison.OrdinalIgnoreCase) == true);
+        if (point is null)
+        {
+            var (package, actor) = template ?? throw new ArgumentException($"line {start.Line}: the level has no start point '{start.Tag}'; give a top-level 'startPointTemplate'.");
+            using var source = PackageInspector.Open(game, package);
+            var original = Resolve(source, actor, start.Line);
+            if (original.ClassName != "BioStartPoint") throw new ArgumentException($"line {start.Line}: {original.InstancedFullPath} is a {original.ClassName}, not a BioStartPoint.");
+            // The next point of the vanilla list is not ours: cut it, or the import would copy the whole list.
+            var originalProps = original.GetProperties();
+            originalProps.RemoveNamedProperty("nextNavigationPoint");
+            original.WriteProperties(originalProps);
+            original.ObjectName = pcc.GetNextIndexedName("BioStartPoint");
+            point = Import(pcc, level, original);
+            changes.Add($"start point {start.Tag} added");
+        }
+
+        var props = point.GetProperties();
+        props.AddOrReplaceProp(new NameProperty(start.Tag, "Tag"));
+        props.AddOrReplaceProp(CommonStructs.Vector3Prop(start.Location, "Location"));
+        if (start.Yaw is { } yaw) props.AddOrReplaceProp(CommonStructs.RotatorProp(new Rotator(0, (int)Math.Round(yaw * 65536 / 360), 0), "Rotation"));
+        if (Write(point, props)) changes.Add($"start point {start.Tag}");
+
+        if (AddToNavigationList(pcc, level, point)) changes.Add($"start point {start.Tag} on the navigation list");
+    }
+
+    /// <summary>Navigation points chain through nextNavigationPoint, from the level's NavListStart to its NavListEnd.</summary>
+    private static bool AddToNavigationList(IMEPackage pcc, ExportEntry level, ExportEntry point)
+    {
+        var binary = ObjectBinary.From<Level>(level);
+        var seen = new HashSet<int>();
+        for (var at = binary.NavListStart; at != 0 && seen.Add(at); at = pcc.GetUExport(at).GetProperty<ObjectProperty>("nextNavigationPoint")?.Value ?? 0)
+        {
+            if (at == point.UIndex) return false;
+        }
+        if (binary.NavListEnd != 0) pcc.GetUExport(binary.NavListEnd).WriteProperty(new ObjectProperty(point, "nextNavigationPoint"));
+        else binary.NavListStart = point.UIndex;
+        binary.NavListEnd = point.UIndex;
+        level.WriteBinary(binary);
+        return true;
+    }
+
+    private static ExportEntry Import(IMEPackage pcc, ExportEntry level, ExportEntry original)
+    {
+        if (pcc.FindEntry($"{LevelPath}.{original.ObjectName.Instanced}") is { } clash)
+        {
+            throw new InvalidOperationException($"The level already has {clash.InstancedFullPath}, so an import would link to it instead of copying.");
+        }
+        var rop = new RelinkerOptionsPackage { Cache = new PackageCache() };
+        EntryImporter.ImportAndRelinkEntries(EntryImporter.PortingOption.CloneAllDependencies, original, pcc, level, true, rop, out var entry);
+        var copy = entry as ExportEntry ?? throw new InvalidOperationException("The import did not create an export.");
+        pcc.AddToLevelActorsIfNotThere(copy);
+        return copy;
+    }
+
+    private static ExportEntry WorldInfo(IMEPackage pcc, ExportEntry level) =>
+        pcc.Exports.FirstOrDefault(e => e.Parent == level && e.ClassName == "BioWorldInfo") ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no BioWorldInfo.");
+
+    /// <summary>BioStartPoint_23, TheWorld.PersistentLevel.BioStartPoint_23 or #216.</summary>
+    private static ExportEntry Resolve(IMEPackage pcc, string actor, int line)
+    {
+        try
+        {
+            return ExportInspector.Resolve(pcc, actor.Contains('.') || actor.StartsWith('#') ? actor : $"{LevelPath}.{actor}");
+        }
+        catch (ArgumentException e)
+        {
+            throw new ArgumentException($"line {line}: {e.Message}");
+        }
+    }
+
+    /// <summary>Writes the properties; true when that changed the export's bytes.</summary>
+    private static bool Write(ExportEntry export, PropertyCollection props)
+    {
+        var before = export.Data;
+        export.WriteProperties(props);
+        return !export.DataReadOnly.SequenceEqual(before);
+    }
+}

@@ -40,8 +40,8 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `quest_map_get` | An LE1 journal map (`BioQuestMap`): quests with goals, tasks and plot items (strrefs with their global text, states, InstanceVersions) and the evaluations a plot change runs |
 | `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
 | `plot_build` | Build a DLC plot package from a YAML file ([format below](#plot_build-yaml)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
-| `level_build` | Build a level's NPCs from a YAML file ([format below](#level_build-yaml)): pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), an idle pose with fidgets (a vanilla action-station prefab: left to talk, resumed after), the Sideloader config; creates a missing level; writes only what differs |
-| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
+| `level_build` | Build a level from a YAML file ([format below](#level_build-yaml)). The level: vanilla sub-levels it shows inside a stream volume copied from a vanilla map, its post-process, start points (a location of our own: `at <map> <tag>`). Its NPCs: pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), an idle pose with fidgets (a vanilla action-station prefab: left to talk, resumed after), the Sideloader config; creates a missing level; writes only what differs |
+| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels (`npcs`, `streaming` or `startPoints`) through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
 | `mod_install` | Install a mod with ME3Tweaks Mod Manager (`--installmod`, optional `--bootgame`): DLC copy, Coalesced merge of ConfigDelta files, AutoTOC. Waits on M3's log, then compares every mod file with its installed copy. Refuses while the game runs |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
 | `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
@@ -144,7 +144,7 @@ Every event and quest in the file replaces the package's; the others are kept an
 
 ## level_build YAML
 
-Example: [`mods/claude-chakwas/level.yaml`](../../mods/claude-chakwas/level.yaml).
+Examples: [`mods/claude-chakwas/level.yaml`](../../mods/claude-chakwas/level.yaml) (an NPC), [`mods/claude-chakwas/cabin.yaml`](../../mods/claude-chakwas/cabin.yaml) (a location). Every top-level key but `package` is optional.
 
 ```yaml
 package: 'D:\...\CookedPCConsole\ClaudeNPC_NOR10.pcc'   # created (empty level) if missing; full path only
@@ -152,6 +152,15 @@ sideloader: [BIOA_NOR10_07]    # optional: ConfigDelta .m3cd so LE1CP loads the 
 defaultLanguage: fr
 globalTlk: [DLC_MOD_X_GlobalTlk.pcc, DLC_MOD_X_GlobalTlk_FR.pcc]   # where the NPC's name goes
 lightTemplate: { package: BIOA_NOR10_07_DSG.pcc, actor: PointLightToggleable_7 }   # copied when the level has no light yet
+
+# A location: vanilla sub-levels shown inside a stream volume copied from a vanilla level (same place and shape)
+streaming:
+  volume: { package: BIOA_NOR00.pcc, actor: BioTriggerStream_27 }   # a BioTriggerStream around the room
+  levels: [BIOA_NOR10_09_ART, BIOA_NOR10_09_LAY]                     # file names; listed in BioWorldInfo.StreamingLevels
+postProcess: BIOA_NOR00.pcc                                          # copy that level's DefaultPostProcessSettings
+startPointTemplate: { package: BIOA_NOR00.pcc, actor: BioStartPoint_23 }   # imported for a start point the level does not have
+startPoints:
+  start_cld00: { location: [-6266.2, 12822.5, -36737], yaw: 0 }   # Tag → at <map> start_cld00
 
 npcs:
   reyes:                       # a label for the result
@@ -174,6 +183,8 @@ npcs:
 ```
 
 Every value given is enforced; a value left out stays as it is. Only values that differ are written, so a rebuild changes nothing. Errors name the YAML line.
+
+`streaming` gives the volume one `Default` state whose `VisibleChunkNames` are the `levels`: they show while the player is inside it, including when spawned there. The volume is found again by its source name; a start point by its tag, and it is put on the level's navigation list.
 
 `idle` Kismet in `Main_Sequence`: level loaded and visible → prefab `In`; with a conversation, use → `BioSeqAct_LeaveActionStation` and conversation `Out` (its end: the start action is latent) → prefab `In`. The prefab's `Teleport`, `Snap To Pose`, `Coll/PhysOFF` and `SnapToFloor` get a false bool, so she stays where `location` puts her. A new `pose` replaces the prefab (the old one is trashed, as LEX does).
 

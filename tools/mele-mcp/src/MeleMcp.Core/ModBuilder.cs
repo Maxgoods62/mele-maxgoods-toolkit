@@ -8,12 +8,13 @@ public sealed record ModBuildResult(string Folder, IReadOnlyList<PlotBuildResult
     IReadOnlyList<LevelBuildResult> LevelsAgain, IReadOnlyList<string> Skipped);
 
 /// <summary>
-/// Builds every YAML file of a mod's source folder: plot files (transitions, consequences, quests), levels (npcs), then
+/// Builds every YAML file of a mod's source folder: plot files (transitions, consequences, quests), levels (npcs, streaming, start points), then
 /// conversations, then again the levels whose NPCs named a conversation the level did not have yet.
 /// </summary>
 public static class ModBuilder
 {
     private static readonly string[] PlotKeys = ["transitions", "consequences", "quests"];
+    private static readonly string[] LevelKeys = ["npcs", "streaming", "startPoints"];
 
     public static ModBuildResult Build(MEGame game, string folder)
     {
@@ -32,9 +33,9 @@ public static class ModBuilder
             var root = Named(file, () => YamlFiles.Root(File.ReadAllText(file)));
             var keys = root.Children.Keys.OfType<YamlScalarNode>().Select(k => k.Value).ToHashSet();
             if (keys.Contains("conversation")) conversations.Add(file);
-            else if (keys.Contains("npcs")) levels.Add(file);
+            else if (keys.Overlaps(LevelKeys)) levels.Add(file);
             else if (keys.Overlaps(PlotKeys)) plots.Add(file);
-            else skipped.Add($"{Path.GetFileName(file)}: no 'conversation', 'npcs' or {string.Join("/", PlotKeys)}.");
+            else skipped.Add($"{Path.GetFileName(file)}: no 'conversation', {string.Join("/", LevelKeys)} or {string.Join("/", PlotKeys)}.");
         }
 
         // Plot files first (one can create the plot package whose transitions the conversations run), then levels (one can

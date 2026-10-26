@@ -14,14 +14,16 @@ namespace MeleMcp.Core;
 /// <param name="Changes">What this build changed; empty when the level already matched the file.</param>
 public sealed record BuiltNpc(string Name, ExportRow Pawn, string Action, IReadOnlyList<string> Changes);
 
+/// <param name="LevelChanges">What this build changed in the level itself (streamed files, post-process, start points).</param>
 /// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
-public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<BuiltNpc> Npcs, int StringCount, IReadOnlyList<string> TlkFiles,
+public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, int StringCount, IReadOnlyList<string> TlkFiles,
     string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
 
 /// <summary>
-/// Builds the NPCs of a Game 1 level from a YAML file: the pawn (found by tag, else imported from a template), position,
-/// name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that starts her
-/// conversation when Shepard uses her. A missing level is created, and the LE1CP Sideloader config that loads it is written.
+/// Builds a Game 1 level from a YAML file. The level itself: vanilla sub-levels it shows and their stream volume, its
+/// post-process, start points (see <see cref="LevelStreams"/>). Its NPCs: the pawn (found by tag, else imported from a
+/// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
+/// starts her conversation when Shepard uses her. A missing level is created, and the LE1CP Sideloader config that loads it is written.
 /// </summary>
 public static class LevelBuilder
 {
@@ -58,6 +60,10 @@ public static class LevelBuilder
         public List<string> GlobalTlk = [];
         public List<string>? Sideloader;
         public Source? LightTemplate;
+        public LevelStreams.Spec? Streaming;
+        public (string Package, int Line)? PostProcess;
+        public Source? StartPointTemplate;
+        public List<LevelStreams.StartPoint> StartPoints = [];
         public List<NpcSpec> Npcs = [];
         public readonly Dictionary<int, Dictionary<string, string>> Strings = [];
     }
@@ -88,10 +94,15 @@ public static class LevelBuilder
 
         var backups = new List<string>();
         var missing = new List<string>();
+        var levelChanges = new List<string>();
         var (npcs, backup) = PackageWriter.Edit(game, package, pcc =>
         {
             var level = pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no {LevelPath}; is it a level?");
             using var cache = new PackageCache();
+            if (spec.Streaming is { } streaming) LevelStreams.SetStreaming(game, pcc, level, streaming, cache, levelChanges);
+            if (spec.PostProcess is { } post) LevelStreams.SetPostProcess(game, pcc, level, post.Package, post.Line, levelChanges);
+            var template = spec.StartPointTemplate is { } t ? (t.Package ?? throw new ArgumentException($"line {t.Line}: 'startPointTemplate' needs a 'package'."), t.Actor) : ((string, string)?)null;
+            foreach (var start in spec.StartPoints) LevelStreams.SetStartPoint(game, pcc, level, start, template, levelChanges);
             return spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
         });
         backups.Add(backup);
@@ -109,7 +120,7 @@ public static class LevelBuilder
         }
 
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
-        return new LevelBuildResult(package, create, npcs, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
+        return new LevelBuildResult(package, create, levelChanges, npcs, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
     }
 
     private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache, List<string> missing, List<string> notes)
@@ -439,7 +450,8 @@ public static class LevelBuilder
     private static Spec Parse(string yaml)
     {
         var spec = new Spec();
-        foreach (var (key, value) in Entries(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "npcs"))
+        foreach (var (key, value) in Entries(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "streaming", "postProcess",
+                     "startPointTemplate", "startPoints", "npcs"))
         {
             switch (key)
             {
@@ -448,6 +460,13 @@ public static class LevelBuilder
                 case "globalTlk": spec.GlobalTlk = Sequence(value).Select(Scalar).ToList(); break;
                 case "sideloader": spec.Sideloader = Sequence(value).Select(Scalar).ToList(); break;
                 case "lightTemplate": spec.LightTemplate = SourceOf(value); break;
+                case "streaming": spec.Streaming = StreamingOf(value); break;
+                case "postProcess": spec.PostProcess = (Scalar(value), (int)value.Start.Line); break;
+                case "startPointTemplate": spec.StartPointTemplate = SourceOf(value); break;
+                case "startPoints":
+                    if (value is not YamlMappingNode starts) throw Fail(value, "'startPoints' maps tags to {location: [x, y, z], yaw: <degrees>}.");
+                    spec.StartPoints = starts.Children.Select(c => StartPointOf(Scalar(c.Key), c.Value)).ToList();
+                    break;
                 case "npcs":
                     if (value is not YamlMappingNode npcs) throw Fail(value, "'npcs' maps names to NPCs.");
                     spec.Npcs = npcs.Children.Select(c => NpcOf(Scalar(c.Key), c.Value, spec.Strings)).ToList();
@@ -540,6 +559,39 @@ public static class LevelBuilder
         }
         return new IdleStations.Spec(package ?? throw Fail(value, "the idle needs 'package' (a file whose Kismet has the pose)."),
             pose ?? throw Fail(value, "the idle needs 'pose' (an animation set, e.g. HMM_DP_ArmsCrossed)."), weights, (int)m.Start.Line);
+    }
+
+    /// <summary>{volume: {package: BIOA_NOR00.pcc, actor: BioTriggerStream_27}, levels: [BIOA_NOR10_09_ART, BIOA_NOR10_09_LAY]}.</summary>
+    private static LevelStreams.Spec StreamingOf(YamlNode value)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, "'streaming' is {volume: {package: <file>, actor: <BioTriggerStream>}, levels: [<file>, ...]}.");
+        Source? volume = null;
+        List<string>? levels = null;
+        foreach (var (key, v) in Entries(m, "volume", "levels"))
+        {
+            if (key == "volume") volume = SourceOf(v);
+            else levels = Sequence(v).Select(l => Path.GetFileNameWithoutExtension(Scalar(l))).ToList();
+        }
+        if (volume?.Package is null) throw Fail(value, "'streaming' needs 'volume': {package: <vanilla level>, actor: <its BioTriggerStream around the room>}.");
+        if (levels is not { Count: > 0 }) throw Fail(value, "'streaming' needs 'levels', the files shown inside the volume.");
+        return new LevelStreams.Spec(volume.Package, volume.Actor, levels, (int)m.Start.Line);
+    }
+
+    private static LevelStreams.StartPoint StartPointOf(string tag, YamlNode value)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, $"start point '{tag}' is {{location: [x, y, z], yaw: <degrees>}}.");
+        Vector3? location = null;
+        float? yaw = null;
+        foreach (var (key, v) in Entries(m, "location", "yaw"))
+        {
+            if (key == "location")
+            {
+                var xyz = Numbers(v, 3, 3);
+                location = new Vector3(xyz[0], xyz[1], xyz[2]);
+            }
+            else yaw = Number(v);
+        }
+        return new LevelStreams.StartPoint(tag, location ?? throw Fail(value, $"start point '{tag}' needs a 'location'."), yaw, (int)m.Start.Line);
     }
 
     private static LightSpec LightOf(YamlNode value)
