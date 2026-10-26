@@ -47,6 +47,7 @@ public static class LevelBuilder
         public NameSpec? ActorName;
         public float[]? Skin, Hair, Eyes;
         public string? Conversation;
+        public IdleStations.Spec? Idle;
         public List<LightSpec> Lights = [];
     }
 
@@ -147,11 +148,18 @@ public static class LevelBuilder
 
         SetColors(pcc, pawn, props, npc, changes, notes);
         foreach (var light in npc.Lights) SetLight(game, pcc, level, spec, npc, light, origin, rotation.Yaw, cache, changes);
-        if (npc.Conversation is { } conversation && !LinkConversation(pcc, pawn, conversation, npc.Line, cache, changes))
+        var talk = npc.Conversation is { } conversation ? LinkConversation(pcc, pawn, conversation, npc.Line, cache, changes) : null;
+        if (npc.Conversation is not null && talk is null)
         {
             // The conversation's own file creates it in this level; the level is built first so that it exists.
-            missing.Add(conversation);
-            notes.Add($"{npc.Name}: the level has no BioConversation '{conversation}' yet. Build it (conv_build; 'from' copies a template), then this file again to start it when Shepard uses her.");
+            missing.Add(npc.Conversation);
+            notes.Add($"{npc.Name}: the level has no BioConversation '{npc.Conversation}' yet. Build it (conv_build; 'from' copies a template), then this file again to start it when Shepard uses her.");
+        }
+
+        if (npc.Idle is { } idle)
+        {
+            var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {npc.Line}: the level has no {MainSequence}.");
+            IdleStations.Set(game, pcc, sequence, pawn, idle, talk?.Use, talk?.Start, cache, changes);
         }
 
         return new BuiltNpc(npc.Name, ExportInspector.Row(pawn), action, changes);
@@ -299,13 +307,13 @@ public static class LevelBuilder
 
     /// <summary>
     /// Main_Sequence: Shepard uses the pawn (BioSeqEvt_OnPlayerActivate) → BioSeqAct_StartConversation, Owner = the pawn.
-    /// False when the level has no conversation of that name.
+    /// Returns the use event and the start action; null when the level has no conversation of that name.
     /// </summary>
-    private static bool LinkConversation(IMEPackage pcc, ExportEntry pawn, string name, int line, PackageCache cache, List<string> changes)
+    private static (ExportEntry Use, ExportEntry Start)? LinkConversation(IMEPackage pcc, ExportEntry pawn, string name, int line, PackageCache cache, List<string> changes)
     {
         var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {line}: the level has no {MainSequence}.");
         var conversation = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioConversation" && e.ObjectName.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase));
-        if (conversation is null) return false;
+        if (conversation is null) return null;
         var objects = KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().ToList();
 
         bool Holds(IEntry? variable) => variable is ExportEntry { ClassName: "SeqVar_Object" } v && v.GetProperty<ObjectProperty>("ObjValue")?.Value == pawn.UIndex;
@@ -336,7 +344,7 @@ public static class LevelBuilder
             KismetHelper.CreateOutputLink(use, "Out", start, 0);
             changes.Add("Kismet: use → start");
         }
-        return true;
+        return (use, start);
     }
 
     /// <summary>ConfigDelta .m3cd next to the level: LE1CP's Sideloader loads it with the files whose names start with a prefix. M3 merges it at install.</summary>
@@ -455,7 +463,7 @@ public static class LevelBuilder
     {
         if (body is not YamlMappingNode m) throw Fail(body, $"NPC '{name}' must be a mapping.");
         var npc = new NpcSpec { Name = name, Line = (int)body.Start.Line };
-        foreach (var (key, value) in Entries(m, "tag", "template", "location", "yaw", "active", "name", "skin", "hair", "eyes", "conversation", "lights"))
+        foreach (var (key, value) in Entries(m, "tag", "template", "location", "yaw", "active", "name", "skin", "hair", "eyes", "conversation", "idle", "lights"))
         {
             switch (key)
             {
@@ -472,6 +480,7 @@ public static class LevelBuilder
                 case "hair": npc.Hair = Numbers(value, 3, 4); break;
                 case "eyes": npc.Eyes = Numbers(value, 3, 4); break;
                 case "conversation": npc.Conversation = Scalar(value); break;
+                case "idle": npc.Idle = IdleOf(value); break;
                 case "lights": npc.Lights = Sequence(value).Select(LightOf).ToList(); break;
             }
         }
@@ -509,6 +518,28 @@ public static class LevelBuilder
         if (type is null || strRef is null) throw Fail(value, "the name needs 'type' (its own actor type) and 'strref'.");
         if (text.Count > 0) Collect(strings, strRef.Value, text, (int)m.Start.Line);
         return new NameSpec(type, strRef.Value, (int)m.Start.Line);
+    }
+
+    /// <summary>{package: BIOA_NOR10_03_DSG.pcc, pose: HMM_DP_ArmsCrossed, weights: {Talk: 0, ...}}.</summary>
+    private static IdleStations.Spec IdleOf(YamlNode value)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, "an idle is {package: <file with the pose>, pose: <animation set>, weights: {<fidget>: <weight>}}.");
+        string? package = null, pose = null;
+        var weights = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, v) in Entries(m, "package", "pose", "weights"))
+        {
+            switch (key)
+            {
+                case "package": package = Scalar(v); break;
+                case "pose": pose = Scalar(v); break;
+                case "weights":
+                    if (v is not YamlMappingNode w) throw Fail(v, "weights map fidget names to numbers: {Talk: 0, Shrug: 1}.");
+                    foreach (var (name, weight) in w.Children) weights[Scalar(name)] = Number(weight);
+                    break;
+            }
+        }
+        return new IdleStations.Spec(package ?? throw Fail(value, "the idle needs 'package' (a file whose Kismet has the pose)."),
+            pose ?? throw Fail(value, "the idle needs 'pose' (an animation set, e.g. HMM_DP_ArmsCrossed)."), weights, (int)m.Start.Line);
     }
 
     private static LightSpec LightOf(YamlNode value)

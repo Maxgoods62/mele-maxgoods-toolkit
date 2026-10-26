@@ -40,7 +40,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `quest_map_get` | An LE1 journal map (`BioQuestMap`): quests with goals, tasks and plot items (strrefs with their global text, states, InstanceVersions) and the evaluations a plot change runs |
 | `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
 | `plot_build` | Build a DLC plot package from a YAML file ([format below](#plot_build-yaml)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
-| `level_build` | Build a level's NPCs from a YAML file ([format below](#level_build-yaml)): pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), the Sideloader config; creates a missing level; writes only what differs |
+| `level_build` | Build a level's NPCs from a YAML file ([format below](#level_build-yaml)): pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), an idle pose with fidgets (a vanilla action-station prefab: left to talk, resumed after), the Sideloader config; creates a missing level; writes only what differs |
 | `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
 | `mod_install` | Install a mod with ME3Tweaks Mod Manager (`--installmod`, optional `--bootgame`): DLC copy, Coalesced merge of ConfigDelta files, AutoTOC. Waits on M3's log, then compares every mod file with its installed copy. Refuses while the game runs |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
@@ -165,11 +165,17 @@ npcs:
     hair: [0.4, 0.02, 0.8]
     eyes: [0.03, 0.15, 0.6]
     conversation: ClaudeReyes_dlg   # a BioConversation in the level; Shepard uses her → it starts (missing: noted, linked on a later build)
+    idle:                      # ambient pose: a copy of the first action-station prefab of 'package' entering 'pose'
+      package: BIOA_NOR10_03_DSG.pcc
+      pose: HMM_DP_ArmsCrossed # also there: HMM_WI_Railing, HMM_WI_StandTyping; a wrong pose lists the file's poses
+      weights: { Talk: 0, Point: 0, HeadShake: 0 }   # fidget weights (Wt_<name> slots); the ones left out keep the prefab default
     lights:
       - { tag: claude_npc_01_light, offset: [0, 0, 120], radius: 180, brightness: 1.2 }   # offset: forward, right, up; turns with her
 ```
 
 Every value given is enforced; a value left out stays as it is. Only values that differ are written, so a rebuild changes nothing. Errors name the YAML line.
+
+`idle` Kismet in `Main_Sequence`: level loaded and visible → prefab `In`; with a conversation, use → `BioSeqAct_LeaveActionStation` and conversation `Out` (its end: the start action is latent) → prefab `In`. The prefab's `Teleport`, `Snap To Pose`, `Coll/PhysOFF` and `SnapToFloor` get a false bool, so she stays where `location` puts her. A new `pose` replaces the prefab (the old one is trashed, as LEX does).
 
 ## Layout
 
