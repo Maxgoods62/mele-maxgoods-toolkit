@@ -39,6 +39,8 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `id_alloc` | Free LE1 plot ids (bool, int, float, conditional, transition, consequence), quest ids or string ids from a start id, or a check of given ids. Sources: LEX's base-game plot database and `ModPlotsLE1` mod databases, the base game's plot maps, conditionals and GlobalTlk, and every installed DLC's `AutoLoad.ini` wiring; optional extra DLC folders (the M3 library copy) and packages (conversation TLKs). Each used id names its users |
 | `quest_map_get` | An LE1 journal map (`BioQuestMap`): quests with goals, tasks and plot items (strrefs with their global text, states, InstanceVersions) and the evaluations a plot change runs |
 | `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
+| `plot_build` | Build a DLC plot package from a YAML file ([format below](#plot_build-yaml)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
+| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, then conversations through `conv_build` |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
 | `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
 
@@ -60,7 +62,7 @@ Hot-reload notes:
 - The bytes must be **uncompressed** (LEX sends `SaveToStream(false)`). Sending a compressed file hung LE1: the engine's memory reader cannot decompress, falls back to opening the file by name, and that file is not on disk.
 - On LE1 + LE1CP the copy does not last. `BioTriggerStream.Touch`/`UnTouch` and Kismet `BioSeqAct_SetStreamingState` re-apply the area's streaming state (hand-streamed levels unload) and then call `SideloaderFramework.RunSideloader`, which re-forces every Sideloader level by name (`ClientUpdateLevelStreamingStatus`). Tested on the Normandy: reverted in 2–4 s with Shepard standing still. **Never fire LE1CP framework events by hand** (`Poll_NPC_*`, `Live_NPC_*`): it re-spawned several NPC files twice and hung LE1 in a loading loop. Streaming a framework-managed `BIONPC_*` file out and in also leaves the framework's NPC dormant (Chakwas vanished).
 
-**Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_*` writers, `facefx_copy_lines`, `kismet_*`, `level_new`, `plot_map_new`, `plot_event_set`, `quest_set`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
+**Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_*` writers, `facefx_copy_lines`, `kismet_*`, `level_new`, `plot_map_new`, `plot_event_set`, `quest_set`, `plot_build`, `mod_build`) back the package up (and `AutoLoad.ini`, which `plot_build` edits) to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
 
 ## conv_build YAML
 
@@ -96,6 +98,38 @@ nodes:
 ```
 
 Text goes to every `BioTlkFile` of the conversation's TLK set: its own language, else the language it shows (FE → FR, GE → DE, IE → IT, RA → RU, PLPC → PL), else `defaultLanguage`. Errors name the YAML line. All target files are checked before any is written.
+
+## plot_build YAML
+
+Example: [`mods/claude-chakwas/plot.yaml`](../../mods/claude-chakwas/plot.yaml).
+
+```yaml
+package: 'D:\...\CookedPCConsole\PlotManagerAutoDLC_X.pcc'   # created if missing (full path only)
+autoload: ..\AutoLoad.ini      # optional; default: the DLC folder's, next to CookedPCConsole; none: leave it alone
+defaultLanguage: fr
+globalTlk: [DLC_MOD_X_GlobalTlk.pcc, DLC_MOD_X_GlobalTlk_FR.pcc]   # journal text goes here (language from the file suffix)
+
+transitions:                   # StateTransitionMap: what a conversation node's transition runs
+  8421: [bool 8421 = true]
+  8422: [int 47 += 2, bool 8422 = true]   # elements as plot_map_get prints them; [] removes the event
+consequences: {}               # ConsequenceMap, same format
+
+quests:
+  8425:
+    mission: false             # true: Missions tab instead of Assignments
+    title: { strref: 74210040, fr: "...", en: "..." }   # any text: a bare strref, or {strref, <language>: text}
+    goals:                     # shown while its state bool is true; the last true goal wins
+      - { state: 8421, description: { strref: 74210041, fr: "..." } }   # also: title, conditional
+    tasks:
+      - name: { strref: 74210044, fr: "Parler à Reyes" }
+        description: { strref: 74210045, fr: "..." }    # also: plotItems [indexes], planet, waypoint
+      - { name: 74210046, complete: true }              # moves the quest to Completed
+    plotItems: []              # name, icon, state, conditional, targetItems
+    evals:                     # when the variable changes, the first evaluation that passes shows its task
+      - { when: bool 8421, task: 0 }                    # also: state (bool that must be true), conditional
+```
+
+Every event and quest in the file replaces the package's; the others are kept and listed in `notes`. Ids, states and conditionals take `none` for -1. Errors name the YAML line. All target files (package, GlobalTlk files, `AutoLoad.ini`) are checked before any is written. `mod_build folder=<dir>` runs every YAML of a folder: plot files first, then conversations.
 
 ## Layout
 

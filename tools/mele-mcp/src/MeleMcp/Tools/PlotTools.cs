@@ -43,4 +43,25 @@ public static class PlotTools
         [Description("BioStateEventMap export.")] string export = "StateTransitionMap",
         [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => PlotMaps.SetEvent(PackageTools.ParseGame(game), package, export, id, elements));
+
+    [McpServerTool(Name = "plot_build", Destructive = true),
+     Description("Builds an LE1 DLC plot package from a YAML file: state transitions and consequences (elements as plot_map_get prints them), "
+                 + "journal quests (title, goals, tasks, plot items, task evaluations) with their text written to the mod's GlobalTlk files, and "
+                 + "the missing AutoLoad.ini [Packages] lines. A missing package given as a full path is created. Every event and quest in the "
+                 + "file replaces the package's, others are kept; running it twice reports 'unchanged'. See the tool README for the format. "
+                 + "Backs every file up first and refuses files inside the game install.")]
+    public static PlotBuildResult PlotBuild(
+        [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
+        [Description("Plot package, instead of the file's 'package'.")] string? package = null,
+        [Description("Game: LE1.")] string game = "LE1")
+        => ToolErrors.Run(() => PlotBuilder.Build(PackageTools.ParseGame(game), file, package));
+
+    [McpServerTool(Name = "mod_build", Destructive = true),
+     Description("Builds every YAML file in a mod's source folder: plot files (with transitions, consequences or quests) through plot_build, "
+                 + "then conversation files (with 'conversation') through conv_build. Stops at the first error, naming the file; files "
+                 + "built before it stay saved.")]
+    public static ModBuildResult ModBuild(
+        [Description("Folder with the mod's YAML files, e.g. the repo's mods/<name>.")] string folder,
+        [Description("Game: LE1.")] string game = "LE1")
+        => ToolErrors.Run(() => ModBuilder.Build(PackageTools.ParseGame(game), folder));
 }

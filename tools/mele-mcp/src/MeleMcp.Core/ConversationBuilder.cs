@@ -2,8 +2,8 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Unreal;
-using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
+using static MeleMcp.Core.YamlFiles;
 
 namespace MeleMcp.Core;
 
@@ -28,12 +28,6 @@ public static partial class ConversationBuilder
 
     [GeneratedRegex(@"^[ER]\d+$", RegexOptions.IgnoreCase)]
     private static partial Regex NodeLabel();
-
-    /// <summary>Text-only languages fall back to the language whose text they show (FE = French text, English voice).</summary>
-    private static readonly Dictionary<string, string> TextLanguage = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["FE"] = "FR", ["GE"] = "DE", ["IE"] = "IT", ["RA"] = "RU", ["PLPC"] = "PL",
-    };
 
     private sealed record Ref(string Name, int Line);
 
@@ -297,30 +291,6 @@ public static partial class ConversationBuilder
         return rest.TrimStart('_') is { Length: > 0 } language ? language.ToUpperInvariant() : "INT";
     }
 
-    /// <summary>DLC_MOD_X_GlobalTlk_FR → FR; DLC_MOD_X_GlobalTlk → INT.</summary>
-    private static string LanguageOfFile(string name)
-    {
-        var tail = name[(name.LastIndexOf('_') + 1)..];
-        return name.Contains('_') && tail.Length is >= 2 and <= 4 && tail.All(char.IsUpper) && !tail.Equals("TLK", StringComparison.Ordinal) ? tail : "INT";
-    }
-
-    private static List<TlkString> StringsFor(Dictionary<int, Dictionary<string, string>> strings, string language, string defaultLanguage) =>
-        strings.Select(s => new TlkString(s.Key,
-                s.Value.GetValueOrDefault(language)
-                ?? (TextLanguage.TryGetValue(language, out var shown) ? s.Value.GetValueOrDefault(shown) : null)
-                ?? s.Value.GetValueOrDefault(defaultLanguage)
-                ?? s.Value.Values.First()))
-            .ToList();
-
-    private static void Collect(Dictionary<int, Dictionary<string, string>> strings, int strRef, Dictionary<string, string> text, int line)
-    {
-        if (strings.TryGetValue(strRef, out var existing) && !existing.OrderBy(p => p.Key).SequenceEqual(text.OrderBy(p => p.Key)))
-        {
-            throw new ArgumentException($"line {line}: strref {strRef} is given two different texts.");
-        }
-        strings[strRef] = text;
-    }
-
     private static string Label(Dictionary<string, string> labels, Ref r)
     {
         if (labels.TryGetValue(r.Name, out var label)) return label;
@@ -328,33 +298,11 @@ public static partial class ConversationBuilder
         throw new ArgumentException($"line {r.Line}: unknown node '{r.Name}'. Name a node of the file (defined above for a template) or E<n>/R<n>.");
     }
 
-    /// <summary>A path as given, then relative to each folder in turn, then a file name the game loads.</summary>
-    private static string Locate(MEGame game, string package, params string[] dirs)
-    {
-        var candidate = GamePaths.ToWindowsPath(package);
-        foreach (var dir in dirs)
-        {
-            var relative = Path.Combine(dir, candidate);
-            if (File.Exists(relative)) return Path.GetFullPath(relative);
-        }
-        return GamePaths.ResolvePackage(game, candidate);
-    }
-
     // ---- YAML ----
 
     private static Spec Parse(string yaml)
     {
-        var stream = new YamlStream();
-        try
-        {
-            stream.Load(new StringReader(yaml));
-        }
-        catch (YamlException e)
-        {
-            throw new ArgumentException($"line {e.Start.Line}: {e.Message}");
-        }
-        if (stream.Documents.Count == 0 || stream.Documents[0].RootNode is not YamlMappingNode root) throw new ArgumentException("The file is not a YAML mapping.");
-
+        var root = Root(yaml);
         var spec = new Spec();
         foreach (var (key, value) in Entries(root, "package", "conversation", "defaultLanguage", "globalTlk", "start", "nodes"))
         {
@@ -452,41 +400,5 @@ public static partial class ConversationBuilder
         throw Fail(value, $"cannot read condition '{text}'. Use: bool <id>, not bool <id>, bool <id> false, conditional <id> [param <n>], none.");
     }
 
-    private static Dictionary<string, string> Text(YamlNode value)
-    {
-        if (value is YamlScalarNode) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["*"] = Scalar(value) };
-        if (value is not YamlMappingNode m) throw Fail(value, "text is a string or a mapping of languages (fr, en...).");
-        return m.Children.ToDictionary(c => Language(Scalar(c.Key)), c => Scalar(c.Value), StringComparer.OrdinalIgnoreCase);
-    }
-
-    /// <summary>Language codes as the game names them; en means INT.</summary>
-    private static string Language(string code) => code.Trim().ToUpperInvariant() switch
-    {
-        "EN" or "INT" => "INT",
-        var other => other,
-    };
-
-    private static IEnumerable<(string Key, YamlNode Value)> Entries(YamlMappingNode m, params string[] allowed)
-    {
-        foreach (var (k, v) in m.Children)
-        {
-            var key = Scalar(k);
-            if (!allowed.Contains(key)) throw Fail(k, $"unknown key '{key}'. Allowed here: {string.Join(", ", allowed)}.");
-            yield return (key, v);
-        }
-    }
-
     private static Ref RefOf(YamlNode value) => new(Scalar(value), (int)value.Start.Line);
-
-    private static string Scalar(YamlNode value) => value is YamlScalarNode { Value: { } s } ? s : throw Fail(value, "expected a single value.");
-
-    private static IEnumerable<YamlNode> Sequence(YamlNode value) => value is YamlSequenceNode s ? s.Children : throw Fail(value, "expected a list.");
-
-    private static int Int(YamlNode value) =>
-        int.TryParse(Scalar(value).TrimStart('$'), NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : throw Fail(value, "expected a whole number.");
-
-    private static float Float(YamlNode value) =>
-        float.TryParse(Scalar(value), NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0 ? f : throw Fail(value, "expected a positive number of seconds.");
-
-    private static ArgumentException Fail(YamlNode node, string message) => new($"line {node.Start.Line}: {message}");
 }

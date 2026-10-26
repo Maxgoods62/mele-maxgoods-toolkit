@@ -86,76 +86,90 @@ public static class QuestMaps
 
         var ((row, created, before, after, evalInfos, path, packageName), backup) = PackageWriter.Edit(game, fileOrPath, pcc =>
         {
-            var map = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioQuestMap"
-                && (e.InstancedFullPath.Equals(export, StringComparison.OrdinalIgnoreCase) || e.ObjectName.Instanced.Equals(export, StringComparison.OrdinalIgnoreCase)));
-            var created = map is null;
-            if (map is null)
-            {
-                if (remove) throw new ArgumentException($"{pcc.FilePath} has no BioQuestMap '{export}'.");
-                map = CreateMap(pcc, export);
-            }
-
-            var bin = ObjectBinary.From<BioQuestMap>(map);
-            var old = bin.Quests.FirstOrDefault(q => q.ID == questId);
-            if (remove && old is null) throw new ArgumentException($"No quest {questId} to remove.");
-            bin.Quests.RemoveAll(q => q.ID == questId);
-            foreach (var lists in new[] { bin.TaskEvals, bin.IntTaskEvals, bin.FloatTaskEvals })
-            {
-                foreach (var list in lists) list.TaskEvals.RemoveAll(e => e.Quest == questId);
-                lists.RemoveAll(l => l.TaskEvals.Count == 0);
-            }
-
-            BioQuest? quest = null;
-            if (!remove)
-            {
-                quest = new BioQuest
-                {
-                    ID = questId,
-                    InstanceVersion = QuestVersion,
-                    IsMission = isMission,
-                    Goals = goals.Select(g => new BioQuestGoal
-                        { InstanceVersion = GoalVersion, Name = g.Name, Description = g.Description, Conditional = g.Conditional, State = g.State }).ToList(),
-                    Tasks = tasks.Select(t => new BioQuestTask
-                    {
-                        InstanceVersion = TaskVersion, QuestCompleteTask = t.QuestComplete, Name = t.Name, Description = t.Description,
-                        PlotIndices = [.. t.PlotItems ?? []], PlanetName = new NameReference(t.PlanetName ?? "None"), WaypointRef = t.Waypoint ?? "",
-                    }).ToList(),
-                    PlotItems = plotItems.Select(p => new BioQuestPlotItem
-                    {
-                        InstanceVersion = PlotItemVersion, Name = p.Name, IconIndex = p.IconIndex, Conditional = p.Conditional, State = p.State, TargetItems = p.TargetItems,
-                    }).ToList(),
-                };
-                bin.Quests.Add(quest);
-                bin.Quests.Sort((a, b) => a.ID.CompareTo(b.ID));
-
-                foreach (var e in evals)
-                {
-                    var lists = ListsFor(bin, e.Variable);
-                    var list = lists.FirstOrDefault(l => l.ID == e.Id);
-                    if (list is null)
-                    {
-                        list = new BioStateTaskList { ID = e.Id, InstanceVersion = TaskListVersion, TaskEvals = [] };
-                        lists.Add(list);
-                        lists.Sort((a, b) => a.ID.CompareTo(b.ID));
-                    }
-                    list.TaskEvals.Add(new BioTaskEval { InstanceVersion = TaskEvalVersion, Task = e.Task, Conditional = e.Conditional, State = e.State, Quest = questId });
-                }
-            }
-            map.WriteBinary(bin);
-
-            var evalInfos = new[] { ("bool", bin.TaskEvals), ("int", bin.IntTaskEvals), ("float", bin.FloatTaskEvals) }
-                .SelectMany(t => t.Item2.SelectMany(l => l.TaskEvals.Where(e => e.Quest == questId).Select(e =>
-                    new TaskEvalInfo(t.Item1, l.ID, l.InstanceVersion, e.InstanceVersion, e.Quest, e.Task, e.Conditional, e.State))))
-                .ToList();
-            return (ExportInspector.Row(map), created, old is null ? null : Info(old, _ => null), quest is null ? null : Info(quest, _ => null),
-                    evalInfos, pcc.FilePath, Path.GetFileNameWithoutExtension(pcc.FilePath));
+            var r = SetIn(pcc, export, questId, isMission, goals, tasks, plotItems, evals, remove);
+            return (r.Map, r.CreatedMap, r.Before, r.After, r.TaskEvals, pcc.FilePath, Path.GetFileNameWithoutExtension(pcc.FilePath));
         });
 
         IReadOnlyList<string> lines = created ? [$"PlotManagerQuestMap1={packageName}.{row.InstancedFullPath}"] : [];
         return new QuestEdit(path, row, created, before, after, evalInfos, lines, backup);
     }
 
-    private static void Validate(IReadOnlyList<QuestTaskSpec> tasks, IReadOnlyList<QuestPlotItemSpec> plotItems, IReadOnlyList<QuestTaskEvalSpec> evals)
+    internal sealed record QuestChange(ExportRow Map, bool CreatedMap, QuestInfo? Before, QuestInfo? After, List<TaskEvalInfo> BeforeEvals, List<TaskEvalInfo> TaskEvals);
+
+    /// <summary>Set inside an open package (validated by the caller).</summary>
+    internal static QuestChange SetIn(IMEPackage pcc, string export, int questId, bool isMission,
+                                      IReadOnlyList<QuestGoalSpec> goals, IReadOnlyList<QuestTaskSpec> tasks, IReadOnlyList<QuestPlotItemSpec> plotItems,
+                                      IReadOnlyList<QuestTaskEvalSpec> evals, bool remove)
+    {
+        var map = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioQuestMap"
+            && (e.InstancedFullPath.Equals(export, StringComparison.OrdinalIgnoreCase) || e.ObjectName.Instanced.Equals(export, StringComparison.OrdinalIgnoreCase)));
+        var created = map is null;
+        if (map is null)
+        {
+            if (remove) throw new ArgumentException($"{pcc.FilePath} has no BioQuestMap '{export}'.");
+            map = CreateMap(pcc, export);
+        }
+
+        var bin = ObjectBinary.From<BioQuestMap>(map);
+        var old = bin.Quests.FirstOrDefault(q => q.ID == questId);
+        if (remove && old is null) throw new ArgumentException($"No quest {questId} to remove.");
+        var oldEvals = EvalsOf(bin, questId);
+        bin.Quests.RemoveAll(q => q.ID == questId);
+        foreach (var lists in new[] { bin.TaskEvals, bin.IntTaskEvals, bin.FloatTaskEvals })
+        {
+            foreach (var list in lists) list.TaskEvals.RemoveAll(e => e.Quest == questId);
+            lists.RemoveAll(l => l.TaskEvals.Count == 0);
+        }
+
+        BioQuest? quest = null;
+        if (!remove)
+        {
+            quest = new BioQuest
+            {
+                ID = questId,
+                InstanceVersion = QuestVersion,
+                IsMission = isMission,
+                Goals = goals.Select(g => new BioQuestGoal
+                    { InstanceVersion = GoalVersion, Name = g.Name, Description = g.Description, Conditional = g.Conditional, State = g.State }).ToList(),
+                Tasks = tasks.Select(t => new BioQuestTask
+                {
+                    InstanceVersion = TaskVersion, QuestCompleteTask = t.QuestComplete, Name = t.Name, Description = t.Description,
+                    PlotIndices = [.. t.PlotItems ?? []], PlanetName = new NameReference(t.PlanetName ?? "None"), WaypointRef = t.Waypoint ?? "",
+                }).ToList(),
+                PlotItems = plotItems.Select(p => new BioQuestPlotItem
+                {
+                    InstanceVersion = PlotItemVersion, Name = p.Name, IconIndex = p.IconIndex, Conditional = p.Conditional, State = p.State, TargetItems = p.TargetItems,
+                }).ToList(),
+            };
+            bin.Quests.Add(quest);
+            bin.Quests.Sort((a, b) => a.ID.CompareTo(b.ID));
+
+            foreach (var e in evals)
+            {
+                var lists = ListsFor(bin, e.Variable);
+                var list = lists.FirstOrDefault(l => l.ID == e.Id);
+                if (list is null)
+                {
+                    list = new BioStateTaskList { ID = e.Id, InstanceVersion = TaskListVersion, TaskEvals = [] };
+                    lists.Add(list);
+                    lists.Sort((a, b) => a.ID.CompareTo(b.ID));
+                }
+                list.TaskEvals.Add(new BioTaskEval { InstanceVersion = TaskEvalVersion, Task = e.Task, Conditional = e.Conditional, State = e.State, Quest = questId });
+            }
+        }
+        map.WriteBinary(bin);
+
+        return new QuestChange(ExportInspector.Row(map), created, old is null ? null : Info(old, _ => null), quest is null ? null : Info(quest, _ => null),
+            oldEvals, EvalsOf(bin, questId));
+    }
+
+    private static List<TaskEvalInfo> EvalsOf(BioQuestMap bin, int questId) =>
+        new[] { ("bool", bin.TaskEvals), ("int", bin.IntTaskEvals), ("float", bin.FloatTaskEvals) }
+            .SelectMany(t => t.Item2.SelectMany(l => l.TaskEvals.Where(e => e.Quest == questId).Select(e =>
+                new TaskEvalInfo(t.Item1, l.ID, l.InstanceVersion, e.InstanceVersion, e.Quest, e.Task, e.Conditional, e.State))))
+            .ToList();
+
+    internal static void Validate(IReadOnlyList<QuestTaskSpec> tasks, IReadOnlyList<QuestPlotItemSpec> plotItems, IReadOnlyList<QuestTaskEvalSpec> evals)
     {
         if (tasks.Count == 0) throw new ArgumentException("A quest needs at least one task (the journal shows the task an evaluation picks).");
         for (var i = 0; i < tasks.Count; i++)

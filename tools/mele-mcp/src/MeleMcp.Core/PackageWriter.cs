@@ -35,7 +35,7 @@ public static class PackageWriter
         }
     }
 
-    private static string Backup(string path)
+    internal static string Backup(string path)
     {
         var dir = Environment.GetEnvironmentVariable(BackupDirEnvVar);
         dir = string.IsNullOrWhiteSpace(dir) ? DefaultBackupDir : GamePaths.ToWindowsPath(dir);

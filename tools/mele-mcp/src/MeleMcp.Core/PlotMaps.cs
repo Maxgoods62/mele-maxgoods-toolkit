@@ -87,20 +87,8 @@ public static partial class PlotMaps
             if (map.ClassName != "BioStateEventMap") throw new ArgumentException($"#{map.UIndex} is a {map.ClassName}, not a BioStateEventMap.");
 
             var bin = ObjectBinary.From<BioStateEventMap>(map);
-            var old = bin.StateEvents.FirstOrDefault(e => e.ID == id);
-            var before = old?.Elements.Select(Describe).ToList();
-            bin.StateEvents.RemoveAll(e => e.ID == id);
-            List<string>? after = null;
-            if (parsed.Count > 0)
-            {
-                bin.StateEvents.Add(new BioStateEvent { ID = id, InstanceVersion = 0, Elements = parsed });
-                bin.StateEvents.Sort((a, b) => a.ID.CompareTo(b.ID));
-                after = parsed.Select(Describe).ToList();
-            }
-            else if (old is null)
-            {
-                throw new ArgumentException($"No event {id} to remove.");
-            }
+            var (before, after) = SetEventIn(bin, id, parsed);
+            if (before is null && after is null) throw new ArgumentException($"No event {id} to remove.");
             map.WriteBinary(bin);
             return (ExportInspector.Row(map), before, after, pcc.FilePath);
         });
@@ -108,7 +96,18 @@ public static partial class PlotMaps
         return new PlotEventEdit(path, row, id, before, after, backup);
     }
 
-    private static BioStateEventElement Parse(string text)
+    /// <summary>Replaces event <paramref name="id"/> in a loaded map (no elements removes it); the caller writes the binary.</summary>
+    internal static (List<string>? Before, List<string>? After) SetEventIn(BioStateEventMap bin, int id, List<BioStateEventElement> parsed)
+    {
+        var before = bin.StateEvents.FirstOrDefault(e => e.ID == id)?.Elements.Select(Describe).ToList();
+        bin.StateEvents.RemoveAll(e => e.ID == id);
+        if (parsed.Count == 0) return (before, null);
+        bin.StateEvents.Add(new BioStateEvent { ID = id, InstanceVersion = 0, Elements = parsed });
+        bin.StateEvents.Sort((a, b) => a.ID.CompareTo(b.ID));
+        return (before, parsed.Select(Describe).ToList());
+    }
+
+    internal static BioStateEventElement Parse(string text)
     {
         var inv = CultureInfo.InvariantCulture;
         var t = VersionSuffix().Replace(text.Trim(), "");
