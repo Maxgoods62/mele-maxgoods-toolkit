@@ -17,18 +17,18 @@ public sealed record IdSourceSummary(string Source, int Count, int MinId, int Ma
 public sealed record IdReport(string Kind, IReadOnlyList<int> Free, IReadOnlyList<IdUse> Used, IReadOnlyList<IdSourceSummary> Sources, IReadOnlyList<string> Notes);
 
 /// <summary>
-/// Game 1 plot and string ids already in use: LEX's base-game plot database, LEX mod plot databases, and what the base
-/// game and every installed DLC wire in their Autoload.ini (plot maps, conditionals, GlobalTlk), so new ids do not collide.
+/// Game 1 plot, quest and string ids already in use: LEX's base-game plot database, LEX mod plot databases, and what the base
+/// game and every installed DLC wire in their Autoload.ini (plot and quest maps, conditionals, GlobalTlk), so new ids do not collide.
 /// </summary>
 public static class IdAllocator
 {
-    public static readonly string[] Kinds = ["bool", "int", "float", "conditional", "transition", "consequence", "strref"];
+    public static readonly string[] Kinds = ["bool", "int", "float", "conditional", "transition", "consequence", "quest", "strref"];
 
     private const int SearchSpan = 1_000_000;
 
     private sealed record Source(string Name, HashSet<int> Ids);
 
-    private sealed record AutoloadEntry(string Key, string Package, string Export);
+    internal sealed record AutoloadEntry(string Key, string Package, string Export);
 
     public static IdReport Find(MEGame game, string kind, IReadOnlyList<int>? ids, int? from, int count,
                                 IReadOnlyList<string>? extraDlcFolders, IReadOnlyList<string>? packages)
@@ -114,6 +114,9 @@ public static class IdAllocator
             case "conditional":
                 AddPackage(sources, notes, "base game", GamePaths.ResolvePackage(game, "PlotManager.pcc"), "BioAutoConditionals", kind);
                 break;
+            case "quest":
+                AddPackage(sources, notes, "base game", Path.Combine(cooked, "BIOC_Materials.pcc"), "PlotManagerAuto.QuestMap", kind);
+                break;
             case "strref":
                 AddPackage(sources, notes, "base game", Path.Combine(cooked, "Startup_INT.pcc"), null, kind);
                 break;
@@ -176,6 +179,7 @@ public static class IdAllocator
         {
             "strref" => e.ClassName == "BioTlkFile",
             "conditional" => false,
+            "quest" => e.ClassName == "BioQuestMap" && (export is null || e.InstancedFullPath.Equals(export, StringComparison.OrdinalIgnoreCase)),
             _ => e.ClassName == "BioStateEventMap" && (export is null ? MapMatches(e.ObjectName.Instanced, kind)
                                                                       : e.InstancedFullPath.Equals(export, StringComparison.OrdinalIgnoreCase)),
         };
@@ -195,7 +199,7 @@ public static class IdAllocator
         var targets = pcc.Exports.Where(Wanted).ToList();
         if (targets.Count == 0)
         {
-            notes.Add($"{owner}: {file} has no {(kind == "strref" ? "BioTlkFile" : export ?? "plot map")} export.");
+            notes.Add($"{owner}: {file} has no {(kind switch { "strref" => "BioTlkFile", "quest" => "BioQuestMap", _ => export ?? "plot map" })} export.");
             return;
         }
         if (kind == "strref")
@@ -206,7 +210,9 @@ public static class IdAllocator
         }
         foreach (var target in targets)
         {
-            Add(sources, $"{owner}: {file} {target.InstancedFullPath}", MapIds(ObjectBinary.From<BioStateEventMap>(target), kind));
+            Add(sources, $"{owner}: {file} {target.InstancedFullPath}", kind == "quest"
+                ? ObjectBinary.From<BioQuestMap>(target).Quests.Select(q => q.ID)
+                : MapIds(ObjectBinary.From<BioStateEventMap>(target), kind));
         }
     }
 
@@ -246,12 +252,13 @@ public static class IdAllocator
         "bool" or "int" or "float" => key.StartsWith("PlotManagerStateTransitionMap", StringComparison.OrdinalIgnoreCase)
                                       || key.StartsWith("PlotManagerConsequenceMap", StringComparison.OrdinalIgnoreCase),
         "conditional" => key.StartsWith("PlotManagerConditionals", StringComparison.OrdinalIgnoreCase),
+        "quest" => key.StartsWith("PlotManagerQuestMap", StringComparison.OrdinalIgnoreCase),
         "strref" => key.StartsWith("GlobalTalkTable", StringComparison.OrdinalIgnoreCase),
         _ => false,
     };
 
     /// <summary>The [Packages] entries of an Autoload.ini whose value is Package.Export.</summary>
-    private static List<AutoloadEntry> ReadPackages(string ini)
+    internal static List<AutoloadEntry> ReadPackages(string ini)
     {
         var entries = new List<AutoloadEntry>();
         var inPackages = false;
@@ -273,6 +280,6 @@ public static class IdAllocator
         return entries;
     }
 
-    private static string? FindPackage(string folder, string package) =>
+    internal static string? FindPackage(string folder, string package) =>
         Directory.EnumerateFiles(folder, package + ".pcc", SearchOption.AllDirectories).FirstOrDefault();
 }
