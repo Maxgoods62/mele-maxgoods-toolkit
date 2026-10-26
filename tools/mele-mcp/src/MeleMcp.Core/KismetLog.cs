@@ -46,6 +46,20 @@ public static partial class KismetLog
         return new KismetLogResult(path, steps.Count, matches.Count, shown);
     }
 
+    /// <summary>Every activation of the current or last game session, or none when the ASI has never written its log.</summary>
+    internal static (string Path, List<KismetStep> Steps)? TryReadAll(MEGame game)
+    {
+        try
+        {
+            var path = DebugLog.AsiLog(game, "KismetLogger");
+            return (path, Parse(path));
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+    }
+
     private static double Seconds(KismetStep s) => double.Parse(s.Time, CultureInfo.InvariantCulture);
 
     private static List<KismetStep> Parse(string path)

@@ -13,6 +13,19 @@ public static class KismetTools
     private const string WriteRule =
         " Backs the package up first. Refuses files inside the game install: edit the mod's copy in the M3 library.";
 
+    [McpServerTool(Name = "kismet_read", ReadOnly = true),
+     Description("Reads a Kismet sequence as text: ops in flow order (events first, then along output links), each with its settings "
+                 + "(EventName, Conv...), linked outputs (Out → Target.In) and variables with their values. With the Kismet Logger ASI "
+                 + "installed, each op is marked ✓ (fired this game session, with input pins and counts) or ✗: play, then read where the chain stops.")]
+    public static string KismetRead(
+        [Description(PackageDescription)] string package,
+        [Description("Sequence export (UIndex, path or unique name), e.g. TheWorld.PersistentLevel.Main_Sequence.")] string sequence = "TheWorld.PersistentLevel.Main_Sequence",
+        [Description("Mark ops fired or not from the Kismet Logger's log of the current or last session.")] bool trace = true,
+        [Description("all, fired or unfired.")] string show = "all",
+        [Description("Also print every nested sequence (prefabs can hold hundreds of ops).")] bool recurse = false,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => KismetReader.Read(PackageTools.ParseGame(game), package, sequence, trace, show, recurse));
+
     [McpServerTool(Name = "kismet_add", Destructive = true),
      Description("Creates a Kismet object (event, action, variable) with its class defaults inside a sequence, e.g. "
                  + "BioSeqEvt_OnPlayerActivate, BioSeqAct_StartConversation, SeqVar_Object. Returns its link slot names for kismet_link; "

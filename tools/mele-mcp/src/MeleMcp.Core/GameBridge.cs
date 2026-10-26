@@ -25,6 +25,9 @@ public static class GameBridge
 
     public static string PipeName(MEGame game) => $"LEX_{game}_COMM_PIPE";
 
+    /// <summary>The game's process name, e.g. MassEffect1.</summary>
+    public static string ProcessName(MEGame game) => Target(game).Process;
+
     public static bool IsGameRunning(MEGame game)
     {
         var processes = Process.GetProcessesByName(Target(game).Process);

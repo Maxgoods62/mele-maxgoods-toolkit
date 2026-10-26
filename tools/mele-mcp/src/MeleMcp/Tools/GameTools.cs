@@ -58,6 +58,37 @@ public static class GameTools
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => KismetLog.Read(PackageTools.ParseGame(game), contains, lastSeconds, grouped, limit));
 
+    [McpServerTool(Name = "game_screenshot", ReadOnly = true),
+     Description("Saves a PNG of the game window (windowed or borderless; works behind other windows) and returns its Windows and WSL "
+                 + "paths: open the WSL path with Read to see it. Check a change yourself (lit? placed? visible?) instead of asking the user.")]
+    public static Screenshot GameScreenshot(
+        [Description("Where to save the PNG (Windows or /mnt/<drive> path). Default: %LOCALAPPDATA%\\mele-mcp\\screenshots\\<game>_<time>.png.")] string? path = null,
+        [Description("Scale down to this width in pixels (0: full size).")] int maxWidth = 1280,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => Core.GameScreenshot.Take(PackageTools.ParseGame(game), path is null ? null : GamePaths.ToWindowsPath(path), maxWidth));
+
+    [McpServerTool(Name = "game_cycle", Destructive = true),
+     Description("The whole test loop in one call: closes the running game WITHOUT SAVING (console exit; force kills it), runs mod_check "
+                 + "(stops on errors) and mod_install with boot (or only boots, with no mod), waits for the main menu in the DebugLogger "
+                 + "log, loads a developer save slot (BioLoadGame <n> loads Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's "
+                 + "BioSaveGame <n> writes where Shepard stands; career saves can't be loaded this way), runs console "
+                 + "commands (e.g. 'at BIOA_CLD01 start_cld01'), waits for the map and takes a screenshot to Read. Takes 1–3 minutes.")]
+    public static GameCycleResult GameCycle(
+        [Description("Mod to check and install first (as mod_install takes it, e.g. 'Claude Test Chakwas'); omit to only restart.")] string? mod = null,
+        [Description("Developer save slot to load from the menu: n for BioSaveGame<n>.sav, made once in game with game_console 'BioSaveGame <n>'.")] int? loadSlot = null,
+        [Description("Console commands to run after the load, in order.")] string[]? commands = null,
+        [Description("Map to wait for (persistent level file name without .pcc, e.g. BIOA_CLD01); default the first one the save loads.")] string? waitForMap = null,
+        [Description("Run mod_check before installing and stop on errors.")] bool check = true,
+        [Description("Languages mod_check requires text for, comma-separated.")] string languages = "INT,FR",
+        [Description("Take a screenshot at the end.")] bool screenshot = true,
+        [Description("Seconds to wait after the menu and after the map, for the loading screen to clear.")] double settleSeconds = 8,
+        [Description("Kill the game if it does not close within 30 s of exit.")] bool force = false,
+        [Description("Seconds to wait for the menu, and again for the map.")] int timeoutSeconds = 240,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => Core.GameCycle.Run(PackageTools.ParseGame(game), new Core.GameCycle.Options(
+            mod, check, languages.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), loadSlot,
+            commands ?? [], waitForMap, settleSeconds, screenshot, force, timeoutSeconds)));
+
     [McpServerTool(Name = "game_remote_event"),
      Description("Fires every enabled Kismet SeqEvent_RemoteEvent with this name in the running game. "
                  + "Do not fire LE1CP NPC framework events (Live_NPC_*, Poll_NPC_*): one hung LE1 in a streaming loop on 2026-10-25.")]

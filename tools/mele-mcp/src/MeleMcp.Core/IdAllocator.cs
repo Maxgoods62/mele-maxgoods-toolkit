@@ -26,7 +26,7 @@ public static class IdAllocator
 
     private const int SearchSpan = 1_000_000;
 
-    private sealed record Source(string Name, HashSet<int> Ids);
+    internal sealed record Source(string Name, HashSet<int> Ids);
 
     internal sealed record AutoloadEntry(string Key, string Package, string Export);
 
@@ -79,7 +79,7 @@ public static class IdAllocator
         return new IdReport(kind, free, used, summaries, notes);
     }
 
-    private static List<Source> Collect(MEGame game, string kind, IReadOnlyList<string> extraDlcFolders, IReadOnlyList<string> packages, List<string> notes)
+    internal static List<Source> Collect(MEGame game, string kind, IReadOnlyList<string> extraDlcFolders, IReadOnlyList<string> packages, List<string> notes)
     {
         var sources = new List<Source>();
         if (kind != "strref")

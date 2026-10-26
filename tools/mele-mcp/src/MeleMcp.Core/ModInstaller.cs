@@ -27,8 +27,7 @@ public static class ModInstaller
         if (!game.IsLEGame()) throw new ArgumentException("mod_install handles LE1, LE2 and LE3.");
         LecHost.EnsureInitialized();
 
-        var m3 = Registry.GetValue(@"HKEY_CURRENT_USER\SOFTWARE\ME3Tweaks", "ExecutableLocation", null) as string;
-        if (m3 is null || !File.Exists(m3)) throw new FileNotFoundException("ME3TweaksModManager.exe not found (HKCU\\SOFTWARE\\ME3Tweaks ExecutableLocation). Start M3 once.");
+        var m3 = M3Path();
         var moddesc = FindModDesc(game, mod, m3);
         var ini = ReadIni(moddesc);
         var name = ini.GetValueOrDefault("ModInfo")?.GetValueOrDefault("modname") ?? Path.GetFileName(Path.GetDirectoryName(moddesc)!);
@@ -48,7 +47,7 @@ public static class ModInstaller
         var started = DateTime.UtcNow;
         var arguments = new List<string> { "--installmod", moddesc, "--game", game.ToString() };
         if (bootGame) arguments.Add("--bootgame");
-        Process.Start(new ProcessStartInfo(m3, arguments) { UseShellExecute = false });
+        StartM3(m3, arguments);
 
         // "Initializing mod installer panel for mod: <name> ..." starts it; the main stage ends with "Main stage of mod installation
         // has completed"; LE1 then merges Coalesced (ConfigDelta files) and ends with M3's AutoTOC panel.
@@ -92,6 +91,36 @@ public static class ModInstaller
             .ToList();
         return new ModInstallResult(name, moddesc, m3, completed, Math.Round((DateTime.UtcNow - started).TotalSeconds, 1),
             targets, checkedCount, differences, bootGame, lines);
+    }
+
+    /// <summary>Starts the game the way M3's Start game button does (M3 --bootgame), without installing anything.</summary>
+    public static void Boot(MEGame game)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("M3 runs on Windows.");
+        StartM3(M3Path(), ["--game", game.ToString(), "--bootgame"]);
+    }
+
+    private static string M3Path()
+    {
+        var m3 = Registry.GetValue(@"HKEY_CURRENT_USER\SOFTWARE\ME3Tweaks", "ExecutableLocation", null) as string;
+        if (m3 is null || !File.Exists(m3)) throw new FileNotFoundException("ME3TweaksModManager.exe not found (HKCU\\SOFTWARE\\ME3Tweaks ExecutableLocation). Start M3 once.");
+        return m3;
+    }
+
+    /// <summary>
+    /// Shell execute, so M3 (and the game it boots) do not inherit this server's stdio pipes: an MCP client waits for those to
+    /// close, which made calls hang until M3 exited.
+    /// </summary>
+    private static void StartM3(string m3, IEnumerable<string> arguments) =>
+        Process.Start(new ProcessStartInfo(m3, string.Join(' ', arguments.Select(a => a.Contains(' ') ? $"\"{a}\"" : a))) { UseShellExecute = true })?.Dispose();
+
+    /// <summary>The mod's moddesc.ini and its custom DLC folders (sourcedirs) in M3's library.</summary>
+    internal static (string ModDesc, IReadOnlyList<string> DlcFolders) Locate(MEGame game, string mod)
+    {
+        var moddesc = FindModDesc(game, mod, M3Path());
+        var sources = Split(ReadIni(moddesc).GetValueOrDefault("CUSTOMDLC")?.GetValueOrDefault("sourcedirs"));
+        if (sources.Count == 0) throw new ArgumentException($"{moddesc} has no [CUSTOMDLC] sourcedirs.");
+        return (moddesc, sources.Select(d => Path.Combine(Path.GetDirectoryName(moddesc)!, d)).ToList());
     }
 
     /// <summary>A moddesc.ini, a mod folder, or a mod's folder name in M3's library (mods\&lt;game&gt;\&lt;name&gt;).</summary>

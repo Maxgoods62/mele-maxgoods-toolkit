@@ -21,6 +21,12 @@ public static partial class GamePaths
         return $"{char.ToUpperInvariant(m.Groups[1].Value[0])}:{rest}";
     }
 
+    /// <summary>The WSL form of a Windows drive path (D:\x → /mnt/d/x), for Claude's own file tools; other paths unchanged.</summary>
+    public static string ToWslPath(string path) =>
+        path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\'
+            ? $"/mnt/{char.ToLowerInvariant(path[0])}/{path[3..].Replace('\\', '/')}"
+            : path;
+
     /// <summary>Forgets the cached file lists, so files installed since the last lookup are found.</summary>
     public static void RefreshLoadedFiles() => MELoadedFiles.InvalidateCaches();
 
