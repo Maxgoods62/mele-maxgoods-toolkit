@@ -109,6 +109,8 @@ nodes:
 
 Text goes to every `BioTlkFile` of the conversation's TLK set: its own language, else the language it shows (FE → FR, GE → DE, IE → IT, RA → RU, PLPC → PL), else `defaultLanguage`. A TLK whose strings already match is left as it is. Errors name the YAML line. All target files are checked before any is written.
 
+Squad comments (06 §A.25): copy a template whose speaker list names the henchmen (`hench_asari`, `hench_krogan`, ...). Give each henchman's line `if: conditional 415 param -1` (passes when that speaker is in the squad), and list them in priority order in the node before; the first that passes plays. A kept or templated node keeps its speaker.
+
 `from` copies the template's package (`<name>_D`: the conversation and its TLK set) with everything it references (the `<name>_N` node data, FaceFX sets, sounds), then renames the packages to `<base>_D` / `<base>_N`, the conversation to `conversation` and the set to `TlkSet_<base>` (base: `conversation` without `_dlg`), gives it `resref` and node ids from `nodeIds`, and removes every node's plot condition and transition. It refuses when the package already has the template's package or the new names. The template's nodes stay in the file; the ones the YAML does not reach are never played.
 
 ## plot_build YAML
