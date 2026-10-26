@@ -53,6 +53,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `game_status` | Game running, interop pipe present, reply round trip | ✅ |
 | `game_actors` | Every visible level with its actors (name, tag), filters | ✅ 21 levels, 1,051 actors |
 | `game_actor_get` / `game_actor_set` | Live location, rotation, scale, hidden; move/turn/hide one actor (not saved) | ✅ |
+| `npc_place` | Put an NPC of a `level_build` YAML where Shepard stands: writes `location`/`yaw` into the file, builds the level, moves her and her lights live as a preview | ✅ medbay, then kept after `mod_install` |
 | `game_player_location` | Shepard's position and rotation (reported only after a change, so it may ask you to take a step) | ✅ |
 | `game_console`, `game_stream_level`, `game_remote_event` | Fire-and-forget commands | sent, effect not checked |
 | `game_hot_reload` | Swap a streamed level for a package file under the name `<level>_LIVE<hhmmss>` | ⚠️ loads, but reverted within 2–4 s, see below |

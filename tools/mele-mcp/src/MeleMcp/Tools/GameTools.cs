@@ -79,4 +79,20 @@ public static class GameTools
         [Description("Level name in game if it differs from the file name.")] string? level = null,
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => GameLink.HotReload(PackageTools.ParseGame(game), package, level));
+
+    [McpServerTool(Name = "npc_place", Destructive = true),
+     Description("Puts an NPC of a level_build YAML file where Shepard stands in the running game (or at given x, y, z): writes her "
+                 + "'location' and 'yaw' into the file (comments kept), runs level_build, and moves her and her lights in the running game "
+                 + "as a preview. She faces the way Shepard faces (add 'turn' degrees, e.g. 180 to face him). Install the level afterwards "
+                 + "(game closed, mod_install) to keep her there.")]
+    public static NpcPlacement NpcPlace(
+        [Description("Level YAML file (level_build format).")] string file,
+        [Description("NPC name in the file's 'npcs' (optional when it has one).")] string? npc = null,
+        float? x = null, float? y = null, float? z = null,
+        [Description("Yaw in degrees, instead of Shepard's.")] float? yaw = null,
+        [Description("Degrees added to the yaw (180: face where Shepard came from).")] float turn = 0,
+        [Description("Run level_build after editing the file.")] bool build = true,
+        [Description("Move the actors in the running game too.")] bool live = true,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => NpcPlacer.Place(PackageTools.ParseGame(game), file, npc, x, y, z, yaw, turn, build, live));
 }
