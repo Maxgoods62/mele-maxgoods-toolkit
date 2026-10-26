@@ -57,6 +57,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `game_player_location` | Shepard's position and rotation (reported only after a change, so it may ask you to take a step) | ✅ |
 | `game_console`, `game_stream_level`, `game_remote_event` | Fire-and-forget commands | sent, effect not checked |
 | `game_hot_reload` | Swap a streamed level for a package file under the name `<level>_LIVE<hhmmss>` | ⚠️ loads, but reverted within 2–4 s, see below |
+| `game_log` | The DebugLogger ASI's log (`Binaries\Win64\Logs\DebugLogger.log`): from the last load of a map, errors only, text filter. Reads the file, no pipe | ✅ found the stasis in 06 §A.24 |
 
 Requirements: the **LEX Interop ASI** (not listed in M3's ASI Manager; install it from LEX → Live Level Editor → requirements → "Interop ASI", which asks M3 to install ASI group 42), and **LEX closed**. The game sends replies to the first window titled "Legendary Explorer", and the server owns a hidden one.
 

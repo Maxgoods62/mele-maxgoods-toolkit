@@ -22,6 +22,18 @@ public static class GameTools
     public static string GameConsole([Description("Console command text.")] string command, [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => { GameLink.Console(PackageTools.ParseGame(game), command); return $"Sent: {command}"; });
 
+    [McpServerTool(Name = "game_log", ReadOnly = true),
+     Description("Reads the DebugLogger ASI's log of the current or last game session (Binaries\\Win64\\Logs\\DebugLogger.log): UnrealScript "
+                 + "LogInternal lines, warnings, and script errors with their arguments and locals. Filters: from the last load of a map, "
+                 + "errors only, text. Something works in vanilla and not in ours? Play both in one session and compare their entries.")]
+    public static DebugLogResult GameLog(
+        [Description("Start at the last load of this map (persistent level file name without .pcc, e.g. BIOA_CLD01).")] string? sinceMap = null,
+        [Description("Only entries containing this text (case-insensitive), e.g. stasis, Hench, Main_Sequence.")] string? contains = null,
+        [Description("Only errors, warnings and 'Accessed None'.")] bool errorsOnly = false,
+        [Description("Maximum entries returned: the last ones that match.")] int limit = 100,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => DebugLog.Read(PackageTools.ParseGame(game), sinceMap, contains, errorsOnly, limit));
+
     [McpServerTool(Name = "game_remote_event"),
      Description("Fires every enabled Kismet SeqEvent_RemoteEvent with this name in the running game. "
                  + "Do not fire LE1CP NPC framework events (Live_NPC_*, Poll_NPC_*): one hung LE1 in a streaming loop on 2026-10-25.")]
