@@ -35,6 +35,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `plot_map_get` | State events of an LE1 `BioStateEventMap` (base game: `BIOC_Materials.pcc` `PlotManagerAuto.StateTransitionMap`): id and elements (`bool 8421 = True [v0]`, `int 47 += 2 [v1]`, consequence, function), filters by id range or by the variable written |
 | `plot_map_new` | New DLC plot package `PlotManagerAutoDLC_<name>.pcc` with empty `StateTransitionMap` and `ConsequenceMap`; returns the `AutoLoad.ini` lines to add |
 | `plot_event_set` | Add, replace or remove one state event from elements in `plot_map_get` notation; int and float elements are written as InstanceVersion 1, as the game expects |
+| `id_alloc` | Free LE1 plot ids (bool, int, float, conditional, transition, consequence) or string ids from a start id, or a check of given ids. Sources: LEX's base-game plot database and `ModPlotsLE1` mod databases, the base game's plot maps, conditionals and GlobalTlk, and every installed DLC's `AutoLoad.ini` wiring; optional extra DLC folders (the M3 library copy) and packages (conversation TLKs). Each used id names its users |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
 | `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
 
