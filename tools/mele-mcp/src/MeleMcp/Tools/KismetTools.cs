@@ -40,7 +40,8 @@ public static class KismetTools
     [McpServerTool(Name = "level_build", Destructive = true),
      Description("Builds an LE1 level from a YAML file. The level itself: vanilla sub-levels it shows (LevelStreamingKismet entries and a "
                  + "BioTriggerStream copied from a vanilla level, whose Default state lists them), the post-process of a vanilla level, and start "
-                 + "points (found by tag, else imported from a template, on the navigation list) for 'at <map> <tag>'. Its NPCs: the pawn (found by tag, else imported from a template pawn with everything "
+                 + "points (found by tag, else imported from a template, on the navigation list) for 'at <map> <tag>'. Its usables: a placeable copied from a template (e.g. a terminal), "
+                 + "made targetable, with its own name, whose use runs BioSeqAct_AreaTransition to another map and start point. Its NPCs: the pawn (found by tag, else imported from a template pawn with everything "
                  + "it references, or cloned from an actor of the level), location and yaw, shown and active, own name (a renamed copy of its actor "
                  + "type, text written to the GlobalTlk), skin/hair/eye colors on its own materials, fill lights at offsets that turn with her, and "
                  + "the Main_Sequence Kismet that starts her conversation when Shepard uses her (a conversation the level does not have yet is "

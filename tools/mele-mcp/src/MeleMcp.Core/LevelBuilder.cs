@@ -14,16 +14,20 @@ namespace MeleMcp.Core;
 /// <param name="Changes">What this build changed; empty when the level already matched the file.</param>
 public sealed record BuiltNpc(string Name, ExportRow Pawn, string Action, IReadOnlyList<string> Changes);
 
+/// <param name="Action">found (an actor of the level has the tag), imported (copied from the template's package) or cloned (from an actor of the level).</param>
+public sealed record BuiltUsable(string Name, ExportRow Actor, string Action, IReadOnlyList<string> Changes);
+
 /// <param name="LevelChanges">What this build changed in the level itself (streamed files, post-process, start points).</param>
 /// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
-public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, int StringCount, IReadOnlyList<string> TlkFiles,
+public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, IReadOnlyList<BuiltUsable> Usables, int StringCount, IReadOnlyList<string> TlkFiles,
     string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
 
 /// <summary>
 /// Builds a Game 1 level from a YAML file. The level itself: vanilla sub-levels it shows and their stream volume, its
 /// post-process, start points (see <see cref="LevelStreams"/>). Its NPCs: the pawn (found by tag, else imported from a
 /// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
-/// starts her conversation when Shepard uses her. A missing level is created, and the LE1CP Sideloader config that loads it is written.
+/// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. A missing level is
+/// created, and the LE1CP Sideloader config that loads it is written.
 /// </summary>
 public static class LevelBuilder
 {
@@ -53,6 +57,19 @@ public static class LevelBuilder
         public List<LightSpec> Lights = [];
     }
 
+    /// <summary>A placeable Shepard uses, e.g. a terminal; using it loads <see cref="GoTo"/>.</summary>
+    private sealed class UsableSpec
+    {
+        public required string Name;
+        public required int Line;
+        public string? Tag;
+        public Source? Template;
+        public Vector3? Location;
+        public float? Yaw;
+        public int? NameStrRef;
+        public (string Map, string? StartPoint)? GoTo;
+    }
+
     private sealed class Spec
     {
         public string? Package;
@@ -65,6 +82,7 @@ public static class LevelBuilder
         public Source? StartPointTemplate;
         public List<LevelStreams.StartPoint> StartPoints = [];
         public List<NpcSpec> Npcs = [];
+        public List<UsableSpec> Usables = [];
         public readonly Dictionary<int, Dictionary<string, string>> Strings = [];
     }
 
@@ -95,7 +113,7 @@ public static class LevelBuilder
         var backups = new List<string>();
         var missing = new List<string>();
         var levelChanges = new List<string>();
-        var (npcs, backup) = PackageWriter.Edit(game, package, pcc =>
+        var ((npcs, usables), backup) = PackageWriter.Edit(game, package, pcc =>
         {
             var level = pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no {LevelPath}; is it a level?");
             using var cache = new PackageCache();
@@ -103,7 +121,8 @@ public static class LevelBuilder
             if (spec.PostProcess is { } post) LevelStreams.SetPostProcess(game, pcc, level, post.Package, post.Line, levelChanges);
             var template = spec.StartPointTemplate is { } t ? (t.Package ?? throw new ArgumentException($"line {t.Line}: 'startPointTemplate' needs a 'package'."), t.Actor) : ((string, string)?)null;
             foreach (var start in spec.StartPoints) LevelStreams.SetStartPoint(game, pcc, level, start, template, levelChanges);
-            return spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
+            var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
+            return (builtNpcs, spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList());
         });
         backups.Add(backup);
 
@@ -120,7 +139,7 @@ public static class LevelBuilder
         }
 
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
-        return new LevelBuildResult(package, create, levelChanges, npcs, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
+        return new LevelBuildResult(package, create, levelChanges, npcs, usables, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
     }
 
     private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache, List<string> missing, List<string> notes)
@@ -174,6 +193,76 @@ public static class LevelBuilder
         }
 
         return new BuiltNpc(npc.Name, ExportInspector.Row(pawn), action, changes);
+    }
+
+    private static BuiltUsable BuildUsable(MEGame game, IMEPackage pcc, ExportEntry level, UsableSpec usable, PackageCache cache)
+    {
+        var changes = new List<string>();
+        var tag = usable.Tag ?? throw new ArgumentException($"line {usable.Line}: '{usable.Name}' needs a 'tag' (how the build finds it again).");
+        var actor = FindActor(pcc, level, tag, e => e.ClassName == "BioUseable");
+        var action = "found";
+        if (actor is null)
+        {
+            var template = usable.Template ?? throw new ArgumentException($"line {usable.Line}: no BioUseable of the level has tag '{tag}'; give a 'template' to import or clone.");
+            actor = AddActor(game, pcc, level, template, cache);
+            action = template.Package is null ? "cloned" : "imported";
+        }
+
+        var props = actor.GetProperties();
+        var dirty = Changed(changes, "tag", Put(props, new NameProperty(tag, "Tag")));
+        if (usable.Location is { } location) dirty |= Changed(changes, "location", Put(props, CommonStructs.Vector3Prop(location, "Location")));
+        if (usable.Yaw is { } yaw)
+        {
+            var rotation = props.GetProp<StructProperty>("Rotation") is { } r ? CommonStructs.GetRotator(r) : new Rotator(0, 0, 0);
+            dirty |= Changed(changes, "yaw", Put(props, CommonStructs.RotatorProp(new Rotator(rotation.Pitch, (int)Math.Round(yaw * 65536 / 360), rotation.Roll), "Rotation")));
+        }
+        if (dirty) actor.WriteProperties(props);
+
+        // Vanilla terminals ship untargetable and their story's Kismet switches them on; ours is usable from the start.
+        var behavior = Object(pcc, props, "m_oBehavior") ?? throw new ArgumentException($"line {usable.Line}: {actor.InstancedFullPath} has no m_oBehavior.");
+        var behaviorProps = behavior.GetProperties();
+        var behaviorDirty = Changed(changes, "usable", Put(behaviorProps, new BoolProperty(true, "m_bTargetable")) | Put(behaviorProps, new BoolProperty(true, "m_bTargetableOverride")));
+        if (usable.NameStrRef is { } strRef)
+        {
+            behaviorDirty |= Changed(changes, $"name ${strRef}", Put(behaviorProps, new StringRefProperty(strRef, "ActorGameNameStrRef"))
+                                                                 | Put(behaviorProps, new BoolProperty(true, "ActorGameNameOverride")));
+        }
+        if (behaviorDirty) behavior.WriteProperties(behaviorProps);
+
+        if (usable.GoTo is { } go) LinkAreaTransition(pcc, actor, go.Map, go.StartPoint, usable.Line, cache, changes);
+        return new BuiltUsable(usable.Name, ExportInspector.Row(actor), action, changes);
+    }
+
+    /// <summary>Main_Sequence: Shepard uses the placeable (BioSeqEvt_ArtPlaceableUsed) → BioSeqAct_AreaTransition to the map and start point.</summary>
+    private static void LinkAreaTransition(IMEPackage pcc, ExportEntry usable, string map, string? startPoint, int line, PackageCache cache, List<string> changes)
+    {
+        var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {line}: the level has no {MainSequence}.");
+        var objects = KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().ToList();
+        var used = objects.FirstOrDefault(o => o.ClassName == "BioSeqEvt_ArtPlaceableUsed" && o.GetProperty<ObjectProperty>("Originator")?.Value == usable.UIndex);
+        if (used is null)
+        {
+            used = SequenceObjectCreator.CreateSequenceObject(sequence, "BioSeqEvt_ArtPlaceableUsed", cache);
+            KismetHelper.WriteOriginator(used, usable);
+            changes.Add("Kismet: use event");
+        }
+        var outIndex = KismetHelper.GetOutputLinkNames(used).IndexOf("Out");
+        if (outIndex < 0) throw new InvalidOperationException($"#{used.UIndex} has no 'Out' link.");
+        var transition = KismetHelper.GetOutputLinksOfNode(used)[outIndex].Select(o => o.LinkedOp).OfType<ExportEntry>().FirstOrDefault(o => o.ClassName == "BioSeqAct_AreaTransition");
+        if (transition is null)
+        {
+            transition = SequenceObjectCreator.CreateSequenceObject(sequence, "BioSeqAct_AreaTransition", cache);
+            KismetHelper.CreateOutputLink(used, "Out", transition, 0);
+            changes.Add("Kismet: use → area transition");
+        }
+
+        var props = transition.GetProperties();
+        var dirty = Put(props, new NameProperty(map, "AreaName"));
+        dirty |= startPoint is null ? props.RemoveNamedProperty("StartPoint") : Put(props, new NameProperty(startPoint, "StartPoint"));
+        if (dirty)
+        {
+            transition.WriteProperties(props);
+            changes.Add($"goes to {map}{(startPoint is null ? "" : $" {startPoint}")}");
+        }
     }
 
     /// <summary>The template's actor imported with everything it references, or an actor of this level cloned; added to the level's actors.</summary>
@@ -451,7 +540,7 @@ public static class LevelBuilder
     {
         var spec = new Spec();
         foreach (var (key, value) in Entries(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "streaming", "postProcess",
-                     "startPointTemplate", "startPoints", "npcs"))
+                     "startPointTemplate", "startPoints", "npcs", "usables"))
         {
             switch (key)
             {
@@ -471,10 +560,16 @@ public static class LevelBuilder
                     if (value is not YamlMappingNode npcs) throw Fail(value, "'npcs' maps names to NPCs.");
                     spec.Npcs = npcs.Children.Select(c => NpcOf(Scalar(c.Key), c.Value, spec.Strings)).ToList();
                     break;
+                case "usables":
+                    if (value is not YamlMappingNode usables) throw Fail(value, "'usables' maps names to placeables.");
+                    spec.Usables = usables.Children.Select(c => UsableOf(Scalar(c.Key), c.Value, spec.Strings)).ToList();
+                    break;
             }
         }
         var twice = spec.Npcs.Where(n => n.Tag is not null).GroupBy(n => n.Tag!, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
         if (twice is not null) throw new ArgumentException($"Two NPCs have tag '{twice.Key}'.");
+        var usableTwice = spec.Usables.Where(u => u.Tag is not null).GroupBy(u => u.Tag!, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (usableTwice is not null) throw new ArgumentException($"Two usables have tag '{usableTwice.Key}'.");
         return spec;
     }
 
@@ -504,6 +599,58 @@ public static class LevelBuilder
             }
         }
         return npc;
+    }
+
+    private static UsableSpec UsableOf(string name, YamlNode body, Dictionary<int, Dictionary<string, string>> strings)
+    {
+        if (body is not YamlMappingNode m) throw Fail(body, $"usable '{name}' must be a mapping.");
+        var usable = new UsableSpec { Name = name, Line = (int)body.Start.Line };
+        foreach (var (key, value) in Entries(m, "tag", "template", "location", "yaw", "name", "goTo"))
+        {
+            switch (key)
+            {
+                case "tag": usable.Tag = Scalar(value); break;
+                case "template": usable.Template = SourceOf(value); break;
+                case "location":
+                    var xyz = Numbers(value, 3, 3);
+                    usable.Location = new Vector3(xyz[0], xyz[1], xyz[2]);
+                    break;
+                case "yaw": usable.Yaw = Number(value); break;
+                case "name": usable.NameStrRef = LabelOf(value, strings); break;
+                case "goTo": usable.GoTo = GoToOf(value); break;
+            }
+        }
+        return usable;
+    }
+
+    /// <summary>{strref: 74210060, fr: "...", en: "..."}: the text shown when Shepard aims at it.</summary>
+    private static int LabelOf(YamlNode value, Dictionary<int, Dictionary<string, string>> strings)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, "a name is {strref: <id>, fr: \"...\"}.");
+        int? strRef = null;
+        var text = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in m.Children)
+        {
+            var key = Scalar(k);
+            if (key == "strref") strRef = Int(v);
+            else text[Language(key)] = Scalar(v);
+        }
+        if (strRef is null) throw Fail(value, "the name needs 'strref'.");
+        if (text.Count > 0) Collect(strings, strRef.Value, text, (int)m.Start.Line);
+        return strRef.Value;
+    }
+
+    /// <summary>{map: BIOA_CLD00, startPoint: start_cld00}.</summary>
+    private static (string Map, string? StartPoint) GoToOf(YamlNode value)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, "'goTo' is {map: <level file name>, startPoint: <start point tag>}.");
+        string? map = null, startPoint = null;
+        foreach (var (key, v) in Entries(m, "map", "startPoint"))
+        {
+            if (key == "map") map = Path.GetFileNameWithoutExtension(Scalar(v));
+            else startPoint = Scalar(v);
+        }
+        return (map ?? throw Fail(value, "'goTo' needs 'map'."), startPoint);
     }
 
     /// <summary>{package: BIONPC_Chakwas.pcc, actor: BioPawn_3}, or an actor of this level to clone.</summary>

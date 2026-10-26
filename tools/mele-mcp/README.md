@@ -40,8 +40,8 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `quest_map_get` | An LE1 journal map (`BioQuestMap`): quests with goals, tasks and plot items (strrefs with their global text, states, InstanceVersions) and the evaluations a plot change runs |
 | `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
 | `plot_build` | Build a DLC plot package from a YAML file ([format below](#plot_build-yaml)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
-| `level_build` | Build a level from a YAML file ([format below](#level_build-yaml)). The level: vanilla sub-levels it shows inside a stream volume copied from a vanilla map, its post-process, start points (a location of our own: `at <map> <tag>`). Its NPCs: pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), an idle pose with fidgets (a vanilla action-station prefab: left to talk, resumed after), the Sideloader config; creates a missing level; writes only what differs |
-| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels (`npcs`, `streaming` or `startPoints`) through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
+| `level_build` | Build a level from a YAML file ([format below](#level_build-yaml)). The level: vanilla sub-levels it shows inside a stream volume copied from a vanilla map, its post-process, start points (a location of our own: `at <map> <tag>`). Its usables: placeables (e.g. a terminal) that take Shepard to another map and start point. Its NPCs: pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), an idle pose with fidgets (a vanilla action-station prefab: left to talk, resumed after), the Sideloader config; creates a missing level; writes only what differs |
+| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels (`npcs`, `usables`, `streaming` or `startPoints`) through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
 | `mod_install` | Install a mod with ME3Tweaks Mod Manager (`--installmod`, optional `--bootgame`): DLC copy, Coalesced merge of ConfigDelta files, AutoTOC. Waits on M3's log, then compares every mod file with its installed copy. Refuses while the game runs |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
 | `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
@@ -180,9 +180,20 @@ npcs:
       weights: { Talk: 0, Point: 0, HeadShake: 0 }   # fidget weights (Wt_<name> slots); the ones left out keep the prefab default
     lights:
       - { tag: claude_npc_01_light, offset: [0, 0, 120], radius: 180, brightness: 1.2 }   # offset: forward, right, up; turns with her
+
+usables:
+  cabinTerminal:               # a label for the result
+    tag: claude_to_cabin       # how the build finds it again (a BioUseable of the level)
+    template: { package: BIOA_NOR10_04_DSG.pcc, actor: BioUseable_10 }   # the comm room's VI terminal; or an actor of this level to clone
+    location: [-3933.6, 13936.8, -36833.9]   # its base: the floor (a standing pawn's Z - 94)
+    yaw: -94.2                 # this mesh's front is its +Y: (direction to the player) - 90
+    name: { strref: 74210060, fr: "Cabine (copie)", en: "Cabin (copy)" }   # shown when Shepard aims at it (GlobalTlk)
+    goTo: { map: BIOA_CLD00, startPoint: start_cld00 }                     # Shepard uses it → that map, at that start point
 ```
 
 Every value given is enforced; a value left out stays as it is. Only values that differ are written, so a rebuild changes nothing. Errors name the YAML line.
+
+A usable is made targetable (its behavior's `m_bTargetable` override: vanilla terminals wait for their story's Kismet). `goTo` Kismet in `Main_Sequence`: `BioSeqEvt_ArtPlaceableUsed` (Originator = the usable) → `BioSeqAct_AreaTransition`.
 
 `streaming` gives the volume one `Default` state whose `VisibleChunkNames` are the `levels`: they show while the player is inside it, including when spawned there. The volume is found again by its source name; a start point by its tag, and it is put on the level's navigation list.
 

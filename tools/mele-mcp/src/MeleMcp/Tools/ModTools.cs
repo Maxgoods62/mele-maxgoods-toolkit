@@ -10,7 +10,7 @@ public static class ModTools
 {
     [McpServerTool(Name = "mod_build", Destructive = true),
      Description("Builds every YAML file in a mod's source folder: plot files (with transitions, consequences or quests) through plot_build, "
-                 + "level files (with npcs, streaming or startPoints) through level_build, then conversation files (with 'conversation') through conv_build, then again "
+                 + "level files (with npcs, usables, streaming or startPoints) through level_build, then conversation files (with 'conversation') through conv_build, then again "
                  + "the level files whose NPCs named a conversation the level did not have yet. Stops at the first error, naming the file; files "
                  + "built before it stay saved.")]
     public static ModBuildResult ModBuild(
