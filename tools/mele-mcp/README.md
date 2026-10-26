@@ -20,6 +20,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `pkg_find_name` | Loaded packages whose name table contains a substring (tags, object and Kismet names), optional file wildcard. Partial load: no export data read |
 | `export_get` | One export's header (NetIndex, flags, archetype, data offset and size) and properties as an indented tree; object references resolved to class, path, UIndex |
 | `export_refs` | Exports in the same package that reference an export, and via which property (function bytecode included, so it answers "who calls X") |
+| `export_diff` | Two exports compared property by property (e.g. our actor vs the vanilla one it was cloned from): class, archetype, flags, every property flattened (`StreamingStates[0].InChunkName`), subobjects paired by class and order; references by path, `<self>` inside the export; `(not set)` = class default |
 | `export_decompile` | UnrealScript source of a class, state or function, e.g. `SFXGame.pcc` `SideloaderFramework` (LE1CP) |
 | `level_new` | Empty level package (`TheWorld.PersistentLevel` + `BioWorldInfo`) from LEC's embedded template; the file name is the level name. Refuses an existing file and the game install |
 | `export_set` | Set one leaf property by path (`VectorParameterValues[11].ParameterValue.G`), save. A property the export lacks (still at its class default) is created from LEC's class info |
@@ -29,6 +30,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `export_rename` | Rename an export (children follow). Use it after cloning or importing a forced export (actor type, conversation package): two loaded files with the same path share one object |
 | `tlk_get` / `tlk_set` | Read, add or replace strings in an LE1 package's `BioTlkFile` exports (all of them by default: male/female copies, every language of a conversation's set) |
 | `conv_read` | LE1 conversation as a text graph: start entries, entries and wheel choices, replies, plot conditions/transitions, node data (interp length, VO track and its strref) |
+| `conv_find` | Lines of every conversation the game loads (base, DLC, mods) by speaker tag, text or wheel text, plot id, conversation name, file wildcard; only the asked language's `_LOC_` copies; mod lines read the global strings. 3,100 files in ~3 s |
 | `conv_add_node` | Append a line copied from a template node (E or R): new strref and export id, plot cleared, node data (ConvNode → Interp → InterpData → EndCurrentConvNode) and FaceFX lines copied, VO track set to the strref |
 | `conv_build` | Build a conversation from a YAML file ([format below](#conv_build-yaml)): a missing conversation copied from a `from` template (own names, resref and node ids, vanilla plot removed), new text for kept nodes (voice track and lip sync follow), new lines from templates, text in every language, plot conditions and transitions, wheels, next lines, starting list, in one save; running it again changes nothing new |
 | `conv_link` | Add or remove a link: start → E, E → R (wheel choice: paraphrase strref, category), R → E |
@@ -57,7 +59,9 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `game_player_location` | Shepard's position and rotation (reported only after a change, so it may ask you to take a step) | ✅ |
 | `game_console`, `game_stream_level`, `game_remote_event` | Fire-and-forget commands | sent, effect not checked |
 | `game_hot_reload` | Swap a streamed level for a package file under the name `<level>_LIVE<hhmmss>` | ⚠️ loads, but reverted within 2–4 s, see below |
+| `game_get` | A property of every live object of a class (subclasses too), through the console's `getall`, read back from `DebugLogger.log`: values, structs, arrays (one element per line); a wrong name returns the game's "Unrecognized ..." | ✅ `bTickIsDisabled`, `Location`, `StreamingStates` |
 | `game_log` | The DebugLogger ASI's log (`Binaries\Win64\Logs\DebugLogger.log`): from the last load of a map, errors only, text filter. Reads the file, no pipe | ✅ found the stasis in 06 §A.24 |
+| `game_kismet_log` | The Kismet Logger ASI's trace (`Binaries\Win64\Logs\KismetLogger.log`): every sequence op activated, in order, with level, instanced path (for `export_get`) and input pin; text filter, last N seconds, grouped with counts. Needs that ASI (M3 ASI Manager, dev-only). Conversation node ops show under the conversation's `_N` package | ✅ Dorn's squad prefab and conversation traced; paths resolve in `export_get` |
 
 Requirements: the **LEX Interop ASI** (not listed in M3's ASI Manager; install it from LEX → Live Level Editor → requirements → "Interop ASI", which asks M3 to install ASI group 42), and **LEX closed**. The game sends replies to the first window titled "Legendary Explorer", and the server owns a hidden one.
 

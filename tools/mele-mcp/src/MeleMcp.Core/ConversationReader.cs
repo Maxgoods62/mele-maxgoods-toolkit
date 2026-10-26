@@ -73,10 +73,10 @@ public static class ConversationReader
         return sb.ToString();
     }
 
-    private static List<StructProperty> Structs(PropertyCollection props, string name)
+    internal static List<StructProperty> Structs(PropertyCollection props, string name)
         => props.GetProp<ArrayProperty<StructProperty>>(name)?.ToList() ?? [];
 
-    private static string Plot(StructProperty node)
+    internal static string Plot(StructProperty node)
     {
         var cond = node.GetProp<IntProperty>("nConditionalFunc")?.Value ?? -1;
         var trans = node.GetProp<IntProperty>("nStateTransition")?.Value ?? -1;
@@ -91,7 +91,7 @@ public static class ConversationReader
     }
 
     /// <summary>The conversation's TLK set holds one BioTlkFile per language, named tlk (INT) or tlk_&lt;LANG&gt;.</summary>
-    private static (ME1TalkFile? Tlk, string? Name) FindTalkFile(IMEPackage pcc, PropertyCollection props, string language)
+    internal static (ME1TalkFile? Tlk, string? Name) FindTalkFile(IMEPackage pcc, PropertyCollection props, string language)
     {
         var set = props.GetProp<ObjectProperty>("m_oTlkFileSet")?.ResolveToEntry(pcc);
         var siblings = pcc.Exports.Where(x => x.ClassName == "BioTlkFile" && (set is null || x.Parent == set.Parent)).ToList();

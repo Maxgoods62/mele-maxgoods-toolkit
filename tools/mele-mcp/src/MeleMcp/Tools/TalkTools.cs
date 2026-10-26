@@ -33,6 +33,22 @@ public static class TalkTools
         [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => ConversationReader.Read(PackageTools.ParseGame(game), package, export, language));
 
+    [McpServerTool(Name = "conv_find", ReadOnly = true),
+     Description("Searches every LE1 conversation the game loads (base game, DLC, mods) for lines by speaker tag, text or plot id, e.g. "
+                 + "every henchman comment gated by conditional 415, every line Wrex (hench_krogan) says about Saren, or a template to "
+                 + "copy. Returns file, conversation, node (E<n>/R<n> as conv_read names them), speaker, strref, text and plot gate. "
+                 + "Filters combine; a search reads every package (a few seconds).")]
+    public static ConvFindResult ConvFind(
+        [Description("Substring of the speaker tag (e.g. hench_asari, hench_krogan, nor_chakwas), or owner / player.")] string? speaker = null,
+        [Description("Case-insensitive substring of the line or its wheel paraphrase.")] string? text = null,
+        [Description("A conditional, plot bool or transition id the line uses, e.g. 415.")] int? plotId = null,
+        [Description("Substring of the conversation name, e.g. _dlg or nor10.")] string? conversation = null,
+        [Description("Wildcard on package file names, e.g. BIOA_NOR*.")] string fileFilter = "*",
+        [Description("Language of the text and of the _LOC_ packages read: INT, FR, DE, IT...")] string language = "FR",
+        [Description("Maximum lines returned (Matches still counts all).")] int limit = 100,
+        [Description("Game: LE1.")] string game = "LE1")
+        => ToolErrors.Run(() => ConversationFinder.Find(PackageTools.ParseGame(game), speaker, text, plotId, conversation, fileFilter, language, limit));
+
     [McpServerTool(Name = "conv_add_node", Destructive = true),
      Description("Adds an LE1 conversation line by copying a template node (E<n> NPC line or R<n> Shepard line): new text strref and "
                  + "export id, no links, plot cleared. Also copies the template's node data (ConvNode, Interp with cameras/gestures, "

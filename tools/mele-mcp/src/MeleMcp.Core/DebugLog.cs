@@ -26,11 +26,7 @@ public static partial class DebugLog
     /// <param name="limit">The last entries that match, at most this many.</param>
     public static DebugLogResult Read(MEGame game, string? sinceMap, string? contains, bool errorsOnly, int limit)
     {
-        LecHost.EnsureInitialized();
-        var gamePath = MEDirectories.GetDefaultGamePath(game) ?? throw new InvalidOperationException($"No {game} install found.");
-        var path = Path.Combine(gamePath, "Binaries", "Win64", "Logs", "DebugLogger.log");
-        if (!File.Exists(path)) throw new FileNotFoundException($"No {path}: is the DebugLogger ASI installed, and has the game started since?");
-
+        var path = LogPath(game);
         var entries = Parse(path);
         var start = 0;
         if (!string.IsNullOrWhiteSpace(sinceMap))
@@ -48,15 +44,45 @@ public static partial class DebugLog
         return new DebugLogResult(path, read.FirstOrDefault()?.Time, read.Count, matches.Count, shown);
     }
 
+    internal static string LogPath(MEGame game) => AsiLog(game, "DebugLogger");
+
+    /// <summary>The log an ASI writes in Binaries\Win64\Logs\&lt;asi&gt;.log, rewritten at each game start.</summary>
+    internal static string AsiLog(MEGame game, string asi)
+    {
+        LecHost.EnsureInitialized();
+        var gamePath = MEDirectories.GetDefaultGamePath(game) ?? throw new InvalidOperationException($"No {game} install found.");
+        var path = Path.Combine(gamePath, "Binaries", "Win64", "Logs", $"{asi}.log");
+        if (!File.Exists(path)) throw new FileNotFoundException($"No {path}: is the {asi} ASI installed, and has the game started since?");
+        return path;
+    }
+
+    /// <summary>The log's size now: where the next lines will start.</summary>
+    internal static long Length(string path) => new FileInfo(path).Length;
+
+    /// <summary>The whole lines written after <paramref name="offset"/>.</summary>
+    internal static List<string> LinesAfter(string path, long offset)
+    {
+        using var stream = Open(path);
+        stream.Seek(Math.Min(offset, stream.Length), SeekOrigin.Begin);
+        using var reader = new StreamReader(stream);
+        var lines = new List<string>();
+        while (reader.ReadLine() is { } line) lines.Add(line);
+        return lines;
+    }
+
+    /// <summary>Errors and warnings, but not getall answers (game_get), which the engine logs as errors.</summary>
     private static bool IsProblem(Entry e) =>
-        e.Level is "error" or "critical" or "warning" || e.Text.Contains("Accessed None", StringComparison.Ordinal);
+        (e.Level is "error" or "critical" or "warning" && !LiveProperties.IsGetAllLine(e.Text))
+        || e.Text.Contains("Accessed None", StringComparison.Ordinal);
+
+    /// <summary>Read while the game writes it: shared, not locked.</summary>
+    internal static FileStream Open(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
     private static string Shorten(string text) => text.Length <= MaxEntryLength ? text : text[..MaxEntryLength] + " …";
 
-    /// <summary>Read while the game writes it: shared, not locked.</summary>
     private static List<Entry> Parse(string path)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var stream = Open(path);
         using var reader = new StreamReader(stream);
         var entries = new List<Entry>();
         while (reader.ReadLine() is { } line)

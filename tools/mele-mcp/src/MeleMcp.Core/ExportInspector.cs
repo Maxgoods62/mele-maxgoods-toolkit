@@ -82,7 +82,7 @@ public static class ExportInspector
 
     internal static ExportRow Row(IEntry e) => new(e.UIndex, e.ClassName, e.InstancedFullPath);
 
-    private static string Label(Property p) =>
+    internal static string Label(Property p) =>
         p.StaticArrayIndex > 0 ? $"{p.Name.Instanced}[{p.StaticArrayIndex}]" : p.Name.Instanced;
 
     private static void Write(StringBuilder sb, IMEPackage pcc, string label, Property prop, int depth)

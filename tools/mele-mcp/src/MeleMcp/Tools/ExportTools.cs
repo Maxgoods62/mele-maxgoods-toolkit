@@ -39,6 +39,23 @@ public static class ExportTools
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => ExportInspector.GetReferencers(PackageTools.ParseGame(game), package, export));
 
+    [McpServerTool(Name = "export_diff", ReadOnly = true),
+     Description("Compares two exports property by property, e.g. our actor and the vanilla one it was cloned from: header (class, archetype, "
+                 + "flags), every property flattened (Location.X, StreamingStates[0].InChunkName) and subobjects such as components. "
+                 + "References compare by class and path, and paths inside the export read <self>, so renamed clones still match. "
+                 + "\"(not set)\" = not serialized, so the class default. Works on vanilla files: it's working in vanilla and not in ours? Diff them.")]
+    public static ExportDiff ExportDiff(
+        [Description(PackageDescription)] string package,
+        [Description(ExportDescription)] string export,
+        [Description("The package to compare with, e.g. the vanilla level (" + PackageDescription + ")")] string vsPackage,
+        [Description("The export in vsPackage; omitted, the one with the same instanced full path.")] string? vsExport = null,
+        [Description("Also compare subobjects (components), paired by class and order.")] bool children = true,
+        [Description("Property names to leave out wherever they occur, comma-separated, e.g. Location,Rotation.")] string? ignore = null,
+        [Description("Maximum differences returned (Different still counts all).")] int limit = 200,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run(() => ExportDiffer.Diff(PackageTools.ParseGame(game), package, export, vsPackage, vsExport, children,
+            (ignore ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), limit));
+
     [McpServerTool(Name = "export_decompile", ReadOnly = true),
      Description("Decompiles a Class, State, Function or ScriptStruct export to UnrealScript (LEX script editor view). "
                  + "Use it to read game or mod logic, e.g. SFXGame.pcc SideloaderFramework. The first call on a big package takes a few seconds.")]

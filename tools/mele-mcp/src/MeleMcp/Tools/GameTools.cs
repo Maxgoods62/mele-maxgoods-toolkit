@@ -22,6 +22,18 @@ public static class GameTools
     public static string GameConsole([Description("Console command text.")] string command, [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => { GameLink.Console(PackageTools.ParseGame(game), command); return $"Sent: {command}"; });
 
+    [McpServerTool(Name = "game_get", ReadOnly = true),
+     Description("Reads a property of every live object of a class in the running game, with the console command getall; the answer is "
+                 + "read from the DebugLogger ASI's log (needs that ASI). E.g. BioPawn bTickIsDisabled (stasis), BioWorldInfo bHasPathNodes, "
+                 + "BioTriggerStream StreamingStates. Subclasses are included; class defaults are not.")]
+    public static LiveValues GameGet(
+        [Description("Class name, e.g. BioPawn.")] string className,
+        [Description("Property name, exact, e.g. bTickIsDisabled.")] string property,
+        [Description("Keep objects whose path contains this, e.g. BIOA_CLD01 or BioPawn_4.")] string? nameContains = null,
+        [Description("Seconds to wait for the answer.")] double timeoutSeconds = 3,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LiveProperties.Get(PackageTools.ParseGame(game), className, property, nameContains, timeoutSeconds));
+
     [McpServerTool(Name = "game_log", ReadOnly = true),
      Description("Reads the DebugLogger ASI's log of the current or last game session (Binaries\\Win64\\Logs\\DebugLogger.log): UnrealScript "
                  + "LogInternal lines, warnings, and script errors with their arguments and locals. Filters: from the last load of a map, "
@@ -33,6 +45,18 @@ public static class GameTools
         [Description("Maximum entries returned: the last ones that match.")] int limit = 100,
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => DebugLog.Read(PackageTools.ParseGame(game), sinceMap, contains, errorsOnly, limit));
+
+    [McpServerTool(Name = "game_kismet_log", ReadOnly = true),
+     Description("Reads the Kismet Logger ASI's trace of the current or last game session (Binaries\\Win64\\Logs\\KismetLogger.log): every "
+                 + "sequence op activated, in order, with its level, instanced path (for export_get) and input pin. Did my Kismet run? Do the "
+                 + "thing in game, then read the last seconds filtered by your level; grouped shows each op once with its count.")]
+    public static KismetLogResult GameKismetLog(
+        [Description("Only activations whose class, path or pin contains this (case-insensitive), e.g. BIOA_CLD01, Main_Sequence, RemoteEvent.")] string? contains = null,
+        [Description("Only the last seconds of the log, e.g. 30 right after doing something in game.")] double? lastSeconds = null,
+        [Description("One entry per op and pin, in order of first activation, with its count.")] bool grouped = false,
+        [Description("Maximum entries returned: the last ones that match.")] int limit = 100,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => KismetLog.Read(PackageTools.ParseGame(game), contains, lastSeconds, grouped, limit));
 
     [McpServerTool(Name = "game_remote_event"),
      Description("Fires every enabled Kismet SeqEvent_RemoteEvent with this name in the running game. "
