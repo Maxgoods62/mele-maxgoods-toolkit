@@ -45,23 +45,29 @@ public static class TalkFiles
             var edits = new List<TlkFileEdit>();
             foreach (var target in Targets(pcc, export))
             {
-                var tlk = new ME1TalkFile(target);
-                var changes = strings.Select(s =>
-                {
-                    var old = tlk.StringRefs.Find(r => r.StringID == s.Id)?.Data;
-                    tlk.ReplaceString(s.Id, s.Text, addIfNotFound: true);
-                    return new TlkStringChange(s.Id, old, s.Text);
-                }).ToList();
-
-                var huffman = new HuffmanCompression();
-                huffman.LoadInputData(tlk.StringRefs);
-                huffman.SerializeTalkfileToExport(target);
-                edits.Add(new TlkFileEdit(ExportInspector.Row(target), changes));
+                edits.Add(new TlkFileEdit(ExportInspector.Row(target), WriteIn(target, strings)));
             }
             return (edits, pcc.FilePath);
         });
 
         return new TlkEdits(path, files, backup);
+    }
+
+    /// <summary>Adds or replaces strings in one BioTlkFile export of an open package.</summary>
+    internal static List<TlkStringChange> WriteIn(ExportEntry target, IReadOnlyList<TlkString> strings)
+    {
+        var tlk = new ME1TalkFile(target);
+        var changes = strings.Select(s =>
+        {
+            var old = tlk.StringRefs.Find(r => r.StringID == s.Id)?.Data;
+            tlk.ReplaceString(s.Id, s.Text, addIfNotFound: true);
+            return new TlkStringChange(s.Id, old, s.Text);
+        }).ToList();
+
+        var huffman = new HuffmanCompression();
+        huffman.LoadInputData(tlk.StringRefs);
+        huffman.SerializeTalkfileToExport(target);
+        return changes;
     }
 
     private static List<ExportEntry> Targets(IMEPackage pcc, string? export)

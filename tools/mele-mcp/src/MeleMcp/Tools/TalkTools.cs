@@ -63,6 +63,18 @@ public static class TalkTools
         [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => ConversationEditor.Link(PackageTools.ParseGame(game), package, export, from, to, paraphrase, category, remove));
 
+    [McpServerTool(Name = "conv_build", Destructive = true),
+     Description("Builds an LE1 conversation from a YAML file: new lines copied from template nodes (node data and lip sync with them), "
+                 + "text in every language of the conversation's TLK set (and optional GlobalTlk files), plot conditions and transitions, "
+                 + "wheels, replies' next lines and the starting list, in one save. A new line is found again by its strref, so running "
+                 + "the file twice changes nothing new; every list in the file replaces the conversation's. See the tool README for the format. "
+                 + "Backs the packages up first and refuses files inside the game install.")]
+    public static ConvBuildResult ConvBuild(
+        [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
+        [Description("Package holding the conversation, instead of the file's 'package'.")] string? package = null,
+        [Description("Game: LE1.")] string game = "LE1")
+        => ToolErrors.Run(() => ConversationBuilder.Build(PackageTools.ParseGame(game), file, package));
+
     [McpServerTool(Name = "facefx_get", ReadOnly = true),
      Description("Lists the lip-sync lines inside a FaceFXAnimSet (e.g. a conversation's FXA_<conv>_Owner_F): name, id, path, curve and key counts, length.")]
     public static FaceFxSetLines FaceFxGet(

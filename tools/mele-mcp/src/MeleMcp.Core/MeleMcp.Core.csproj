@@ -9,6 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- LEC only defines WINDOWS (registry lookup, native DLL copy) in its Win* configurations. -->
     <ProjectReference Include="..\..\external\LegendaryExplorer\LegendaryExplorer\LegendaryExplorerCore\LegendaryExplorerCore.csproj"
                       SetConfiguration="Configuration=WinRelease"

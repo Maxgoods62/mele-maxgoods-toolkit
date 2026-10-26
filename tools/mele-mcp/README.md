@@ -30,6 +30,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `tlk_get` / `tlk_set` | Read, add or replace strings in an LE1 package's `BioTlkFile` exports (all of them by default: male/female copies, every language of a conversation's set) |
 | `conv_read` | LE1 conversation as a text graph: start entries, entries and wheel choices, replies, plot conditions/transitions, node data (interp length, VO track and its strref) |
 | `conv_add_node` | Append a line copied from a template node (E or R): new strref and export id, plot cleared, node data (ConvNode → Interp → InterpData → EndCurrentConvNode) and FaceFX lines copied, VO track set to the strref |
+| `conv_build` | Build a conversation from a YAML file ([format below](#conv_build-yaml)): new lines from templates, text in every language, plot conditions and transitions, wheels, next lines, starting list, in one save; running it again changes nothing new |
 | `conv_link` | Add or remove a link: start → E, E → R (wheel choice: paraphrase strref, category), R → E |
 | `facefx_get` / `facefx_copy_lines` | List the lip-sync lines of a `FaceFXAnimSet` (name, sound cue path and index, length); copy lines under new names, silent by default (LE1 plays `FXA_<strref>[_M]` for a VO track) |
 | `plot_map_get` | State events of an LE1 `BioStateEventMap` (base game: `BIOC_Materials.pcc` `PlotManagerAuto.StateTransitionMap`): id and elements (`bool 8421 = True [v0]`, `int 47 += 2 [v1]`, consequence, function), filters by id range or by the variable written |
@@ -60,6 +61,41 @@ Hot-reload notes:
 - On LE1 + LE1CP the copy does not last. `BioTriggerStream.Touch`/`UnTouch` and Kismet `BioSeqAct_SetStreamingState` re-apply the area's streaming state (hand-streamed levels unload) and then call `SideloaderFramework.RunSideloader`, which re-forces every Sideloader level by name (`ClientUpdateLevelStreamingStatus`). Tested on the Normandy: reverted in 2–4 s with Shepard standing still. **Never fire LE1CP framework events by hand** (`Poll_NPC_*`, `Live_NPC_*`): it re-spawned several NPC files twice and hung LE1 in a loading loop. Streaming a framework-managed `BIONPC_*` file out and in also leaves the framework's NPC dormant (Chakwas vanished).
 
 **Write rule:** the write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_*` writers, `facefx_copy_lines`, `kismet_*`, `level_new`, `plot_map_new`, `plot_event_set`, `quest_set`) back the package up to `D:\MELE\backups\mele-mcp` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install or copy it into the game.
+
+## conv_build YAML
+
+Example: [`mods/claude-chakwas/ClaudeReyes_dlg.yaml`](../../mods/claude-chakwas/ClaudeReyes_dlg.yaml).
+
+```yaml
+package: 'D:\...\CookedPCConsole\ClaudeNPC_NOR10.pcc'   # absolute, relative to this file, or a loaded file name
+conversation: ClaudeReyes_dlg
+defaultLanguage: fr            # text for TLKs whose language the node does not give (en = INT)
+globalTlk: [DLC_MOD_X_GlobalTlk.pcc, DLC_MOD_X_GlobalTlk_FR.pcc]   # optional; language from the file suffix
+start: [warm_hello, E16]       # replaces m_StartingList; first entry whose condition passes plays
+
+nodes:
+  E16:                         # E<n>/R<n>: a node that exists; only the keys given change
+    transition: 8421
+    replies: [R1, normandy, R5]
+  normandy:                    # a name: a new line, found again by its strref on the next build
+    reply: 74210050            # reply (Shepard) or entry (NPC) + the strref of its text
+    template: R7               # node to copy (cameras, gestures, timing, lip sync); E<n>/R<n> or a name above
+    length: 3                  # seconds (InterpData length)
+    text: { fr: "Que pensez-vous du Normandy ?", en: "What do you think of the Normandy?" }   # or a plain string
+    wheel: { strref: 74210051, category: INVESTIGATE, fr: "Le Normandy", en: "The Normandy" }
+    if: not bool 8422          # bool <id> | not bool <id> | bool <id> false | conditional <id> [param <n>] | none
+    transition: 8422           # or none
+    then: [normandy_answer]    # replies only: next entries; [] ends the conversation
+  normandy_answer:
+    entry: 74210052
+    template: E9
+    text: "Le vaisseau le plus avancé de l'Alliance..."
+    replies:                   # entries only: the wheel, replaced as a whole
+      - R1                     # wheel text and category from the reply's 'wheel', else from an existing choice to it
+      - { to: R5, category: DEFAULT, paraphrase: 74210014 }   # or set them per choice
+```
+
+Text goes to every `BioTlkFile` of the conversation's TLK set: its own language, else the language it shows (FE → FR, GE → DE, IE → IT, RA → RU, PLPC → PL), else `defaultLanguage`. Errors name the YAML line. All target files are checked before any is written.
 
 ## Layout
 

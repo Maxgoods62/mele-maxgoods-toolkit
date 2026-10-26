@@ -97,60 +97,68 @@ public static partial class ConversationEditor
         if (strRef <= 0) throw new ArgumentException("strRef must be positive.");
         if (length is <= 0) throw new ArgumentException("length must be positive.");
 
-        var ((row, label, exportId, nodeData, faceFx, notes, path), backup) = PackageWriter.Edit(game, fileOrPath, pcc =>
+        var ((row, added, path), backup) = PackageWriter.Edit(game, fileOrPath, pcc =>
         {
             var conv = Conversation(pcc, export);
-            var props = conv.GetProperties();
-            var (isReply, index) = ParseNode(template);
-            var list = NodeList(props, isReply);
-            if (index >= list.Count) throw new ArgumentException($"{template} does not exist: the conversation has {list.Count} {(isReply ? "replies" : "entries")}.");
-            var source = list[index];
-            var sequence = props.GetProp<ObjectProperty>("m_pEvtSystemSeq")?.ResolveToEntry(pcc) as ExportEntry
-                           ?? throw new ArgumentException($"#{conv.UIndex} has no node data sequence (m_pEvtSystemSeq).");
-            var elements = KismetHelper.GetAllSequenceElements(sequence).OfType<ExportEntry>().ToList();
-
-            var newId = NodeLists(props).SelectMany(l => l).Select(n => n.GetProp<IntProperty>("nExportID")?.Value ?? 0)
-                .Concat(elements.Where(e => e.ClassName == "BioSeqEvt_ConvNode").Select(e => e.GetProperty<IntProperty>("m_nNodeID")?.Value ?? 0))
-                .Max() + 1;
-
-            var notes = new List<string>();
-            var nodeData = new List<ExportRow>();
-            var faceFx = new List<string>();
-
-            var parsed = new ConversationExtended(conv);
-            parsed.LoadConversation();
-            var oldInterpData = parsed.ParseSingleNodeInterpData((isReply ? parsed.ReplyList : parsed.EntryList)[index]);
-            if (oldInterpData is null)
-            {
-                notes.Add($"{template} has no node data: the new line has no camera, timing or lip sync.");
-            }
-            else
-            {
-                var (created, oldStrRef) = CloneNodeData(pcc, sequence, elements, oldInterpData, newId, strRef, length, notes);
-                nodeData.AddRange(created.Select(ExportInspector.Row));
-
-                var speaker = isReply ? -2 : source.GetProp<IntProperty>("nSpeakerIndex")?.Value ?? -1;
-                if (oldStrRef is { } old) faceFx.AddRange(CopyFaceFx(pcc, props, speaker, old, strRef, notes));
-            }
-
-            var node = source.DeepClone();
-            var np = node.Properties;
-            np.AddOrReplaceProp(new StringRefProperty(strRef, "srText"));
-            np.AddOrReplaceProp(new IntProperty(newId, "nExportID"));
-            if (isReply) np.AddOrReplaceProp(new ArrayProperty<IntProperty>("EntryList"));
-            else np.AddOrReplaceProp(new ArrayProperty<StructProperty>("ReplyListNew"));
-            if (!keepPlot)
-            {
-                np.AddOrReplaceProp(new IntProperty(-1, "nConditionalFunc"));
-                np.AddOrReplaceProp(new IntProperty(-1, "nStateTransition"));
-            }
-            list.Add(node);
-            conv.WriteProperties(props);
-
-            return (ExportInspector.Row(conv), $"{(isReply ? 'R' : 'E')}{list.Count - 1}", newId, nodeData, faceFx, notes, pcc.FilePath);
+            return (ExportInspector.Row(conv), AddNodeIn(pcc, conv, template, strRef, length, keepPlot), pcc.FilePath);
         });
 
-        return new ConvNodeAdded(path, row, label, exportId, strRef, length, nodeData, faceFx, notes, backup);
+        return new ConvNodeAdded(path, row, added.Label, added.ExportId, strRef, length, added.NodeData, added.FaceFxLines, added.Notes, backup);
+    }
+
+    internal sealed record NodeAddition(string Label, int ExportId, List<ExportRow> NodeData, List<string> FaceFxLines, List<string> Notes);
+
+    /// <summary>AddNode inside an open package: reads and writes the conversation's properties itself.</summary>
+    internal static NodeAddition AddNodeIn(IMEPackage pcc, ExportEntry conv, string template, int strRef, float? length, bool keepPlot)
+    {
+        var props = conv.GetProperties();
+        var (isReply, index) = ParseNode(template);
+        var list = NodeList(props, isReply);
+        if (index >= list.Count) throw new ArgumentException($"{template} does not exist: the conversation has {list.Count} {(isReply ? "replies" : "entries")}.");
+        var source = list[index];
+        var sequence = props.GetProp<ObjectProperty>("m_pEvtSystemSeq")?.ResolveToEntry(pcc) as ExportEntry
+                       ?? throw new ArgumentException($"#{conv.UIndex} has no node data sequence (m_pEvtSystemSeq).");
+        var elements = KismetHelper.GetAllSequenceElements(sequence).OfType<ExportEntry>().ToList();
+
+        var newId = NodeLists(props).SelectMany(l => l).Select(n => n.GetProp<IntProperty>("nExportID")?.Value ?? 0)
+            .Concat(elements.Where(e => e.ClassName == "BioSeqEvt_ConvNode").Select(e => e.GetProperty<IntProperty>("m_nNodeID")?.Value ?? 0))
+            .Max() + 1;
+
+        var notes = new List<string>();
+        var nodeData = new List<ExportRow>();
+        var faceFx = new List<string>();
+
+        var parsed = new ConversationExtended(conv);
+        parsed.LoadConversation();
+        var oldInterpData = parsed.ParseSingleNodeInterpData((isReply ? parsed.ReplyList : parsed.EntryList)[index]);
+        if (oldInterpData is null)
+        {
+            notes.Add($"{template} has no node data: the new line has no camera, timing or lip sync.");
+        }
+        else
+        {
+            var (created, oldStrRef) = CloneNodeData(pcc, sequence, elements, oldInterpData, newId, strRef, length, notes);
+            nodeData.AddRange(created.Select(ExportInspector.Row));
+
+            var speaker = isReply ? -2 : source.GetProp<IntProperty>("nSpeakerIndex")?.Value ?? -1;
+            if (oldStrRef is { } old) faceFx.AddRange(CopyFaceFx(pcc, props, speaker, old, strRef, notes));
+        }
+
+        var node = source.DeepClone();
+        var np = node.Properties;
+        np.AddOrReplaceProp(new StringRefProperty(strRef, "srText"));
+        np.AddOrReplaceProp(new IntProperty(newId, "nExportID"));
+        if (isReply) np.AddOrReplaceProp(new ArrayProperty<IntProperty>("EntryList"));
+        else np.AddOrReplaceProp(new ArrayProperty<StructProperty>("ReplyListNew"));
+        if (!keepPlot)
+        {
+            np.AddOrReplaceProp(new IntProperty(-1, "nConditionalFunc"));
+            np.AddOrReplaceProp(new IntProperty(-1, "nStateTransition"));
+        }
+        list.Add(node);
+        conv.WriteProperties(props);
+
+        return new NodeAddition($"{(isReply ? 'R' : 'E')}{list.Count - 1}", newId, nodeData, faceFx, notes);
     }
 
     /// <summary>
@@ -227,6 +235,16 @@ public static partial class ConversationEditor
         return new ConvLinkResult(path, row, change, backup);
     }
 
+    /// <summary>Sets the InterpData length of a node's node data. False when the node has none.</summary>
+    internal static bool SetLengthIn(ExportEntry conv, bool isReply, int index, float length)
+    {
+        var parsed = new ConversationExtended(conv);
+        parsed.LoadConversation();
+        if (parsed.ParseSingleNodeInterpData((isReply ? parsed.ReplyList : parsed.EntryList)[index]) is not { } interpData) return false;
+        interpData.WriteProperty(new FloatProperty(length, "InterpLength"));
+        return true;
+    }
+
     private static ExportEntry Conversation(IMEPackage pcc, string export)
     {
         var conv = ExportInspector.Resolve(pcc, export);
@@ -234,14 +252,14 @@ public static partial class ConversationEditor
         return conv;
     }
 
-    private static (bool IsReply, int Index) ParseNode(string label)
+    internal static (bool IsReply, int Index) ParseNode(string label)
     {
         var m = NodeLabel().Match(label.Trim());
         if (!m.Success) throw new ArgumentException($"'{label}' is not a node label. Use E<n> for entries and R<n> for replies, as conv_read prints them.");
         return (char.ToUpperInvariant(m.Groups["kind"].Value[0]) == 'R', int.Parse(m.Groups["index"].Value));
     }
 
-    private static ArrayProperty<StructProperty> NodeList(PropertyCollection props, bool replies)
+    internal static ArrayProperty<StructProperty> NodeList(PropertyCollection props, bool replies)
         => props.GetProp<ArrayProperty<StructProperty>>(replies ? "m_ReplyList" : "m_EntryList")
            ?? throw new ArgumentException($"The conversation has no {(replies ? "m_ReplyList" : "m_EntryList")}.");
 
@@ -262,7 +280,7 @@ public static partial class ConversationEditor
         return $"added {label}";
     }
 
-    private static NameReference Category(MEGame game, string category)
+    internal static NameReference Category(MEGame game, string category)
     {
         var name = category.StartsWith("REPLY_CATEGORY_", StringComparison.OrdinalIgnoreCase) ? category : "REPLY_CATEGORY_" + category;
         var values = GlobalUnrealObjectInfo.GetEnumValues(game, "EReplyCategory");

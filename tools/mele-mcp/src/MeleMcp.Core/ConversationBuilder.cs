@@ -1,0 +1,492 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+using LegendaryExplorerCore.Packages;
+using LegendaryExplorerCore.Unreal;
+using YamlDotNet.Core;
+using YamlDotNet.RepresentationModel;
+
+namespace MeleMcp.Core;
+
+/// <param name="Action">added (copied from its template), found (a node with its strref already exists) or existing (named E&lt;n&gt;/R&lt;n&gt;).</param>
+public sealed record BuiltNode(string Name, string Label, string Action, int? StrRef, IReadOnlyList<string> Changes);
+
+public sealed record ConvBuildResult(string Path, ExportRow Conversation, IReadOnlyList<BuiltNode> Nodes, IReadOnlyList<string> Start,
+    int StringCount, IReadOnlyList<string> TlkFiles, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
+
+/// <summary>
+/// Builds a Game 1 conversation from a YAML file: lines (copied from template nodes), text in every language, plot
+/// conditions and transitions, wheels, replies' next lines and the starting list. Running it again changes nothing new:
+/// a line is found by its strref, and every list given in the file replaces the one in the conversation.
+/// </summary>
+public static partial class ConversationBuilder
+{
+    [GeneratedRegex(@"^(?:(?<not>not)\s+)?bool\s+(?<id>\d+)(?:\s+(?<value>true|false))?$", RegexOptions.IgnoreCase)]
+    private static partial Regex BoolCondition();
+
+    [GeneratedRegex(@"^conditional\s+(?<id>\d+)(?:\s+param\s+(?<param>-?\d+))?$", RegexOptions.IgnoreCase)]
+    private static partial Regex FunctionCondition();
+
+    [GeneratedRegex(@"^[ER]\d+$", RegexOptions.IgnoreCase)]
+    private static partial Regex NodeLabel();
+
+    /// <summary>Text-only languages fall back to the language whose text they show (FE = French text, English voice).</summary>
+    private static readonly Dictionary<string, string> TextLanguage = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["FE"] = "FR", ["GE"] = "DE", ["IE"] = "IT", ["RA"] = "RU", ["PLPC"] = "PL",
+    };
+
+    private sealed record Ref(string Name, int Line);
+
+    private sealed record Condition(int Func, int Param, bool IsFunction);
+
+    private sealed record WheelSpec(int? StrRef, string? Category, Dictionary<string, string>? Text, int Line);
+
+    private sealed record Choice(Ref To, WheelSpec? Override);
+
+    private sealed class NodeSpec
+    {
+        public required string Name;
+        public required int Line;
+        public bool Existing;
+        public bool IsReply;
+        public int? StrRef;
+        public Ref? Template;
+        public float? Length;
+        public Dictionary<string, string>? Text;
+        public Condition? If;
+        public int? Transition;
+        public WheelSpec? Wheel;
+        public List<Choice>? Replies;
+        public List<Ref>? Then;
+    }
+
+    private sealed class Spec
+    {
+        public string? Package;
+        public string? Conversation;
+        public string DefaultLanguage = "INT";
+        public List<string> GlobalTlk = [];
+        public List<Ref>? Start;
+        public List<NodeSpec> Nodes = [];
+    }
+
+    public static ConvBuildResult Build(MEGame game, string yamlPath, string? packageOverride)
+    {
+        if (!game.IsGame1()) throw new ArgumentException("conv_build handles Game 1 (LE1) conversations.");
+        LecHost.EnsureInitialized();
+        var file = Path.GetFullPath(GamePaths.ToWindowsPath(yamlPath));
+        if (!File.Exists(file)) throw new FileNotFoundException($"No file {file}.");
+        var spec = Parse(File.ReadAllText(file));
+        var dir = Path.GetDirectoryName(file)!;
+        var package = Locate(game, packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."), dir);
+        var conversation = spec.Conversation ?? throw new ArgumentException("The file has no 'conversation'.");
+        // GlobalTlk files usually sit next to the level; resolve and check every target before writing any.
+        var globals = spec.GlobalTlk.Select(g => Locate(game, g, Path.GetDirectoryName(package)!, dir)).ToList();
+        foreach (var target in globals.Prepend(package)) PackageWriter.EnsureWritable(game, target);
+
+        var notes = new List<string>();
+        var strings = new Dictionary<int, Dictionary<string, string>>();
+        var backups = new List<string>();
+        var tlkFiles = new List<string>();
+
+        var ((row, built, start, path), backup) = PackageWriter.Edit(game, package, pcc =>
+        {
+            var conv = ExportInspector.Resolve(pcc, conversation);
+            if (conv.ClassName != "BioConversation") throw new ArgumentException($"#{conv.UIndex} is a {conv.ClassName}, not a BioConversation.");
+
+            var labels = PlaceNodes(pcc, conv, spec, notes, out var actions);
+            var built = ApplyFields(game, conv, spec, labels, actions, strings, notes);
+            var start = ApplyStart(conv, spec, labels);
+            tlkFiles.AddRange(WriteLocalStrings(pcc, conv, strings, spec.DefaultLanguage));
+            return (ExportInspector.Row(conv), built, start, pcc.FilePath);
+        });
+        backups.Add(backup);
+
+        foreach (var globalPath in globals)
+        {
+            var language = LanguageOfFile(Path.GetFileNameWithoutExtension(globalPath));
+            var edit = TalkFiles.Set(game, globalPath, StringsFor(strings, language, spec.DefaultLanguage), null);
+            backups.Add(edit.BackupPath);
+            tlkFiles.Add($"{Path.GetFileName(globalPath)} ({language})");
+        }
+
+        return new ConvBuildResult(path, row, built, start, strings.Count, tlkFiles, notes, backups);
+    }
+
+    /// <summary>Pass 1: gives every node a label, adding the ones whose strref is not in the conversation yet.</summary>
+    private static Dictionary<string, string> PlaceNodes(IMEPackage pcc, ExportEntry conv, Spec spec, List<string> notes, out Dictionary<string, string> actions)
+    {
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        actions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var node in spec.Nodes)
+        {
+            var props = conv.GetProperties();
+            if (node.Existing)
+            {
+                var (isReply, index) = ConversationEditor.ParseNode(node.Name);
+                if (index >= ConversationEditor.NodeList(props, isReply).Count) throw new ArgumentException($"line {node.Line}: {node.Name} does not exist.");
+                labels[node.Name] = node.Name.ToUpperInvariant();
+                actions[node.Name] = "existing";
+                continue;
+            }
+
+            var list = ConversationEditor.NodeList(props, node.IsReply);
+            var found = list.ToList().FindIndex(n => n.GetProp<StringRefProperty>("srText")?.Value == node.StrRef);
+            if (found >= 0)
+            {
+                labels[node.Name] = $"{(node.IsReply ? 'R' : 'E')}{found}";
+                actions[node.Name] = "found";
+                continue;
+            }
+
+            var template = node.Template ?? throw new ArgumentException($"line {node.Line}: new line '{node.Name}' needs a template (E<n> or R<n> to copy).");
+            var templateLabel = Label(labels, template);
+            if (ConversationEditor.ParseNode(templateLabel).IsReply != node.IsReply)
+            {
+                throw new ArgumentException($"line {template.Line}: '{node.Name}' is {(node.IsReply ? "a reply" : "an entry")}; copy a template of the same kind.");
+            }
+            var added = ConversationEditor.AddNodeIn(pcc, conv, templateLabel, node.StrRef!.Value, node.Length, keepPlot: false);
+            labels[node.Name] = added.Label;
+            actions[node.Name] = "added";
+            notes.AddRange(added.Notes.Select(n => $"{node.Name}: {n}"));
+        }
+        return labels;
+    }
+
+    /// <summary>Pass 2: plot fields, wheels, next lines and lengths; collects the strings to write.</summary>
+    private static List<BuiltNode> ApplyFields(MEGame game, ExportEntry conv, Spec spec, Dictionary<string, string> labels, Dictionary<string, string> actions,
+                                               Dictionary<int, Dictionary<string, string>> strings, List<string> notes)
+    {
+        // Wheel text and category already used for each reply, for choices that do not give them.
+        var known = new Dictionary<int, (int Paraphrase, NameReference Category)>();
+        foreach (var entry in ConversationEditor.NodeList(conv.GetProperties(), replies: false))
+        {
+            foreach (var choice in entry.GetProp<ArrayProperty<StructProperty>>("ReplyListNew")?.ToList() ?? [])
+            {
+                var index = choice.GetProp<IntProperty>("nIndex")?.Value ?? -1;
+                if (index >= 0 && !known.ContainsKey(index) && choice.GetProp<EnumProperty>("Category") is { } category)
+                {
+                    known[index] = (choice.GetProp<StringRefProperty>("srParaphrase")?.Value ?? 0, category.Value);
+                }
+            }
+        }
+        var byLabel = spec.Nodes.ToDictionary(n => labels[n.Name], n => n, StringComparer.OrdinalIgnoreCase);
+
+        var built = new List<BuiltNode>();
+        foreach (var node in spec.Nodes)
+        {
+            var label = labels[node.Name];
+            var (isReply, index) = ConversationEditor.ParseNode(label);
+            var props = conv.GetProperties();
+            var n = ConversationEditor.NodeList(props, isReply)[index].Properties;
+            var changes = new List<string>();
+            var strRef = n.GetProp<StringRefProperty>("srText")?.Value;
+
+            if (node.Text is { } text)
+            {
+                if (strRef is not > 0) throw new ArgumentException($"line {node.Line}: {node.Name} has no text strref to write to.");
+                Collect(strings, strRef.Value, text, node.Line);
+                changes.Add($"text ${strRef}");
+            }
+            if (node.If is { } cond)
+            {
+                n.AddOrReplaceProp(new IntProperty(cond.Func, "nConditionalFunc"));
+                n.AddOrReplaceProp(new IntProperty(cond.Param, "nConditionalParam"));
+                n.AddOrReplaceProp(new BoolProperty(cond.IsFunction, "bFireConditional"));
+                changes.Add(cond.Func < 0 ? "no condition" : cond.IsFunction ? $"if conditional {cond.Func}({cond.Param})" : $"if bool {cond.Func}({cond.Param})");
+            }
+            if (node.Transition is { } transition)
+            {
+                n.AddOrReplaceProp(new IntProperty(transition, "nStateTransition"));
+                changes.Add(transition < 0 ? "no transition" : $"transition {transition}");
+            }
+            if (node.Wheel is { Text: { } wheelText, StrRef: { } wheelStrRef } wheel) Collect(strings, wheelStrRef, wheelText, wheel.Line);
+
+            if (node.Replies is { } replies)
+            {
+                if (isReply) throw new ArgumentException($"line {node.Line}: {node.Name} is a reply; a reply lists its next lines in 'then'.");
+                var list = new ArrayProperty<StructProperty>("ReplyListNew");
+                foreach (var choice in replies)
+                {
+                    var to = Label(labels, choice.To);
+                    var (toReply, toIndex) = ConversationEditor.ParseNode(to);
+                    if (!toReply) throw new ArgumentException($"line {choice.To.Line}: a wheel choice leads to a reply (R<n>), not {to}.");
+                    var target = byLabel.GetValueOrDefault(to)?.Wheel;
+                    var hasUsed = known.TryGetValue(toIndex, out var used);
+                    var paraphrase = choice.Override?.StrRef ?? target?.StrRef ?? (hasUsed ? used.Paraphrase : (int?)null)
+                                     ?? throw new ArgumentException($"line {choice.To.Line}: no wheel text for {choice.To.Name}: give the reply a 'wheel' or the choice a 'paraphrase'.");
+                    var categoryName = choice.Override?.Category ?? target?.Category;
+                    var category = categoryName is not null ? ConversationEditor.Category(game, categoryName)
+                                   : hasUsed ? used.Category
+                                   : throw new ArgumentException($"line {choice.To.Line}: no wheel category for {choice.To.Name}: give the reply a 'wheel' or the choice a 'category'.");
+                    if (choice.Override is { Text: { } overrideText, StrRef: { } overrideStrRef }) Collect(strings, overrideStrRef, overrideText, choice.Override.Line);
+                    list.Add(new StructProperty("BioDialogReplyListDetails", new PropertyCollection
+                    {
+                        new IntProperty(toIndex, "nIndex"),
+                        new StringRefProperty(paraphrase, "srParaphrase"),
+                        new StrProperty("", "sParaphrase"),
+                        new EnumProperty(category, "EReplyCategory", game, "Category"),
+                        new NoneProperty(),
+                    }));
+                }
+                n.AddOrReplaceProp(list);
+                changes.Add($"wheel {string.Join(", ", replies.Select(r => Label(labels, r.To)))}");
+            }
+            if (node.Then is { } then)
+            {
+                if (!isReply) throw new ArgumentException($"line {node.Line}: {node.Name} is an entry; an entry lists its wheel in 'replies'.");
+                var next = new ArrayProperty<IntProperty>("EntryList");
+                foreach (var target in then)
+                {
+                    var (toReply, toIndex) = ConversationEditor.ParseNode(Label(labels, target));
+                    if (toReply) throw new ArgumentException($"line {target.Line}: a reply leads to an entry (E<n>), not {target.Name}.");
+                    next.Add(new IntProperty(toIndex));
+                }
+                n.AddOrReplaceProp(next);
+                changes.Add(then.Count == 0 ? "ends the conversation" : $"then {string.Join(", ", then.Select(t => Label(labels, t)))}");
+            }
+            conv.WriteProperties(props);
+
+            if (node.Length is { } length && actions[node.Name] != "added")
+            {
+                if (ConversationEditor.SetLengthIn(conv, isReply, index, length)) changes.Add($"length {length.ToString(CultureInfo.InvariantCulture)} s");
+                else notes.Add($"{node.Name}: no node data, length not set.");
+            }
+            built.Add(new BuiltNode(node.Name, label, actions[node.Name], strRef, changes));
+        }
+        return built;
+    }
+
+    private static List<string> ApplyStart(ExportEntry conv, Spec spec, Dictionary<string, string> labels)
+    {
+        var props = conv.GetProperties();
+        if (spec.Start is null) return props.GetProp<ArrayProperty<IntProperty>>("m_StartingList")?.Select(i => $"E{i.Value}").ToList() ?? [];
+
+        var starts = new ArrayProperty<IntProperty>("m_StartingList");
+        foreach (var start in spec.Start)
+        {
+            var (isReply, index) = ConversationEditor.ParseNode(Label(labels, start));
+            if (isReply) throw new ArgumentException($"line {start.Line}: a conversation starts on an entry, not {start.Name}.");
+            starts.Add(new IntProperty(index));
+        }
+        props.AddOrReplaceProp(starts);
+        conv.WriteProperties(props);
+        return starts.Select(i => $"E{i.Value}").ToList();
+    }
+
+    /// <summary>Writes the strings to the conversation's TLK set: one BioTlkFile per language and Shepard gender (tlk, tlk_M, tlk_FR, tlk_M_FR...).</summary>
+    private static List<string> WriteLocalStrings(IMEPackage pcc, ExportEntry conv, Dictionary<int, Dictionary<string, string>> strings, string defaultLanguage)
+    {
+        if (strings.Count == 0) return [];
+        var set = conv.GetProperty<ObjectProperty>("m_oTlkFileSet")?.ResolveToEntry(pcc)
+                  ?? throw new ArgumentException($"#{conv.UIndex} has no TLK set (m_oTlkFileSet).");
+        var written = new List<string>();
+        foreach (var tlk in pcc.Exports.Where(x => x.ClassName == "BioTlkFile" && x.Parent == set.Parent))
+        {
+            var language = LanguageOfTlk(tlk.ObjectName.Instanced);
+            TalkFiles.WriteIn(tlk, StringsFor(strings, language, defaultLanguage));
+            written.Add($"{tlk.InstancedFullPath} ({language})");
+        }
+        return written;
+    }
+
+    private static string LanguageOfTlk(string name)
+    {
+        var rest = name.StartsWith("tlk", StringComparison.OrdinalIgnoreCase) ? name[3..] : name;
+        if (rest.StartsWith("_M", StringComparison.OrdinalIgnoreCase) && (rest.Length == 2 || rest[2] == '_')) rest = rest[2..];
+        return rest.TrimStart('_') is { Length: > 0 } language ? language.ToUpperInvariant() : "INT";
+    }
+
+    /// <summary>DLC_MOD_X_GlobalTlk_FR → FR; DLC_MOD_X_GlobalTlk → INT.</summary>
+    private static string LanguageOfFile(string name)
+    {
+        var tail = name[(name.LastIndexOf('_') + 1)..];
+        return name.Contains('_') && tail.Length is >= 2 and <= 4 && tail.All(char.IsUpper) && !tail.Equals("TLK", StringComparison.Ordinal) ? tail : "INT";
+    }
+
+    private static List<TlkString> StringsFor(Dictionary<int, Dictionary<string, string>> strings, string language, string defaultLanguage) =>
+        strings.Select(s => new TlkString(s.Key,
+                s.Value.GetValueOrDefault(language)
+                ?? (TextLanguage.TryGetValue(language, out var shown) ? s.Value.GetValueOrDefault(shown) : null)
+                ?? s.Value.GetValueOrDefault(defaultLanguage)
+                ?? s.Value.Values.First()))
+            .ToList();
+
+    private static void Collect(Dictionary<int, Dictionary<string, string>> strings, int strRef, Dictionary<string, string> text, int line)
+    {
+        if (strings.TryGetValue(strRef, out var existing) && !existing.OrderBy(p => p.Key).SequenceEqual(text.OrderBy(p => p.Key)))
+        {
+            throw new ArgumentException($"line {line}: strref {strRef} is given two different texts.");
+        }
+        strings[strRef] = text;
+    }
+
+    private static string Label(Dictionary<string, string> labels, Ref r)
+    {
+        if (labels.TryGetValue(r.Name, out var label)) return label;
+        if (NodeLabel().IsMatch(r.Name)) return r.Name.ToUpperInvariant();
+        throw new ArgumentException($"line {r.Line}: unknown node '{r.Name}'. Name a node of the file (defined above for a template) or E<n>/R<n>.");
+    }
+
+    /// <summary>A path as given, then relative to each folder in turn, then a file name the game loads.</summary>
+    private static string Locate(MEGame game, string package, params string[] dirs)
+    {
+        var candidate = GamePaths.ToWindowsPath(package);
+        foreach (var dir in dirs)
+        {
+            var relative = Path.Combine(dir, candidate);
+            if (File.Exists(relative)) return Path.GetFullPath(relative);
+        }
+        return GamePaths.ResolvePackage(game, candidate);
+    }
+
+    // ---- YAML ----
+
+    private static Spec Parse(string yaml)
+    {
+        var stream = new YamlStream();
+        try
+        {
+            stream.Load(new StringReader(yaml));
+        }
+        catch (YamlException e)
+        {
+            throw new ArgumentException($"line {e.Start.Line}: {e.Message}");
+        }
+        if (stream.Documents.Count == 0 || stream.Documents[0].RootNode is not YamlMappingNode root) throw new ArgumentException("The file is not a YAML mapping.");
+
+        var spec = new Spec();
+        foreach (var (key, value) in Entries(root, "package", "conversation", "defaultLanguage", "globalTlk", "start", "nodes"))
+        {
+            switch (key)
+            {
+                case "package": spec.Package = Scalar(value); break;
+                case "conversation": spec.Conversation = Scalar(value); break;
+                case "defaultLanguage": spec.DefaultLanguage = Language(Scalar(value)); break;
+                case "globalTlk": spec.GlobalTlk = Sequence(value).Select(Scalar).ToList(); break;
+                case "start": spec.Start = Sequence(value).Select(RefOf).ToList(); break;
+                case "nodes":
+                    if (value is not YamlMappingNode nodes) throw Fail(value, "'nodes' maps node names to nodes.");
+                    foreach (var (name, body) in nodes.Children) spec.Nodes.Add(ParseNode(Scalar(name), body));
+                    break;
+            }
+        }
+        var duplicate = spec.Nodes.GroupBy(n => n.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (duplicate is not null) throw new ArgumentException($"Node '{duplicate.Key}' is defined twice.");
+        return spec;
+    }
+
+    private static NodeSpec ParseNode(string name, YamlNode body)
+    {
+        var node = new NodeSpec { Name = name, Line = (int)body.Start.Line, Existing = NodeLabel().IsMatch(name) };
+        var entries = body is YamlMappingNode m ? Entries(m, "entry", "reply", "template", "length", "text", "if", "transition", "wheel", "replies", "then").ToList()
+                      : throw Fail(body, $"node '{name}' must be a mapping.");
+        foreach (var (key, value) in entries)
+        {
+            switch (key)
+            {
+                case "entry" or "reply":
+                    if (node.Existing) throw Fail(value, $"{name} already exists; '{key}' (strref of a new line) is for new nodes.");
+                    if (node.StrRef is not null) throw Fail(value, "a node is either an entry or a reply.");
+                    node.IsReply = key == "reply";
+                    node.StrRef = Int(value);
+                    break;
+                case "template": node.Template = RefOf(value); break;
+                case "length": node.Length = Float(value); break;
+                case "text": node.Text = Text(value); break;
+                case "if": node.If = ConditionOf(value); break;
+                case "transition": node.Transition = Scalar(value).Equals("none", StringComparison.OrdinalIgnoreCase) ? -1 : Int(value); break;
+                case "wheel": node.Wheel = WheelOf(value, "strref"); break;
+                case "replies": node.Replies = Sequence(value).Select(ChoiceOf).ToList(); break;
+                case "then": node.Then = Sequence(value).Select(RefOf).ToList(); break;
+            }
+        }
+        if (node.Existing) node.IsReply = char.ToUpperInvariant(name[0]) == 'R';
+        else if (node.StrRef is null) throw Fail(body, $"new node '{name}' needs 'entry: <strref>' (NPC line) or 'reply: <strref>' (Shepard line).");
+        if (node.Wheel is not null && !node.IsReply) throw Fail(body, $"'{name}' is an entry; only replies have wheel text.");
+        return node;
+    }
+
+    private static Choice ChoiceOf(YamlNode value)
+    {
+        if (value is YamlScalarNode) return new Choice(RefOf(value), null);
+        if (value is not YamlMappingNode m) throw Fail(value, "a wheel choice is a node name or {to, category, paraphrase}.");
+        var to = m.Children.FirstOrDefault(c => Scalar(c.Key) == "to").Value ?? throw Fail(value, "the choice needs 'to'.");
+        return new Choice(RefOf(to), WheelOf(m, "paraphrase", skip: "to"));
+    }
+
+    /// <summary>{strref|paraphrase: id, category: X, fr: "...", en: "..."}.</summary>
+    private static WheelSpec WheelOf(YamlNode value, string idKey, string? skip = null)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, $"wheel text is a mapping: {{{idKey}: <strref>, category: <category>, fr: \"...\"}}.");
+        int? strRef = null;
+        string? category = null;
+        var text = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in m.Children)
+        {
+            var key = Scalar(k);
+            if (key == skip) continue;
+            if (key == idKey) strRef = Int(v);
+            else if (key == "category") category = Scalar(v);
+            else text[Language(key)] = Scalar(v);
+        }
+        if (text.Count > 0 && strRef is null) throw Fail(value, $"wheel text needs '{idKey}' (the strref to write it to).");
+        return new WheelSpec(strRef, category, text.Count > 0 ? text : null, (int)m.Start.Line);
+    }
+
+    private static Condition ConditionOf(YamlNode value)
+    {
+        var text = Scalar(value).Trim();
+        if (text.Equals("none", StringComparison.OrdinalIgnoreCase)) return new Condition(-1, -1, false);
+        if (BoolCondition().Match(text) is { Success: true } b)
+        {
+            var mustBe = !b.Groups["not"].Success && !b.Groups["value"].Value.Equals("false", StringComparison.OrdinalIgnoreCase);
+            if (b.Groups["not"].Success && b.Groups["value"].Success) throw Fail(value, "write 'not bool <id>' or 'bool <id> false', not both.");
+            return new Condition(int.Parse(b.Groups["id"].Value, CultureInfo.InvariantCulture), mustBe ? 1 : 0, false);
+        }
+        if (FunctionCondition().Match(text) is { Success: true } f)
+        {
+            var param = f.Groups["param"].Success ? int.Parse(f.Groups["param"].Value, CultureInfo.InvariantCulture) : 0;
+            return new Condition(int.Parse(f.Groups["id"].Value, CultureInfo.InvariantCulture), param, true);
+        }
+        throw Fail(value, $"cannot read condition '{text}'. Use: bool <id>, not bool <id>, bool <id> false, conditional <id> [param <n>], none.");
+    }
+
+    private static Dictionary<string, string> Text(YamlNode value)
+    {
+        if (value is YamlScalarNode) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["*"] = Scalar(value) };
+        if (value is not YamlMappingNode m) throw Fail(value, "text is a string or a mapping of languages (fr, en...).");
+        return m.Children.ToDictionary(c => Language(Scalar(c.Key)), c => Scalar(c.Value), StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Language codes as the game names them; en means INT.</summary>
+    private static string Language(string code) => code.Trim().ToUpperInvariant() switch
+    {
+        "EN" or "INT" => "INT",
+        var other => other,
+    };
+
+    private static IEnumerable<(string Key, YamlNode Value)> Entries(YamlMappingNode m, params string[] allowed)
+    {
+        foreach (var (k, v) in m.Children)
+        {
+            var key = Scalar(k);
+            if (!allowed.Contains(key)) throw Fail(k, $"unknown key '{key}'. Allowed here: {string.Join(", ", allowed)}.");
+            yield return (key, v);
+        }
+    }
+
+    private static Ref RefOf(YamlNode value) => new(Scalar(value), (int)value.Start.Line);
+
+    private static string Scalar(YamlNode value) => value is YamlScalarNode { Value: { } s } ? s : throw Fail(value, "expected a single value.");
+
+    private static IEnumerable<YamlNode> Sequence(YamlNode value) => value is YamlSequenceNode s ? s.Children : throw Fail(value, "expected a list.");
+
+    private static int Int(YamlNode value) =>
+        int.TryParse(Scalar(value).TrimStart('$'), NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : throw Fail(value, "expected a whole number.");
+
+    private static float Float(YamlNode value) =>
+        float.TryParse(Scalar(value), NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0 ? f : throw Fail(value, "expected a positive number of seconds.");
+
+    private static ArgumentException Fail(YamlNode node, string message) => new($"line {node.Start.Line}: {message}");
+}
