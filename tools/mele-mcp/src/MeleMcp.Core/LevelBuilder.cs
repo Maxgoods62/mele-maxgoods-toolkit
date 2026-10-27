@@ -17,16 +17,20 @@ public sealed record BuiltNpc(string Name, ExportRow Pawn, string Action, IReadO
 /// <param name="Action">found (an actor of the level has the tag), imported (copied from the template's package) or cloned (from an actor of the level).</param>
 public sealed record BuiltUsable(string Name, ExportRow Actor, string Action, IReadOnlyList<string> Changes);
 
+/// <param name="Action">found (an actor of the level has the tag), imported (copied from the template's package) or cloned (from an actor of the level).</param>
+public sealed record BuiltProp(string Name, ExportRow Actor, string Action, IReadOnlyList<string> Changes);
+
 /// <param name="LevelChanges">What this build changed in the level itself (streamed files, post-process, character lights, start points, squad).</param>
 /// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
-public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, IReadOnlyList<BuiltUsable> Usables, int StringCount, IReadOnlyList<string> TlkFiles,
+public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, IReadOnlyList<BuiltUsable> Usables, IReadOnlyList<BuiltProp> Props, int StringCount, IReadOnlyList<string> TlkFiles,
     string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
 
 /// <summary>
 /// Builds a Game 1 level from a YAML file. The level itself: vanilla sub-levels it shows and their stream volume, its
 /// post-process, character lights, start points (see <see cref="LevelStreams"/>), the squad spawned on load (<see cref="SquadSpawns"/>). Its NPCs: the pawn (found by tag, else imported from a
 /// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
-/// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. A missing level is
+/// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. Its props: any
+/// actor copied from a template and placed (live_place, live_save). A missing level is
 /// created, and the LE1CP Sideloader config that loads it is written.
 /// </summary>
 public static class LevelBuilder
@@ -70,6 +74,17 @@ public static class LevelBuilder
         public (string Map, string? StartPoint)? GoTo;
     }
 
+    /// <summary>Any actor copied from a template and placed, e.g. a mesh of another level.</summary>
+    private sealed class PropSpec
+    {
+        public required string Name;
+        public required int Line;
+        public string? Tag;
+        public Source? Template;
+        public Vector3? Location;
+        public float? Yaw;
+    }
+
     private sealed class Spec
     {
         public string? Package;
@@ -85,6 +100,8 @@ public static class LevelBuilder
         public (string Package, int Line)? Squad;
         public List<NpcSpec> Npcs = [];
         public List<UsableSpec> Usables = [];
+        public List<PropSpec> Props = [];
+        public Source? PropTemplate;
         public readonly Dictionary<int, Dictionary<string, string>> Strings = [];
     }
 
@@ -115,7 +132,7 @@ public static class LevelBuilder
         var backups = new List<string>();
         var missing = new List<string>();
         var levelChanges = new List<string>();
-        var ((npcs, usables), backup) = PackageWriter.Edit(game, package, pcc =>
+        var ((npcs, usables, props), backup) = PackageWriter.Edit(game, package, pcc =>
         {
             var level = pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no {LevelPath}; is it a level?");
             using var cache = new PackageCache();
@@ -133,7 +150,8 @@ public static class LevelBuilder
                 SquadSpawns.Set(game, pcc, sequence, squad.Package, spec.Streaming?.Levels ?? [], squad.Line, cache, levelChanges);
             }
             var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
-            return (builtNpcs, spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList());
+            var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList();
+            return (builtNpcs, builtUsables, spec.Props.Select(p => BuildProp(game, pcc, level, spec, p, cache)).ToList());
         });
         backups.Add(backup);
 
@@ -150,7 +168,7 @@ public static class LevelBuilder
         }
 
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
-        return new LevelBuildResult(package, create, levelChanges, npcs, usables, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
+        return new LevelBuildResult(package, create, levelChanges, npcs, usables, props, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
     }
 
     private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache, List<string> missing, List<string> notes)
@@ -221,12 +239,7 @@ public static class LevelBuilder
 
         var props = actor.GetProperties();
         var dirty = Changed(changes, "tag", Put(props, new NameProperty(tag, "Tag")));
-        if (usable.Location is { } location) dirty |= Changed(changes, "location", Put(props, CommonStructs.Vector3Prop(location, "Location")));
-        if (usable.Yaw is { } yaw)
-        {
-            var rotation = props.GetProp<StructProperty>("Rotation") is { } r ? CommonStructs.GetRotator(r) : new Rotator(0, 0, 0);
-            dirty |= Changed(changes, "yaw", Put(props, CommonStructs.RotatorProp(new Rotator(rotation.Pitch, (int)Math.Round(yaw * 65536 / 360), rotation.Roll), "Rotation")));
-        }
+        dirty |= PutPlace(props, usable.Location, usable.Yaw, changes);
         if (dirty) actor.WriteProperties(props);
 
         // Vanilla terminals ship untargetable and their story's Kismet switches them on; ours is usable from the start.
@@ -242,6 +255,107 @@ public static class LevelBuilder
 
         if (usable.GoTo is { } go) LinkAreaTransition(pcc, actor, go.Map, go.StartPoint, usable.Line, cache, changes);
         return new BuiltUsable(usable.Name, ExportInspector.Row(actor), action, changes);
+    }
+
+    private static BuiltProp BuildProp(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, PropSpec prop, PackageCache cache)
+    {
+        var changes = new List<string>();
+        var tag = prop.Tag ?? throw new ArgumentException($"line {prop.Line}: '{prop.Name}' needs a 'tag' (how the build finds it again).");
+        var actor = FindActor(pcc, level, tag, _ => true);
+        var action = "found";
+        if (actor is null)
+        {
+            var template = prop.Template ?? throw new ArgumentException($"line {prop.Line}: no actor of the level has tag '{tag}'; give a 'template' to import or clone.");
+            using var source = template.Package is null ? null : PackageInspector.Open(game, template.Package);
+            var original = ResolveActor(source ?? pcc, template.Actor, template.Line);
+            if (original.ClassName == "StaticMeshActor")
+            {
+                var standIn = spec.PropTemplate ?? throw new ArgumentException($"line {prop.Line}: {original.ObjectName.Instanced} is a StaticMeshActor, lit by light baked where it stands. "
+                                                                                + "Give 'propTemplate' (a BioInert, e.g. { package: BIOA_FRE31_00_LAY.pcc, actor: BioInert_0 }): a copy of it shows the mesh, lit where it is.");
+                actor = AddActor(game, pcc, level, standIn, cache, cloneOnClash: true);
+                ShowMesh(source ?? pcc, original, pcc, actor, cache, changes);
+                action = "stand-in";
+            }
+            else
+            {
+                actor = AddActor(game, pcc, level, template, cache);
+                action = template.Package is null ? "cloned" : "imported";
+            }
+        }
+
+        var props = actor.GetProperties();
+        var dirty = Changed(changes, "tag", Put(props, new NameProperty(tag, "Tag")));
+        dirty |= PutPlace(props, prop.Location, prop.Yaw, changes);
+        if (dirty) actor.WriteProperties(props);
+        return new BuiltProp(prop.Name, ExportInspector.Row(actor), action, changes);
+    }
+
+    /// <summary>
+    /// Makes a placeable (a copy of the prop template) show a static mesh actor's mesh, materials and scale. A StaticMeshActor
+    /// is lit by light baked where it stands, so a copy elsewhere stays black; the placeable's DynamicLightEnvironment lights it
+    /// where it is, as live_place's stand-in.
+    /// </summary>
+    private static void ShowMesh(IMEPackage source, ExportEntry original, IMEPackage pcc, ExportEntry placeable, PackageCache cache, List<string> changes)
+    {
+        var actorProps = Effective(original);
+        var component = actorProps.GetProp<ObjectProperty>("StaticMeshComponent")?.ResolveToEntry(source) as ExportEntry
+                        ?? throw new ArgumentException($"{original.InstancedFullPath} has no StaticMeshComponent.");
+        var componentProps = Effective(component);
+        var mesh = componentProps.GetProp<ObjectProperty>("StaticMesh")?.ResolveToEntry(source) ?? throw new ArgumentException($"{component.InstancedFullPath} has no mesh.");
+
+        var shown = Object(pcc, placeable.GetProperties(), "PlaceableMesh") ?? throw new ArgumentException($"The prop template {placeable.ObjectName.Instanced} has no PlaceableMesh: give a BioInert.");
+        DropBakedLight(placeable);
+        var shownProps = shown.GetProperties();
+        shownProps.AddOrReplaceProp(new ObjectProperty(Port(source, mesh, pcc, cache), "StaticMesh"));
+        shownProps.RemoveNamedProperty("Materials");
+        if (componentProps.GetProp<ArrayProperty<ObjectProperty>>("Materials") is { Count: > 0 } materials)
+        {
+            var ported = materials.Select(m => new ObjectProperty(m.ResolveToEntry(source) is { } material ? Port(source, material, pcc, cache) : null));
+            shownProps.AddOrReplaceProp(new ArrayProperty<ObjectProperty>(ported, "Materials"));
+        }
+        shown.WriteProperties(shownProps);
+
+        var props = placeable.GetProperties();
+        foreach (var name in new[] { "DrawScale", "DrawScale3D" })
+        {
+            props.RemoveNamedProperty(name);
+            if (actorProps.FirstOrDefault(p => p.Name == name) is { } scale) props.AddOrReplaceProp(scale);
+        }
+        placeable.WriteProperties(props);
+        changes.Add($"shows {mesh.InstancedFullPath}");
+    }
+
+    /// <summary>An export's properties with what it inherits from archetype exports (a prefab's) under them; references not remapped.</summary>
+    private static PropertyCollection Effective(ExportEntry export)
+    {
+        var props = export.Archetype is ExportEntry archetype ? Effective(archetype) : new PropertyCollection();
+        foreach (var own in export.GetProperties().Where(p => p is not NoneProperty)) props.AddOrReplaceProp(own);
+        return props;
+    }
+
+    /// <summary>An object of the source package in the level: an export copied with what it needs, an import added; the same one if the level has it.</summary>
+    private static IEntry Port(IMEPackage source, IEntry entry, IMEPackage pcc, PackageCache cache)
+    {
+        if (source == pcc) return entry;
+        if (pcc.FindEntry(entry.InstancedFullPath) is { } existing) return existing;
+        if (entry is ExportEntry export)
+        {
+            EntryExporter.ExportExportToPackage(export, pcc, out var ported, cache);
+            return ported;
+        }
+        return EntryImporter.GetOrAddCrossImportOrPackage(entry.InstancedFullPath, source, pcc, new RelinkerOptionsPackage { Cache = cache });
+    }
+
+    /// <summary>Location, and yaw in degrees (pitch and roll kept).</summary>
+    private static bool PutPlace(PropertyCollection props, Vector3? location, float? yaw, List<string> changes)
+    {
+        var dirty = location is { } l && Changed(changes, "location", Put(props, CommonStructs.Vector3Prop(l, "Location")));
+        if (yaw is { } y)
+        {
+            var rotation = props.GetProp<StructProperty>("Rotation") is { } r ? CommonStructs.GetRotator(r) : new Rotator(0, 0, 0);
+            dirty |= Changed(changes, "yaw", Put(props, CommonStructs.RotatorProp(new Rotator(rotation.Pitch, (int)Math.Round(y * 65536 / 360), rotation.Roll), "Rotation")));
+        }
+        return dirty;
     }
 
     /// <summary>Main_Sequence: Shepard uses the placeable (BioSeqEvt_ArtPlaceableUsed) → BioSeqAct_AreaTransition to the map and start point.</summary>
@@ -277,7 +391,8 @@ public static class LevelBuilder
     }
 
     /// <summary>The template's actor imported with everything it references, or an actor of this level cloned; added to the level's actors.</summary>
-    private static ExportEntry AddActor(MEGame game, IMEPackage pcc, ExportEntry level, Source template, PackageCache cache)
+    /// <param name="cloneOnClash">When the level already has an actor of that name (an earlier import), clone it instead of failing.</param>
+    private static ExportEntry AddActor(MEGame game, IMEPackage pcc, ExportEntry level, Source template, PackageCache cache, bool cloneOnClash = false)
     {
         ExportEntry added;
         if (template.Package is null)
@@ -288,7 +403,15 @@ public static class LevelBuilder
         {
             using var source = PackageInspector.Open(game, template.Package);
             var actor = ResolveActor(source, template.Actor, template.Line);
-            if (pcc.FindEntry($"{LevelPath}.{actor.ObjectName.Instanced}") is { } clash)
+            Flatten(actor);
+            var clash = pcc.FindEntry($"{LevelPath}.{actor.ObjectName.Instanced}");
+            if (clash is ExportEntry earlier && cloneOnClash)
+            {
+                added = EntryCloner.CloneTree(earlier);
+                pcc.AddToLevelActorsIfNotThere(added);
+                return added;
+            }
+            if (clash is not null)
             {
                 throw new ArgumentException($"line {template.Line}: the level already has {clash.InstancedFullPath}, so an import would link to it instead of copying. Clone it: template: {{ actor: {actor.ObjectName.Instanced} }}.");
             }
@@ -485,6 +608,71 @@ public static class LevelBuilder
         return path;
     }
 
+    /// <summary>
+    /// Bakes what an actor and its components inherit from archetype exports (a prefab's) into them, and points them at the
+    /// archetypes' own archetypes (the class defaults). Imported as is, the actor would bring its archetype, and with it the
+    /// whole prefab: every archetype and mesh of the level's props (8 MB for one crate of BIOA_FRE31_00_LAY). Only changes the
+    /// source package in memory.
+    /// </summary>
+    private static void Flatten(ExportEntry actor)
+    {
+        var tree = Subobjects(actor).Prepend(actor).ToList();
+        while (actor.Archetype is ExportEntry archetype)
+        {
+            // The archetype's subobjects (components, behaviors and theirs) are the ones the actor's subobjects name as their archetypes.
+            var inherited = tree.Where(e => e.Archetype is ExportEntry a && (a == archetype || IsInside(a, archetype))).ToList();
+            var remap = inherited.ToDictionary(e => e.Archetype.UIndex, e => e.UIndex);
+            foreach (var export in inherited)
+            {
+                var from = (ExportEntry)export.Archetype;
+                Inherit(export, from, remap);
+                export.Archetype = from.Archetype;
+            }
+        }
+    }
+
+    private static IEnumerable<ExportEntry> Subobjects(ExportEntry export) =>
+        export.GetChildren().OfType<ExportEntry>().SelectMany(c => Subobjects(c).Prepend(c));
+
+    /// <summary>Drops the light and shadow maps baked for an actor's meshes: they belong to its old mesh and place.</summary>
+    private static void DropBakedLight(ExportEntry actor)
+    {
+        foreach (var component in actor.GetChildren().OfType<ExportEntry>().Where(c => c.ClassName == "StaticMeshComponent"))
+        {
+            var binary = ObjectBinary.From<StaticMeshComponent>(component);
+            if (binary.LODData.All(l => l.LightMap.LightMapType == ELightMapType.LMT_None && l.ShadowMaps.Length == 0 && l.ShadowVertexBuffers.Length == 0)) continue;
+            foreach (var lod in binary.LODData)
+            {
+                lod.LightMap = new LightMap { LightMapType = ELightMapType.LMT_None };
+                lod.ShadowMaps = [];
+                lod.ShadowVertexBuffers = [];
+            }
+            component.WriteBinary(binary);
+            // The lights the bake found irrelevant there.
+            component.RemoveProperty("IrrelevantLights");
+        }
+    }
+
+    /// <summary>The archetype's properties, overridden by the export's own; references to the archetype's components go to the export's.</summary>
+    private static void Inherit(ExportEntry export, ExportEntry archetype, Dictionary<int, int> remap)
+    {
+        var merged = archetype.GetProperties();
+        foreach (var property in merged) Remap(property, remap);
+        foreach (var own in export.GetProperties().Where(p => p is not NoneProperty)) merged.AddOrReplaceProp(own);
+        export.WriteProperties(merged);
+    }
+
+    private static void Remap(Property property, Dictionary<int, int> remap)
+    {
+        switch (property)
+        {
+            case ObjectProperty o when remap.TryGetValue(o.Value, out var to): o.Value = to; break;
+            case StructProperty s: foreach (var p in s.Properties) Remap(p, remap); break;
+            case ArrayProperty<ObjectProperty> a: foreach (var p in a) Remap(p, remap); break;
+            case ArrayProperty<StructProperty> a: foreach (var p in a) Remap(p, remap); break;
+        }
+    }
+
     // ---- Properties ----
 
     /// <summary>Sets a property when its value differs; true when it did.</summary>
@@ -551,7 +739,7 @@ public static class LevelBuilder
     {
         var spec = new Spec();
         foreach (var (key, value) in Entries(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "streaming", "postProcess",
-                     "characterLights", "startPointTemplate", "startPoints", "squad", "npcs", "usables"))
+                     "characterLights", "startPointTemplate", "startPoints", "squad", "npcs", "usables", "propTemplate", "props"))
         {
             switch (key)
             {
@@ -582,12 +770,17 @@ public static class LevelBuilder
                     if (value is not YamlMappingNode usables) throw Fail(value, "'usables' maps names to placeables.");
                     spec.Usables = usables.Children.Select(c => UsableOf(Scalar(c.Key), c.Value, spec.Strings)).ToList();
                     break;
+                case "propTemplate": spec.PropTemplate = SourceOf(value); break;
+                case "props":
+                    if (value is not YamlMappingNode props) throw Fail(value, "'props' maps names to actors.");
+                    spec.Props = props.Children.Select(c => PropOf(Scalar(c.Key), c.Value)).ToList();
+                    break;
             }
         }
-        var twice = spec.Npcs.Where(n => n.Tag is not null).GroupBy(n => n.Tag!, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
-        if (twice is not null) throw new ArgumentException($"Two NPCs have tag '{twice.Key}'.");
-        var usableTwice = spec.Usables.Where(u => u.Tag is not null).GroupBy(u => u.Tag!, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
-        if (usableTwice is not null) throw new ArgumentException($"Two usables have tag '{usableTwice.Key}'.");
+        // The build finds each actor again by its tag.
+        var twice = spec.Npcs.Select(n => n.Tag).Concat(spec.Usables.Select(u => u.Tag)).Concat(spec.Props.Select(p => p.Tag)).OfType<string>()
+            .GroupBy(t => t, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (twice is not null) throw new ArgumentException($"Two entries have tag '{twice.Key}'.");
         return spec;
     }
 
@@ -639,6 +832,26 @@ public static class LevelBuilder
             }
         }
         return usable;
+    }
+
+    private static PropSpec PropOf(string name, YamlNode body)
+    {
+        if (body is not YamlMappingNode m) throw Fail(body, $"prop '{name}' must be a mapping.");
+        var prop = new PropSpec { Name = name, Line = (int)body.Start.Line };
+        foreach (var (key, value) in Entries(m, "tag", "template", "location", "yaw"))
+        {
+            switch (key)
+            {
+                case "tag": prop.Tag = Scalar(value); break;
+                case "template": prop.Template = SourceOf(value); break;
+                case "location":
+                    var xyz = Numbers(value, 3, 3);
+                    prop.Location = new Vector3(xyz[0], xyz[1], xyz[2]);
+                    break;
+                case "yaw": prop.Yaw = Number(value); break;
+            }
+        }
+        return prop;
     }
 
     /// <summary>{strref: 74210060, fr: "...", en: "..."}: the text shown when Shepard aims at it.</summary>

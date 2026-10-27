@@ -43,8 +43,8 @@ public static partial class LiveBridge
         var replies = new List<JsonObject>();
         foreach (var request in requests)
         {
-            // An absent key takes the bridge's default; a null one would be refused as the wrong type.
-            foreach (var key in request.Where(kv => kv.Value is null).Select(kv => kv.Key).ToList()) request.Remove(key);
+            // An absent key takes the bridge's default; a null one would be refused as the wrong type. A set's value can be null (None).
+            foreach (var key in request.Where(kv => kv.Value is null && kv.Key != "value").Select(kv => kv.Key).ToList()) request.Remove(key);
             request["timeoutMs"] = (int)(timeoutSeconds * 1000);
             writer.WriteLine(request.ToJsonString());
             var line = ReadLine(reader, TimeSpan.FromSeconds(timeoutSeconds + 2))

@@ -43,7 +43,7 @@ Private for now. LEC is GPLv3, so a published version must be GPLv3 too.
 | `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
 | `plot_build` | Build a DLC plot package from a YAML file ([format below](#plot_build-yaml)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
 | `level_build` | Build a level from a YAML file ([format below](#level_build-yaml)). The level: vanilla sub-levels it shows inside a stream volume copied from a vanilla map, its post-process, start points (a location of our own: `at <map> <tag>`). Its usables: placeables (e.g. a terminal) that take Shepard to another map and start point. Its NPCs: pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), an idle pose with fidgets (a vanilla action-station prefab: left to talk, resumed after), the Sideloader config; creates a missing level; writes only what differs |
-| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels (`npcs`, `usables`, `streaming` or `startPoints`) through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
+| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels (`npcs`, `usables`, `props`, `streaming` or `startPoints`) through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone |
 | `mod_check` | Check a mod's built files in M3's library before installing: `refs` (LEX's reference check), `streaming` (a stream state without `InChunkName`: pawns frozen and black), `startpoints` (a pathless, unblocked start point: henchmen "destination blocked"), `strings` (a strref without text, per language), `facefx` (a line of the mod's own strings without `FXA_<strref>[_M]`), `ids` (plot, quest or string ids another installed mod or the base game defines). Planted bugs of each kind are caught; our mod passes |
 | `mod_install` | Install a mod with ME3Tweaks Mod Manager (`--installmod`, optional `--bootgame`): DLC copy, Coalesced merge of ConfigDelta files, AutoTOC. Waits on M3's log, then compares every mod file with its installed copy. Refuses while the game runs |
 | `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
@@ -86,6 +86,9 @@ Hot-reload notes:
 | `live_describe` | A class's chain, typed properties with their declaring class, function signatures | ✅ `BioGlobalVariableTable`, `BioPawn` |
 | `live_console` | A console command (player chain, cheats included) and what it printed or logged, read from the DebugLogger log between the command and a flushing `getall` | ✅ `getall BioPawn bTickIsDisabled`, `DumpPlotManagerValueByIndex 47 int` |
 | `live_watch` | `ProcessEvent` calls of functions for N seconds: time, object, class, params, Kismet input pin; overrides match (`Actor.Tick` catches `BioPawn.Tick`) | ✅ `Engine.Actor.Tick` |
+| `live_place` | Moves an actor, or spawns a copy of one (`Actor.Spawn` with it as the template), in front of Shepard facing her, where she stands, or at coordinates; `yaw`, `turn`, `raise`. Props land on the floor (Shepard's Z − 94), pawns at her height. A StaticMeshActor can't spawn: a BioInert copy shows its mesh, materials and scale. Pawn copies are refused (the engine crashed) | ✅ a freighter crate (stand-in) next to Dorn; a VI terminal copy; Shepard teleported (the camera follows the controller's `Rotation`, set apart) |
+| `live_remove` | Destroys an actor through Kismet's Destroy handler (`OnDestroy` with `Default__SeqAct_Destroy`); `bNoDelete` level actors are shut down (hidden, no collision), `bStatic` ones hidden | ✅ spawned copies removed, no script warning |
+| `live_save` | Writes a live actor's location and yaw into the level YAML entry with its tag (`npcs`, `usables`, `props`), keeping comments; with none, adds a `props` entry from its template (and `propTemplate` for a static mesh); then `level_build` | ✅ the crate: YAML entry, built, installed, there and lit after a restart; Dorn's entry found by tag (no change) |
 
 Requirements: `MeleBridge.asi` (`tools/mele-bridge/build.sh --install`, game closed). `game_plot` uses it when it is there.
 
@@ -210,6 +213,14 @@ npcs:
     lights:
       - { tag: claude_npc_01_light, offset: [0, 0, 120], radius: 180, brightness: 1.2 }   # offset: forward, right, up; turns with her
 
+propTemplate: { package: BIOA_FRE31_00_LAY.pcc, actor: BioInert_0 }   # a BioInert: copies of it show the props' static meshes
+props:                         # any actor copied from a template; live_place then live_save write these
+  crate:                       # a label for the result
+    tag: claude_prop_crate     # how the build finds it again (an actor of the level, any class)
+    template: { package: BIOA_FRE31_00_LAY.pcc, actor: StaticMeshActor_171 }   # or an actor of this level to clone
+    location: [-1670, -15864.6, -452.2]   # its pivot: for most meshes, the floor
+    yaw: 200
+
 usables:
   cabinTerminal:               # a label for the result
     tag: claude_to_cabin       # how the build finds it again (a BioUseable of the level)
@@ -221,6 +232,8 @@ usables:
 ```
 
 Every value given is enforced; a value left out stays as it is. Only values that differ are written, so a rebuild changes nothing. Errors name the YAML line.
+
+A prop whose template is a StaticMeshActor is not copied as one: a StaticMeshActor is lit by light baked where it stands, so a copy elsewhere renders black (with or without its lightmap). The build copies `propTemplate` instead, a BioInert whose `DynamicLightEnvironment` lights it where it is, and gives its `PlaceableMesh` the template's mesh and materials, and the actor its `DrawScale`/`DrawScale3D`. An imported template is first flattened: what it inherits from prefab archetypes (most props of a level are prefab instances) is written into it and its subobjects, which then point at the class defaults; otherwise the import brings the whole prefab (8 MB for one crate).
 
 A usable is made targetable (its behavior's `m_bTargetable` override: vanilla terminals wait for their story's Kismet). `goTo` Kismet in `Main_Sequence`: `BioSeqEvt_ArtPlaceableUsed` (Originator = the usable) → `BioSeqAct_AreaTransition`.
 

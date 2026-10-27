@@ -55,12 +55,14 @@ public static class KismetTools
                  + "BioTriggerStream copied from a vanilla level, whose Default state lists them), the post-process of a vanilla level, light actors "
                  + "copied from another level (e.g. character lights), start points (found by tag, else imported from a template, on the navigation "
                  + "list, blocked for AI paths) for 'at <map> <tag>', and the squad (a vanilla squad prefab: party selection on load, then the picked "
-                 + "henchmen spawn and follow Shepard). Its usables:a placeable copied from a template (e.g. a terminal), "
+                 + "henchmen spawn and follow Shepard). Its usables: a placeable copied from a template (e.g. a terminal), "
                  + "made targetable, with its own name, whose use runs BioSeqAct_AreaTransition to another map and start point. Its NPCs: the pawn (found by tag, else imported from a template pawn with everything "
                  + "it references, or cloned from an actor of the level), location and yaw, shown and active, own name (a renamed copy of its actor "
                  + "type, text written to the GlobalTlk), skin/hair/eye colors on its own materials, fill lights at offsets that turn with her, and "
                  + "the Main_Sequence Kismet that starts her conversation when Shepard uses her (a conversation the level does not have yet is "
-                 + "listed in MissingConversations: build it, then the level again). Creates a missing level (full path) and the "
+                 + "listed in MissingConversations: build it, then the level again). Its props: any actor copied from a template (prefab "
+                 + "archetypes baked in), placed; a StaticMeshActor's mesh goes on a copy of the BioInert 'propTemplate', lit where it stands "
+                 + "(live_place and live_save write these). Creates a missing level (full path) and the "
                  + "Sideloader ConfigDelta that loads it. Only changed values are written; running it twice changes nothing. See the tool README "
                  + "for the format. Backs every file up first and refuses files inside the game install.")]
     public static LevelBuildResult LevelBuild(

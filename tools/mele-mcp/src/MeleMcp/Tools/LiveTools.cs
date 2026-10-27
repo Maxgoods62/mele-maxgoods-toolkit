@@ -102,6 +102,47 @@ public static class LiveTools
             ["op"] = "describe", ["object"] = objectPath, ["class"] = className, ["functions"] = functions,
         }, timeoutSeconds));
 
+    [McpServerTool(Name = "live_place", Destructive = true),
+     Description("Moves a live actor, or spawns a copy of one (MeleBridge ASI), in front of Shepard facing her, where she stands, or at "
+                 + "coordinates. Props land on the floor, pawns at Shepard's height. A static template (StaticMeshActor: most meshes of a "
+                 + "level) can't spawn, so a BioInert shows its mesh instead; pawns can't be copied (the engine crashes). Lasts until the map reloads: live_save writes the spot into "
+                 + "the level YAML. Find templates with live_find, e.g. className=BioInert or StaticMeshActor, path=<level>.")]
+    public static LivePlacement LivePlace(
+        [Description("Actor to move (object path as live_find returns it). Give this or template.")] string? objectPath = null,
+        [Description("Actor to copy: a new one is spawned from it. Give this or objectPath.")] string? template = null,
+        [Description("Tag for the actor (required to spawn): live_save finds its YAML entry by it, e.g. claude_prop_crate.")] string? tag = null,
+        [Description("front (default: 'distance' in front of Shepard, facing her) or shepard (where she stands, facing her way). Ignored with x, y, z.")] string at = "front",
+        [Description("How far in front of Shepard, in Unreal units (100 ≈ 1 m).")] float distance = 100,
+        [Description("X; give x, y and z together to place it at coordinates.")] float? x = null,
+        [Description("Y.")] float? y = null,
+        [Description("Z (the actor's own origin: a pawn's middle, a mesh's pivot).")] float? z = null,
+        [Description("Yaw in degrees (default: faces Shepard for front, her way for shepard, unchanged with x, y, z).")] float? yaw = null,
+        [Description("Degrees added to the yaw, e.g. -90 for meshes whose front is +Y like the VI terminals.")] float turn = 0,
+        [Description("Units above the floor (or above z), e.g. 80 for a table top.")] float raise = 0,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LivePlacer.Place(PackageTools.ParseGame(game), objectPath, template, tag, at, distance, x, y, z, yaw, turn, raise));
+
+    [McpServerTool(Name = "live_remove", Destructive = true),
+     Description("Destroys a live actor (MeleBridge ASI), e.g. a copy live_place spawned. A level actor that can't be destroyed "
+                 + "(bNoDelete) is hidden without collision instead. Until the map reloads; no file changes.")]
+    public static LivePlacement LiveRemove(
+        [Description(ObjectParam)] string objectPath,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LivePlacer.Remove(PackageTools.ParseGame(game), objectPath));
+
+    [McpServerTool(Name = "live_save", Destructive = true),
+     Description("Writes where a live actor stands (location, yaw) into a level_build YAML file, keeping its comments, then builds the "
+                 + "level. The entry is the npcs, usables or props entry with the actor's tag; with none, a props entry is added that "
+                 + "copies the template it was spawned from. Install the level (game closed) to keep it after a reload.")]
+    public static LiveSave LiveSave(
+        [Description("Level YAML file (level_build format).")] string file,
+        [Description("The live actor (object path, e.g. what live_place returned).")] string objectPath,
+        [Description("For a new props entry: the template given to live_place (a level actor's object path).")] string? template = null,
+        [Description("For a new props entry: its name (default: the tag).")] string? name = null,
+        [Description("Build the level after writing the file.")] bool build = true,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LivePlacer.Save(PackageTools.ParseGame(game), file, objectPath, name, template, build));
+
     [McpServerTool(Name = "live_watch", ReadOnly = true),
      Description("Records ProcessEvent calls of functions for a while (MeleBridge ASI): time, object, class and parameters. Events, "
                  + "delegates and timers go through ProcessEvent; script-to-script calls and natives called from script do not. E.g. "
