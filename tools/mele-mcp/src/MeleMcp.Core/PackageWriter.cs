@@ -1,3 +1,4 @@
+using LegendaryExplorerCore;
 using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Packages;
 
@@ -28,10 +29,16 @@ public static class PackageWriter
     /// </summary>
     internal static void EnsureWritable(MEGame game, string path)
     {
-        var gameRoot = MEDirectories.GetDefaultGamePath(game);
-        if (gameRoot != null && path.StartsWith(Path.GetFullPath(gameRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        // Both spelled the same way, so \\?\D:\..., \\wsl$\<distro>\mnt\d\... and D:\... all match; the whole Legendary Edition
+        // folder counts, not only Game\ME1-3.
+        var full = GamePaths.Canonical(path);
+        foreach (var root in new[] { LegendaryExplorerCoreLibSettings.Instance.LEDirectory, MEDirectories.GetDefaultGamePath(game) })
         {
-            throw new InvalidOperationException($"Refusing to modify a file inside the game install ({path}). Edit the mod's copy in the M3 library, then install or copy it.");
+            if (string.IsNullOrEmpty(root)) continue;
+            if (full.StartsWith(GamePaths.Canonical(root).TrimEnd('\\') + '\\', StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Refusing to modify a file inside the game install ({path}). Edit the mod's copy in the M3 library, then install or copy it.");
+            }
         }
     }
 

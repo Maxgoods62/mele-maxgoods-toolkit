@@ -21,11 +21,39 @@ public static partial class GamePaths
         return $"{char.ToUpperInvariant(m.Groups[1].Value[0])}:{rest}";
     }
 
-    /// <summary>The WSL form of a Windows drive path (D:\x → /mnt/d/x), for Claude's own file tools; other paths unchanged.</summary>
-    public static string ToWslPath(string path) =>
-        path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\'
-            ? $"/mnt/{char.ToLowerInvariant(path[0])}/{path[3..].Replace('\\', '/')}"
-            : path;
+    [GeneratedRegex(@"^\\\\(?:wsl\.localhost|wsl\$)\\[^\\]+(\\.*)?$", RegexOptions.IgnoreCase)]
+    private static partial Regex WslSharePath();
+
+    [GeneratedRegex(@"^\\\\(?:wsl\.localhost|wsl\$)\\[^\\]+\\mnt\\([a-zA-Z])(\\.*)?$", RegexOptions.IgnoreCase)]
+    private static partial Regex WslDriveSharePath();
+
+    /// <summary>
+    /// One spelling per file, for comparing paths: full path, no \\?\ or \\.\ prefix, a drive reached through the WSL share
+    /// (\\wsl$\&lt;distro&gt;\mnt\d\x) written D:\x. Case is left as is; compare with OrdinalIgnoreCase.
+    /// </summary>
+    public static string Canonical(string path)
+    {
+        var p = ToWindowsPath(path.Trim());
+        if (p.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) p = @"\\" + p[8..];
+        else if (p.StartsWith(@"\\?\", StringComparison.Ordinal) || p.StartsWith(@"\\.\", StringComparison.Ordinal)) p = p[4..];
+        p = Path.GetFullPath(p);
+        var drive = WslDriveSharePath().Match(p);
+        return drive.Success ? $"{char.ToUpperInvariant(drive.Groups[1].Value[0])}:{(drive.Groups[2].Success ? drive.Groups[2].Value : "\\")}" : p;
+    }
+
+    /// <summary>
+    /// The WSL form of a Windows path, for Claude's own file tools: D:\x → /mnt/d/x, and \\wsl.localhost\&lt;distro&gt;\x → /x (where a
+    /// WSL path such as /home/... lands, since Claude Code starts us in a \\wsl.localhost\ folder); other paths unchanged.
+    /// </summary>
+    public static string ToWslPath(string path)
+    {
+        if (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\')
+        {
+            return $"/mnt/{char.ToLowerInvariant(path[0])}/{path[3..].Replace('\\', '/')}";
+        }
+        var share = WslSharePath().Match(path);
+        return share.Success ? (share.Groups[1].Success ? share.Groups[1].Value.Replace('\\', '/') : "/") : path;
+    }
 
     /// <summary>Forgets the cached file lists, so files installed since the last lookup are found.</summary>
     public static void RefreshLoadedFiles() => MELoadedFiles.InvalidateCaches();
