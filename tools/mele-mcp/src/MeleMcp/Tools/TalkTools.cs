@@ -49,6 +49,22 @@ public static class TalkTools
         [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => ConversationFinder.Find(PackageTools.ParseGame(game), speaker, text, plotId, conversation, fileFilter, language, limit));
 
+    [McpServerTool(Name = "conv_audio", ReadOnly = true),
+     Description("Lists LE1 conversation lines that have no voice yet: for each spoken line, follows its VO track's strref to the speaker's "
+                 + "FaceFX line FXA_<strref> (female Shepard) and FXA_<strref>_M (male), its sound cue, SoundNodeWave and ISACT sound. "
+                 + "Status, worst first: broken, other-voice (plays a wave named for another line: wrong words), no-vo-track, no-set, "
+                 + "no-facefx (no lips, no voice), silent (lips move, no sound: our new lines), unchecked, voiced. Give a mod (all its packages) or one package.")]
+    public static ConvAudioResult ConvAudio(
+        [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'Claude Test Chakwas'.")] string? mod = null,
+        [Description("One package instead of a mod, e.g. BIOA_NOR10_11_DSG_LOC_FR.pcc. File name or full path.")] string? package = null,
+        [Description("Substring of the conversation name, e.g. ClaudeReyes.")] string? conversation = null,
+        [Description("Language of the text and of the _LOC_ packages read (each has its own audio): INT, FR, DE, IT...")] string language = "FR",
+        [Description("Also list voiced lines.")] bool includeVoiced = false,
+        [Description("Also list lines no link leads to (template leftovers).")] bool includeUnreachable = false,
+        [Description("Maximum lines returned (Statuses still counts all).")] int limit = 200,
+        [Description("Game: LE1.")] string game = "LE1")
+        => ToolErrors.Run(() => ConversationAudio.Check(PackageTools.ParseGame(game), mod, package, conversation, language, includeVoiced, includeUnreachable, limit));
+
     [McpServerTool(Name = "conv_add_node", Destructive = true),
      Description("Adds an LE1 conversation line by copying a template node (E<n> NPC line or R<n> Shepard line): new text strref and "
                  + "export id, no links, plot cleared. Also copies the template's node data (ConvNode, Interp with cameras/gestures, "
