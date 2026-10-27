@@ -62,7 +62,9 @@ public static class KismetTools
                  + "the Main_Sequence Kismet that starts her conversation when Shepard uses her (a conversation the level does not have yet is "
                  + "listed in MissingConversations: build it, then the level again). Its props: any actor copied from a template (prefab "
                  + "archetypes baked in), placed; a StaticMeshActor's mesh goes on a copy of the BioInert 'propTemplate', lit where it stands "
-                 + "(live_place and live_save write these). Creates a missing level (full path) and the "
+                 + "(live_place and live_save write these); or, instead of a template, a 'mesh' (a StaticMesh export of a file) shown the "
+                 + "same way with its own materials (editor_import writes these); 'removed: true' hides the prop's actor without collision (none: "
+                 + "nothing is created), and a later build without it shows it again. Creates a missing level (full path) and the "
                  + "Sideloader ConfigDelta that loads it. Only changed values are written; running it twice changes nothing. See the tool README "
                  + "for the format. Backs every file up first and refuses files inside the game install.")]
     public static LevelBuildResult LevelBuild(

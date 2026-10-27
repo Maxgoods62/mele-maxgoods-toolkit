@@ -36,14 +36,30 @@ namespace MeleBridge::Editor
 
         bool Selected = false;
         FVector SelectedLocation{};
+        FRotator SelectedRotation{};
         bool SelectedStatic = false;
         std::string SelectedPath;
         std::string SelectedClass;
+        std::string SelectedTag;
+        /// Spawned by the editor this session.
+        bool SelectedSpawned = false;
+        /// Why Delete refuses the selection; empty when it can be deleted.
+        std::string SelectedUndeletable;
         /// Canvas.Project of the selection's location, in canvas pixels: the reference for the overlay's own projection.
         bool Projected = false;
         FVector Projection{};
 
         std::string LastPick;
+
+        /// StaticMeshes in memory, for the Props list. Built when the list is opened or refreshed, then shared, not copied.
+        std::shared_ptr<std::vector<std::string> const> Meshes;
+
+        /// Actors spawned, moved, turned or deleted, and how many of them changed since the last Save.
+        int Edits = 0;
+        int Unsaved = 0;
+        /// The last thing the editor did or refused, for a line under the toolbar; the frame tells a new one from an old one.
+        std::string Status;
+        unsigned long long StatusFrame = 0;
     };
 
     Snapshot Latest();
@@ -51,13 +67,15 @@ namespace MeleBridge::Editor
     /// From the overlay to the game thread, run at the next BioHUD.PostRender.
     struct Command
     {
-        enum class Kind { Close, FreeCam, Pick, Move, Deselect, Speed };
+        enum class Kind { Close, FreeCam, Pick, Move, Rotate, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes };
         Kind Type;
-        /// Pick: canvas pixels. Move: world location. Speed: wheel notches.
+        /// Pick: canvas pixels. Move: world location. Rotate: yaw in degrees. Speed: wheel notches.
         float X = 0;
         float Y = 0;
         float Z = 0;
         bool On = false;
+        /// Spawn: the StaticMesh's path, as the Props list shows it.
+        std::string Text;
     };
 
     void Post(Command const& command);
@@ -105,7 +123,7 @@ namespace MeleBridge::Editor
 
     extern Counters Diag;
 
-    /// Pipe thread: open, camera, selection, calibration, threads, hooks and counters as JSON.
+    /// Pipe thread: open, camera, selection, edits, calibration, threads, hooks and counters as JSON.
     json State();
 
     // ! Game thread (Editor.cpp)

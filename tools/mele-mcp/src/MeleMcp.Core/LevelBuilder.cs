@@ -17,8 +17,10 @@ public sealed record BuiltNpc(string Name, ExportRow Pawn, string Action, IReadO
 /// <param name="Action">found (an actor of the level has the tag), imported (copied from the template's package) or cloned (from an actor of the level).</param>
 public sealed record BuiltUsable(string Name, ExportRow Actor, string Action, IReadOnlyList<string> Changes);
 
-/// <param name="Action">found (an actor of the level has the tag), imported (copied from the template's package) or cloned (from an actor of the level).</param>
-public sealed record BuiltProp(string Name, ExportRow Actor, string Action, IReadOnlyList<string> Changes);
+/// <param name="Actor">Null when the prop is removed and the level has no actor with its tag.</param>
+/// <param name="Action">found (an actor of the level has the tag), imported (copied from the template's package), cloned (from an actor of the level),
+/// stand-in (a copy of the prop template showing the mesh), hidden (removed: the actor hidden without collision) or absent (removed, and no actor has the tag).</param>
+public sealed record BuiltProp(string Name, ExportRow? Actor, string Action, IReadOnlyList<string> Changes);
 
 /// <param name="LevelChanges">What this build changed in the level itself (streamed files, post-process, character lights, start points, squad).</param>
 /// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
@@ -30,7 +32,8 @@ public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyL
 /// post-process, character lights, start points (see <see cref="LevelStreams"/>), the squad spawned on load (<see cref="SquadSpawns"/>). Its NPCs: the pawn (found by tag, else imported from a
 /// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
 /// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. Its props: any
-/// actor copied from a template and placed (live_place, live_save). A missing level is
+/// actor copied from a template and placed (live_place, live_save), or a mesh shown on a copy of the prop template (editor_import);
+/// a removed one is hidden without collision. A missing level is
 /// created, and the LE1CP Sideloader config that loads it is written.
 /// </summary>
 public static class LevelBuilder
@@ -38,7 +41,19 @@ public static class LevelBuilder
     private const string LevelPath = "TheWorld.PersistentLevel";
     private const string MainSequence = "TheWorld.PersistentLevel.Main_Sequence";
 
+    private const string PropTemplateHint =
+        "Give 'propTemplate' (a BioInert, e.g. { package: BIOA_FRE31_00_LAY.pcc, actor: BioInert_0 }): a copy of it shows the mesh, lit where it is.";
+
+    /// <summary>
+    /// What a removed prop changes, as live_remove leaves an actor the engine won't destroy: hidden, no collision. Actor.CollisionType
+    /// is transient in LE1, so a file can't set it.
+    /// </summary>
+    private static readonly string[] ShownFlags = ["bHidden", "bCollideActors", "bBlockActors"];
+
     private sealed record Source(string? Package, string Actor, int Line);
+
+    /// <summary>A StaticMesh of a file, shown without the actor that placed it (what the in-game editor spawns).</summary>
+    private sealed record MeshSource(string Package, string Export, int Line);
 
     private sealed record NameSpec(string Type, int StrRef, int Line);
 
@@ -74,13 +89,15 @@ public static class LevelBuilder
         public (string Map, string? StartPoint)? GoTo;
     }
 
-    /// <summary>Any actor copied from a template and placed, e.g. a mesh of another level.</summary>
+    /// <summary>Any actor copied from a template and placed, e.g. a mesh of another level; or a mesh shown on a copy of the prop template.</summary>
     private sealed class PropSpec
     {
         public required string Name;
         public required int Line;
         public string? Tag;
         public Source? Template;
+        public MeshSource? Mesh;
+        public bool Removed;
         public Vector3? Location;
         public float? Yaw;
     }
@@ -151,7 +168,7 @@ public static class LevelBuilder
             }
             var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
             var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList();
-            return (builtNpcs, builtUsables, spec.Props.Select(p => BuildProp(game, pcc, level, spec, p, cache)).ToList());
+            return (builtNpcs, builtUsables, spec.Props.Select(p => BuildProp(game, pcc, level, spec, p, cache, notes)).ToList());
         });
         backups.Add(backup);
 
@@ -257,23 +274,54 @@ public static class LevelBuilder
         return new BuiltUsable(usable.Name, ExportInspector.Row(actor), action, changes);
     }
 
-    private static BuiltProp BuildProp(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, PropSpec prop, PackageCache cache)
+    private static BuiltProp BuildProp(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, PropSpec prop, PackageCache cache, List<string> notes)
     {
         var changes = new List<string>();
         var tag = prop.Tag ?? throw new ArgumentException($"line {prop.Line}: '{prop.Name}' needs a 'tag' (how the build finds it again).");
         var actor = FindActor(pcc, level, tag, _ => true);
-        var action = "found";
-        if (actor is null)
+        if (prop.Removed)
         {
-            var template = prop.Template ?? throw new ArgumentException($"line {prop.Line}: no actor of the level has tag '{tag}'; give a 'template' to import or clone.");
+            if (actor is null) return new BuiltProp(prop.Name, null, "absent", changes);
+            var hidden = actor.GetProperties();
+            var removed = new Property[] { new BoolProperty(true, "bHidden"), new BoolProperty(false, "bCollideActors"), new BoolProperty(false, "bBlockActors") };
+            if (Changed(changes, "hidden, no collision", PutShown(hidden, removed))) actor.WriteProperties(hidden);
+            return new BuiltProp(prop.Name, ExportInspector.Row(actor), "hidden", changes);
+        }
+
+        var action = "found";
+        if (actor is not null && LooksRemoved(actor))
+        {
+            // Hidden by an earlier build with removed: true: shown again as its source shows.
+            if (BuiltShown(game, pcc, spec, prop) is { } shown)
+            {
+                var restored = actor.GetProperties();
+                if (Changed(changes, "shown again, with collision", PutShown(restored, shown))) actor.WriteProperties(restored);
+            }
+            else
+            {
+                notes.Add($"{prop.Name}: {actor.ObjectName.Instanced} is hidden without collision (an earlier removed: true?) and the entry has no template or mesh to read its own "
+                          + "values from: give it one, or set bHidden, bCollideActors and bBlockActors by hand (export_set).");
+            }
+        }
+        if (actor is null && prop.Mesh is { } mesh)
+        {
+            var standIn = spec.PropTemplate ?? throw new ArgumentException($"line {prop.Line}: a 'mesh' is shown on a copy of the prop template. {PropTemplateHint}");
+            using var source = PackageInspector.Open(game, mesh.Package);
+            var shown = ResolveMesh(source, mesh);
+            actor = AddActor(game, pcc, level, standIn, cache, cloneOnClash: true);
+            ShowMesh(source, shown, [], [], pcc, actor, cache, changes);
+            action = "stand-in";
+        }
+        else if (actor is null)
+        {
+            var template = prop.Template ?? throw new ArgumentException($"line {prop.Line}: no actor of the level has tag '{tag}'; give a 'template' to import or clone, or a 'mesh' to show.");
             using var source = template.Package is null ? null : PackageInspector.Open(game, template.Package);
             var original = ResolveActor(source ?? pcc, template.Actor, template.Line);
             if (original.ClassName == "StaticMeshActor")
             {
-                var standIn = spec.PropTemplate ?? throw new ArgumentException($"line {prop.Line}: {original.ObjectName.Instanced} is a StaticMeshActor, lit by light baked where it stands. "
-                                                                                + "Give 'propTemplate' (a BioInert, e.g. { package: BIOA_FRE31_00_LAY.pcc, actor: BioInert_0 }): a copy of it shows the mesh, lit where it is.");
+                var standIn = spec.PropTemplate ?? throw new ArgumentException($"line {prop.Line}: {original.ObjectName.Instanced} is a StaticMeshActor, lit by light baked where it stands. {PropTemplateHint}");
                 actor = AddActor(game, pcc, level, standIn, cache, cloneOnClash: true);
-                ShowMesh(source ?? pcc, original, pcc, actor, cache, changes);
+                ShowActorMesh(source ?? pcc, original, pcc, actor, cache, changes);
                 action = "stand-in";
             }
             else
@@ -295,34 +343,98 @@ public static class LevelBuilder
     /// is lit by light baked where it stands, so a copy elsewhere stays black; the placeable's DynamicLightEnvironment lights it
     /// where it is, as live_place's stand-in.
     /// </summary>
-    private static void ShowMesh(IMEPackage source, ExportEntry original, IMEPackage pcc, ExportEntry placeable, PackageCache cache, List<string> changes)
+    private static void ShowActorMesh(IMEPackage source, ExportEntry original, IMEPackage pcc, ExportEntry placeable, PackageCache cache, List<string> changes)
     {
         var actorProps = Effective(original);
         var component = actorProps.GetProp<ObjectProperty>("StaticMeshComponent")?.ResolveToEntry(source) as ExportEntry
                         ?? throw new ArgumentException($"{original.InstancedFullPath} has no StaticMeshComponent.");
         var componentProps = Effective(component);
         var mesh = componentProps.GetProp<ObjectProperty>("StaticMesh")?.ResolveToEntry(source) ?? throw new ArgumentException($"{component.InstancedFullPath} has no mesh.");
+        var materials = componentProps.GetProp<ArrayProperty<ObjectProperty>>("Materials")?.Select(m => m.ResolveToEntry(source)).ToList() ?? [];
+        ShowMesh(source, mesh, materials, actorProps, pcc, placeable, cache, changes);
+    }
 
+    /// <summary>
+    /// Puts a mesh of the source package on the placeable's PlaceableMesh, with these materials (none: the mesh's own) and the
+    /// DrawScale and DrawScale3D found in <paramref name="scale"/> (none: 1). Baked light is dropped: it was made for another mesh.
+    /// </summary>
+    private static void ShowMesh(IMEPackage source, IEntry mesh, IReadOnlyList<IEntry?> materials, IEnumerable<Property> scale, IMEPackage pcc, ExportEntry placeable,
+                                 PackageCache cache, List<string> changes)
+    {
         var shown = Object(pcc, placeable.GetProperties(), "PlaceableMesh") ?? throw new ArgumentException($"The prop template {placeable.ObjectName.Instanced} has no PlaceableMesh: give a BioInert.");
         DropBakedLight(placeable);
         var shownProps = shown.GetProperties();
         shownProps.AddOrReplaceProp(new ObjectProperty(Port(source, mesh, pcc, cache), "StaticMesh"));
         shownProps.RemoveNamedProperty("Materials");
-        if (componentProps.GetProp<ArrayProperty<ObjectProperty>>("Materials") is { Count: > 0 } materials)
+        if (materials.Count > 0)
         {
-            var ported = materials.Select(m => new ObjectProperty(m.ResolveToEntry(source) is { } material ? Port(source, material, pcc, cache) : null));
+            var ported = materials.Select(m => new ObjectProperty(m is null ? null : Port(source, m, pcc, cache)));
             shownProps.AddOrReplaceProp(new ArrayProperty<ObjectProperty>(ported, "Materials"));
         }
         shown.WriteProperties(shownProps);
 
         var props = placeable.GetProperties();
+        var scales = scale.ToList();
         foreach (var name in new[] { "DrawScale", "DrawScale3D" })
         {
             props.RemoveNamedProperty(name);
-            if (actorProps.FirstOrDefault(p => p.Name == name) is { } scale) props.AddOrReplaceProp(scale);
+            if (scales.FirstOrDefault(p => p.Name == name) is { } kept) props.AddOrReplaceProp(kept);
         }
         placeable.WriteProperties(props);
         changes.Add($"shows {mesh.InstancedFullPath}");
+    }
+
+    /// <summary>The mesh's export in its file, which must be a StaticMesh.</summary>
+    private static ExportEntry ResolveMesh(IMEPackage source, MeshSource mesh)
+    {
+        ExportEntry export;
+        try
+        {
+            export = ExportInspector.Resolve(source, mesh.Export);
+        }
+        catch (ArgumentException e)
+        {
+            throw new ArgumentException($"line {mesh.Line}: {Path.GetFileName(source.FilePath)}: {e.Message}");
+        }
+        return export.ClassName == "StaticMesh" ? export : throw new ArgumentException($"line {mesh.Line}: {export.InstancedFullPath} is a {export.ClassName}, not a StaticMesh.");
+    }
+
+    /// <summary>Sets visibility and collision to these values; a flag they lack is dropped, so the actor's archetype (its class defaults) decides it.</summary>
+    private static bool PutShown(PropertyCollection props, IReadOnlyList<Property> shown)
+    {
+        var dirty = false;
+        foreach (var name in ShownFlags)
+        {
+            dirty |= shown.FirstOrDefault(p => p.Name == name) is { } value ? Put(props, value) : props.RemoveNamedProperty(name);
+        }
+        return dirty;
+    }
+
+    /// <summary>Hidden without collision by its own values, as removed: true leaves it.</summary>
+    private static bool LooksRemoved(ExportEntry actor)
+    {
+        var props = actor.GetProperties();
+        return props.GetProp<BoolProperty>("bHidden")?.Value == true && props.GetProp<BoolProperty>("bCollideActors")?.Value == false
+               && props.GetProp<BoolProperty>("bBlockActors")?.Value == false;
+    }
+
+    /// <summary>
+    /// The visibility and collision a new build gives the prop's actor: those of what it is copied from (the template's actor; for a
+    /// mesh or a StaticMeshActor template, the prop template). Null when the entry names neither.
+    /// </summary>
+    private static List<Property>? BuiltShown(MEGame game, IMEPackage pcc, Spec spec, PropSpec prop)
+    {
+        for (var from = prop.Mesh is null ? prop.Template : spec.PropTemplate; from is not null;)
+        {
+            using var source = from.Package is null ? null : PackageInspector.Open(game, from.Package);
+            var original = ResolveActor(source ?? pcc, from.Actor, from.Line);
+            if (original.ClassName != "StaticMeshActor" || from == spec.PropTemplate)
+            {
+                return Effective(original).Where(p => ShownFlags.Contains(p.Name.Name)).ToList();
+            }
+            from = spec.PropTemplate;
+        }
+        return null;
     }
 
     /// <summary>An export's properties with what it inherits from archetype exports (a prefab's) under them; references not remapped.</summary>
@@ -408,6 +520,9 @@ public static class LevelBuilder
             if (clash is ExportEntry earlier && cloneOnClash)
             {
                 added = EntryCloner.CloneTree(earlier);
+                // The earlier copy may be hidden (removed: true); the new one shows as the source does.
+                var props = added.GetProperties();
+                if (PutShown(props, actor.GetProperties().Where(p => ShownFlags.Contains(p.Name.Name)).ToList())) added.WriteProperties(props);
                 pcc.AddToLevelActorsIfNotThere(added);
                 return added;
             }
@@ -838,12 +953,14 @@ public static class LevelBuilder
     {
         if (body is not YamlMappingNode m) throw Fail(body, $"prop '{name}' must be a mapping.");
         var prop = new PropSpec { Name = name, Line = (int)body.Start.Line };
-        foreach (var (key, value) in Entries(m, "tag", "template", "location", "yaw"))
+        foreach (var (key, value) in Entries(m, "tag", "template", "mesh", "removed", "location", "yaw"))
         {
             switch (key)
             {
                 case "tag": prop.Tag = Scalar(value); break;
                 case "template": prop.Template = SourceOf(value); break;
+                case "mesh": prop.Mesh = MeshOf(value); break;
+                case "removed": prop.Removed = Bool(value); break;
                 case "location":
                     var xyz = Numbers(value, 3, 3);
                     prop.Location = new Vector3(xyz[0], xyz[1], xyz[2]);
@@ -851,7 +968,25 @@ public static class LevelBuilder
                 case "yaw": prop.Yaw = Number(value); break;
             }
         }
+        if (prop.Template is not null && prop.Mesh is not null)
+        {
+            throw Fail(body, $"prop '{name}' has a 'template' and a 'mesh': give one (a template's actor is copied; a mesh is shown on a copy of 'propTemplate').");
+        }
         return prop;
+    }
+
+    /// <summary>{package: BIOA_FRE31_00_LAY.pcc, export: biog_apl_phy_crate_xlarge_01_l.Crate_XLarge_03}: a StaticMesh of that file.</summary>
+    private static MeshSource MeshOf(YamlNode value)
+    {
+        if (value is not YamlMappingNode m) throw Fail(value, "a mesh is {package: <file>, export: <its StaticMesh>}.");
+        string? package = null, export = null;
+        foreach (var (key, v) in Entries(m, "package", "export"))
+        {
+            if (key == "package") package = Scalar(v);
+            else export = Scalar(v);
+        }
+        if (package is null || export is null) throw Fail(value, "the mesh needs 'package' and 'export' (pkg_search className=StaticMesh lists a file's meshes).");
+        return new MeshSource(package, export, (int)value.Start.Line);
     }
 
     /// <summary>{strref: 74210060, fr: "...", en: "..."}: the text shown when Shepard aims at it.</summary>

@@ -5,7 +5,9 @@
 
 #include <cmath>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <format>
 
 #pragma warning(push, 0)
 #include "imgui.h"
@@ -50,6 +52,23 @@ namespace MeleBridge::Editor
         /// Where the cursor was when a free-cam look started: it goes back there when the button is released.
         POINT LookStart{};
 
+        enum class Tool { Move, Turn };
+        Tool Current = Tool::Move;
+        Tool LastTool = Tool::Move;
+        /// A turn's yaw in degrees: the selection's at the start of the drag plus each frame's turn.
+        float DragYaw = 0;
+        bool ShowProps = false;
+        bool MeshesAsked = false;
+        char Filter[128]{};
+        /// The Props list's rows for the filter and mesh list they were made from. Holding the list keeps its address from being
+        /// reused by a newer one, which would leave the rows stale.
+        std::vector<int> Shown;
+        std::string ShownFilter;
+        std::shared_ptr<std::vector<std::string> const> ShownFrom;
+        /// When the game thread's last status line arrived, to show it for a few seconds.
+        unsigned long long StatusSeen = 0;
+        LARGE_INTEGER StatusSince{};
+
         template <typename T>
         T* Wait(std::atomic<T*> const& orig)
         {
@@ -65,17 +84,38 @@ namespace MeleBridge::Editor
         // ! Camera matrices
         // ========================================
 
+        /// FRotationMatrix's rows: a rotation's forward (X), right (Y) and up (Z) axes in world space.
+        void Axes(FRotator const& rotation, float* forward, float* right, float* up)
+        {
+            auto const p = static_cast<float>(rotation.Pitch) * UnitsToRadians;
+            auto const y = static_cast<float>(rotation.Yaw) * UnitsToRadians;
+            auto const r = static_cast<float>(rotation.Roll) * UnitsToRadians;
+            auto const sp = std::sin(p), cp = std::cos(p), sy = std::sin(y), cy = std::cos(y), sr = std::sin(r), cr = std::cos(r);
+            float const f[3] = { cp * cy, cp * sy, sp };
+            float const g[3] = { sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp };
+            float const u[3] = { -(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp };
+            std::memcpy(forward, f, sizeof f);
+            std::memcpy(right, g, sizeof g);
+            std::memcpy(up, u, sizeof u);
+        }
+
+        /// An actor's transform as UE3's FRotationTranslationMatrix: the axes as rows, then the location.
+        void ModelMatrix(FVector location, FRotator const& rotation, float* m)
+        {
+            Axes(rotation, m, m + 4, m + 8);
+            m[3] = m[7] = m[11] = 0;
+            m[12] = location.X;
+            m[13] = location.Y;
+            m[14] = location.Z;
+            m[15] = 1;
+        }
+
         /// UE3's view: world → camera space with x right, y up, z forward (depth), as rows for row vectors (v * M), which is
         /// both FMatrix's and ImGuizmo's layout. The axes are FRotationMatrix's rows.
         void ViewMatrix(FTPOV const& pov, float* m)
         {
-            auto const p = static_cast<float>(pov.Rotation.Pitch) * UnitsToRadians;
-            auto const y = static_cast<float>(pov.Rotation.Yaw) * UnitsToRadians;
-            auto const r = static_cast<float>(pov.Rotation.Roll) * UnitsToRadians;
-            auto const sp = std::sin(p), cp = std::cos(p), sy = std::sin(y), cy = std::cos(y), sr = std::sin(r), cr = std::cos(r);
-            float const forward[3] = { cp * cy, cp * sy, sp };
-            float const right[3] = { sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp };
-            float const up[3] = { -(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp };
+            float forward[3], right[3], up[3];
+            Axes(pov.Rotation, forward, right, up);
             float const loc[3] = { pov.Location.X, pov.Location.Y, pov.Location.Z };
             auto const dot = [&](float const* a) { return a[0] * loc[0] + a[1] * loc[1] + a[2] * loc[2]; };
             float const out[16] = {
@@ -228,12 +268,30 @@ namespace MeleBridge::Editor
                 auto freeCam = s.FreeCam;
                 if (ImGui::Checkbox("Free cam", &freeCam)) Post({ .Type = Command::Kind::FreeCam, .On = freeCam });
                 ImGui::SameLine();
-                ImGui::BeginDisabled();
-                ImGui::Button("Props");
+                ImGui::Checkbox("Props", &ShowProps);
                 ImGui::SameLine();
-                ImGui::Button("Save");
+                ImGui::TextDisabled("|");
+                ImGui::SameLine();
+                // Not mid-drag: the gizmo would change under the mouse.
+                ImGui::BeginDisabled(ImGuizmo::IsUsingAny());
+                if (ImGui::RadioButton("Move (T)", Current == Tool::Move)) Current = Tool::Move;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Turn (R)", Current == Tool::Turn)) Current = Tool::Turn;
                 ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Next phase: docs/07-ingame-editor.md, section 4");
+                ImGui::SameLine();
+                ImGui::TextDisabled("|");
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!s.Selected || !s.SelectedUndeletable.empty());
+                if (ImGui::Button("Delete")) Post({ .Type = Command::Kind::Delete });
+                ImGui::EndDisabled();
+                if (s.Selected && !s.SelectedUndeletable.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", s.SelectedUndeletable.c_str());
+                ImGui::SameLine();
+                auto const saveLabel = s.Unsaved > 0 ? std::format("Save ({})###Save", s.Unsaved) : std::string("Save###Save");
+                if (ImGui::Button(saveLabel.c_str())) Post({ .Type = Command::Kind::Save });
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+S. Writes the session file; editor_import in mele-mcp puts it in the level YAML and builds.");
+                ImGui::SameLine();
+                ImGui::TextDisabled("|");
                 ImGui::SameLine();
                 ImGui::Checkbox("Diagnostics", &ShowDiagnostics);
                 ImGui::SameLine();
@@ -242,7 +300,22 @@ namespace MeleBridge::Editor
                 if (s.FreeCam)
                     ImGui::TextDisabled("Right mouse: look   WASD: move   Q/E: down/up   Shift: fast   Wheel: speed (%.0f)   Left click: select", s.Speed);
                 else
-                    ImGui::TextDisabled("Left click: select a prop   Arrows: drag to move it   Free cam: fly around");
+                    ImGui::TextDisabled("Left click: select   Arrows: drag to move or turn   Ctrl: snap (10 units, 15 degrees)   Del: delete");
+
+                // The game thread's last word, for a few seconds.
+                LARGE_INTEGER now, frequency;
+                QueryPerformanceCounter(&now);
+                QueryPerformanceFrequency(&frequency);
+                if (s.StatusFrame != StatusSeen)
+                {
+                    StatusSeen = s.StatusFrame;
+                    StatusSince = now;
+                }
+                if (!s.Status.empty() && now.QuadPart - StatusSince.QuadPart < 8 * frequency.QuadPart)
+                {
+                    auto const refused = s.Status.starts_with("not ") || s.Status.starts_with("the engine refused");
+                    ImGui::TextColored(refused ? ImVec4(1, 0.6f, 0.3f, 1) : ImVec4(0.5f, 1, 0.6f, 1), "%s", s.Status.c_str());
+                }
             }
             ImGui::End();
         }
@@ -255,9 +328,80 @@ namespace MeleBridge::Editor
             if (ImGui::Begin("Selection", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove))
             {
                 ImGui::TextUnformatted(s.SelectedPath.c_str());
-                ImGui::Text("Class: %s%s", s.SelectedClass.c_str(), s.SelectedStatic ? " (static)" : "");
-                ImGui::Text("X %.1f   Y %.1f   Z %.1f", s.SelectedLocation.X, s.SelectedLocation.Y, s.SelectedLocation.Z);
+                ImGui::Text("Class: %s%s%s", s.SelectedClass.c_str(), s.SelectedStatic ? " (static)" : "", s.SelectedSpawned ? " (spawned)" : "");
+                ImGui::Text("Tag: %s", s.SelectedTag.c_str());
+                ImGui::Text("X %.1f   Y %.1f   Z %.1f   Yaw %.1f", s.SelectedLocation.X, s.SelectedLocation.Y, s.SelectedLocation.Z,
+                            static_cast<float>(static_cast<short>(s.SelectedRotation.Yaw & 0xFFFF)) * 360.f / 65536.f);
                 if (ImGui::Button("Deselect")) Post({ .Type = Command::Kind::Deselect });
+            }
+            ImGui::End();
+        }
+
+        bool ContainsNoCase(std::string const& text, std::string const& part)
+        {
+            return std::search(text.begin(), text.end(), part.begin(), part.end(), [](char a, char b) {
+                       return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+                   }) != text.end();
+        }
+
+        /// The meshes in memory, searchable; a click spawns one where the view points.
+        void DrawProps(Snapshot const& s, float height)
+        {
+            if (!ShowProps) return;
+            // Asked once per list: a map change drops the list, and the new map's is asked for.
+            if (s.Meshes != nullptr) MeshesAsked = false;
+            else ShownFrom.reset();
+            if (s.Meshes == nullptr && !MeshesAsked)
+            {
+                Post({ .Type = Command::Kind::RefreshMeshes });
+                MeshesAsked = true;
+            }
+            ImGui::SetNextWindowPos({ 10, 70 }, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize({ 470, height * 0.55f }, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowBgAlpha(0.92f);
+            if (ImGui::Begin("Props", &ShowProps, ImGuiWindowFlags_NoSavedSettings))
+            {
+                ImGui::TextDisabled("Meshes in memory. Click one: it appears where the view points.");
+                ImGui::SetNextItemWidth(-90);
+                ImGui::InputTextWithHint("##filter", "Search, e.g. crate", Filter, sizeof Filter);
+                ImGui::SameLine();
+                if (ImGui::Button("Refresh")) Post({ .Type = Command::Kind::RefreshMeshes });
+
+                if (s.Meshes == nullptr)
+                {
+                    ImGui::TextDisabled("Reading the meshes in memory...");
+                }
+                else
+                {
+                    if (ShownFrom != s.Meshes || ShownFilter != Filter)
+                    {
+                        ShownFrom = s.Meshes;
+                        ShownFilter = Filter;
+                        Shown.clear();
+                        for (int i = 0; i < static_cast<int>(s.Meshes->size()); i++)
+                        {
+                            if (ShownFilter.empty() || ContainsNoCase((*s.Meshes)[i], ShownFilter)) Shown.push_back(i);
+                        }
+                    }
+                    ImGui::TextDisabled("%d of %d", static_cast<int>(Shown.size()), static_cast<int>(s.Meshes->size()));
+                    if (ImGui::BeginChild("##meshes"))
+                    {
+                        ImGuiListClipper clipper;
+                        clipper.Begin(static_cast<int>(Shown.size()));
+                        while (clipper.Step())
+                        {
+                            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
+                            {
+                                if (Shown[row] >= static_cast<int>(s.Meshes->size())) continue;
+                                auto const& path = (*s.Meshes)[Shown[row]];
+                                ImGui::PushID(row);
+                                if (ImGui::Selectable(path.c_str())) Post({ .Type = Command::Kind::Spawn, .Text = path });
+                                ImGui::PopID();
+                            }
+                        }
+                    }
+                    ImGui::EndChild();
+                }
             }
             ImGui::End();
         }
@@ -293,20 +437,42 @@ namespace MeleBridge::Editor
                 return;
             }
             if (Dragging && DraggedPath != s.SelectedPath) Dragging = false;
+            if (Current != LastTool)
+            {
+                ResetGizmo();
+                LastTool = Current;
+            }
 
-            float model[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, s.SelectedLocation.X, s.SelectedLocation.Y, s.SelectedLocation.Z, 1 };
+            float model[16];
+            ModelMatrix(s.SelectedLocation, s.SelectedRotation, model);
             // While dragging, our own copy leads: the game applies each move a frame or two later.
             if (Dragging) std::memcpy(model, DragModel, sizeof model);
             ImGuizmo::SetOrthographic(false);
             ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
             ImGuizmo::SetRect(0, 0, width, height);
-            ImGuizmo::Manipulate(view, projection, ImGuizmo::TRANSLATE, ImGuizmo::WORLD, model);
+            // Ctrl snaps: 10 units, or 15 degrees. Turning is around the vertical only: the level YAML keeps a yaw.
+            auto const turn = Current == Tool::Turn;
+            float const snap[3] = { turn ? 15.f : 10.f, 10.f, 10.f };
+            float delta[16];
+            ImGuizmo::Manipulate(view, projection, turn ? ImGuizmo::ROTATE_Z : ImGuizmo::TRANSLATE, ImGuizmo::WORLD, model, delta,
+                                 ImGui::GetIO().KeyCtrl ? snap : nullptr);
             if (ImGuizmo::IsUsing())
             {
+                if (!Dragging) DragYaw = static_cast<float>(s.SelectedRotation.Yaw) * 360.f / 65536.f;
                 Dragging = true;
                 DraggedPath = s.SelectedPath;
                 std::memcpy(DragModel, model, sizeof model);
-                Post({ .Type = Command::Kind::Move, .X = model[12], .Y = model[13], .Z = model[14] });
+                if (turn)
+                {
+                    // This frame's turn about the vertical, added up: the forward axis alone has no yaw for an actor pitched
+                    // straight up or down.
+                    DragYaw = std::remainder(DragYaw + std::atan2(delta[1], delta[0]) * 180.f / 3.14159265f, 360.f);
+                    Post({ .Type = Command::Kind::Rotate, .X = DragYaw });
+                }
+                else
+                {
+                    Post({ .Type = Command::Kind::Move, .X = model[12], .Y = model[13], .Z = model[14] });
+                }
             }
             else
             {
@@ -379,6 +545,15 @@ namespace MeleBridge::Editor
                 MoveCursor(LookStart.x, LookStart.y);
             }
             if (Looking.load()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+
+            // Keys, unless a text field has them (the Props search).
+            if (!io.WantTextInput && !Looking.load())
+            {
+                if (!ImGuizmo::IsUsingAny() && ImGui::IsKeyPressed(ImGuiKey_T, false)) Current = Tool::Move;
+                if (!ImGuizmo::IsUsingAny() && ImGui::IsKeyPressed(ImGuiKey_R, false)) Current = Tool::Turn;
+                if (s.Selected && s.SelectedUndeletable.empty() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) Post({ .Type = Command::Kind::Delete });
+                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) Post({ .Type = Command::Kind::Save });
+            }
 
             if (free && !Looking.load() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && s.CanvasWidth > 0)
             {
@@ -525,6 +700,7 @@ namespace MeleBridge::Editor
 
             DrawToolbar(s, width);
             DrawSelection(s, width);
+            DrawProps(s, height);
             DrawDiagnostics(s, width, height);
             DrawGizmo(s, view, projection, width, height);
             HandleWorldInput(s, width, height);

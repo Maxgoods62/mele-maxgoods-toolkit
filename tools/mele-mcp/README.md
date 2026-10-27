@@ -88,7 +88,8 @@ Hot-reload notes:
 | `live_watch` | `ProcessEvent` calls of functions for N seconds: time, object, class, params, Kismet input pin; overrides match (`Actor.Tick` catches `BioPawn.Tick`) | ✅ `Engine.Actor.Tick` |
 | `live_place` | Moves an actor, or spawns a copy of one (`Actor.Spawn` with it as the template), in front of Shepard facing her, where she stands, or at coordinates; `yaw`, `turn`, `raise`. Props land on the floor (Shepard's Z − 94), pawns at her height. A StaticMeshActor can't spawn: a BioInert copy shows its mesh, materials and scale. Pawn copies are refused (the engine crashed) | ✅ a freighter crate (stand-in) next to Dorn; a VI terminal copy; Shepard teleported (the camera follows the controller's `Rotation`, set apart) |
 | `live_remove` | Destroys an actor through Kismet's Destroy handler (`OnDestroy` with `Default__SeqAct_Destroy`); `bNoDelete` level actors are shut down (hidden, no collision), `bStatic` ones hidden | ✅ spawned copies removed, no script warning |
-| `live_editor` | The in-game editor's state (F8): open, free cam, camera, selection, last click, projection check against `Canvas.Project`, hooks, threads, input counters; no game-thread round trip | ✅ open, free cam, crate selected, projection error 0.1–0.6 px, 10,587 DirectInput reads held back |
+| `live_editor` | The in-game editor's state (F8): open, free cam, camera, selection (tag, yaw, spawned, why Delete refuses it), edits and unsaved count, status line, meshes in memory, last click, projection check against `Canvas.Project`, hooks, threads, input counters; no game-thread round trip | ✅ open, free cam, crate selected, projection error 0.1–0.6 px, 10,587 DirectInput reads held back |
+| `editor_import` | Merges the in-game editor's session file (F8 → Save: `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json`) into the level YAML by tag, keeping comments: a moved actor gets its location and yaw (pitch and roll noted, not kept), a mesh spawned in the editor a `props` entry with `mesh` (and `propTemplate` if missing), a deleted prop gets `removed: true` (the build hides it; `npcs`/`usables` are only noted, not removed), an undone delete `removed: false`. Vanilla actors are skipped (phase 4). The entries applied are dropped from the session (`keepSession` to keep them), so a later import can't put an old position back over a YAML edit. A level the game loads into another map (sideloaded, the Normandy) uses the newest session with an actor of it; spawned meshes go into the map's own file, or the one given `takeSpawned: true`. Then `level_build`. Offline | ✅ freighter: a spawned crate `added`, `claude_prop_crate` `removed`; built, installed, both as placed in game |
 | `live_save` | Writes a live actor's location and yaw into the level YAML entry with its tag (`npcs`, `usables`, `props`), keeping comments; with none, adds a `props` entry from its template (and `propTemplate` for a static mesh); then `level_build` | ✅ the crate: YAML entry, built, installed, there and lit after a restart; Dorn's entry found by tag (no change) |
 
 Requirements: `MeleBridge.asi` (`tools/mele-bridge/build.sh --install`, game closed). `game_plot` uses it when it is there.
@@ -215,12 +216,18 @@ npcs:
       - { tag: claude_npc_01_light, offset: [0, 0, 120], radius: 180, brightness: 1.2 }   # offset: forward, right, up; turns with her
 
 propTemplate: { package: BIOA_FRE31_00_LAY.pcc, actor: BioInert_0 }   # a BioInert: copies of it show the props' static meshes
-props:                         # any actor copied from a template; live_place then live_save write these
+props:                         # any actor copied from a template, or a mesh; live_save and editor_import write these
   crate:                       # a label for the result
     tag: claude_prop_crate     # how the build finds it again (an actor of the level, any class)
     template: { package: BIOA_FRE31_00_LAY.pcc, actor: StaticMeshActor_171 }   # or an actor of this level to clone
     location: [-1670, -15864.6, -452.2]   # its pivot: for most meshes, the floor
     yaw: 200
+  ed_Crate_XLarge_03_fmk3a_1:  # editor_import names it by its tag: ed_<mesh>_<game run>_<n>
+    tag: ed_Crate_XLarge_03_fmk3a_1
+    mesh: { package: BIOA_FRE31_00_LAY.pcc, export: biog_apl_phy_crate_xlarge_01_l.Crate_XLarge_03 }   # instead of template: a StaticMesh of that file
+    location: [-1257, -15850, -365]
+    yaw: 180
+    removed: true              # optional: the build hides its actor without collision (none: creates nothing); false or left out shows it again
 
 usables:
   cabinTerminal:               # a label for the result
@@ -234,7 +241,7 @@ usables:
 
 Every value given is enforced; a value left out stays as it is. Only values that differ are written, so a rebuild changes nothing. Errors name the YAML line.
 
-A prop whose template is a StaticMeshActor is not copied as one: a StaticMeshActor is lit by light baked where it stands, so a copy elsewhere renders black (with or without its lightmap). The build copies `propTemplate` instead, a BioInert whose `DynamicLightEnvironment` lights it where it is, and gives its `PlaceableMesh` the template's mesh and materials, and the actor its `DrawScale`/`DrawScale3D`. An imported template is first flattened: what it inherits from prefab archetypes (most props of a level are prefab instances) is written into it and its subobjects, which then point at the class defaults; otherwise the import brings the whole prefab (8 MB for one crate).
+A prop whose template is a StaticMeshActor is not copied as one: a StaticMeshActor is lit by light baked where it stands, so a copy elsewhere renders black (with or without its lightmap). The build copies `propTemplate` instead, a BioInert whose `DynamicLightEnvironment` lights it where it is, and gives its `PlaceableMesh` the template's mesh and materials, and the actor its `DrawScale`/`DrawScale3D`. A `mesh` (what the in-game editor spawns: a StaticMesh export, by its path in the file, e.g. a forced-export package inside a level file) goes on a copy of `propTemplate` the same way, with the mesh's own materials, at scale 1; give `template` or `mesh`, not both. A `removed: true` prop needs neither: its actor gets `bHidden` true and `bCollideActors`/`bBlockActors` false (as `live_remove` does in game; `CollisionType` is transient in LE1, so a file can't set it). Without it, a prop hidden that way is shown again with the values of what it is copied from (its template, or `propTemplate`); one with neither is left hidden, with a note. An imported template is first flattened: what it inherits from prefab archetypes (most props of a level are prefab instances) is written into it and its subobjects, which then point at the class defaults; otherwise the import brings the whole prefab (8 MB for one crate).
 
 A usable is made targetable (its behavior's `m_bTargetable` override: vanilla terminals wait for their story's Kismet). `goTo` Kismet in `Main_Sequence`: `BioSeqEvt_ArtPlaceableUsed` (Originator = the usable) → `BioSeqAct_AreaTransition`.
 

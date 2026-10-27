@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using LegendaryExplorerCore.Packages;
-using YamlDotNet.RepresentationModel;
 using static MeleMcp.Core.YamlFiles;
 
 namespace MeleMcp.Core;
@@ -27,8 +26,6 @@ public static class LivePlacer
 {
     /// <summary>Shepard's Z minus the floor under her: the VI terminals of cabin.yaml and freighter.yaml stand at this height.</summary>
     private const float FloorBelowShepard = 94;
-
-    private static readonly string[] Sections = ["npcs", "usables", "props"];
 
     private sealed record Shepard(string Pawn, float X, float Y, float Z, int Yaw);
 
@@ -143,21 +140,15 @@ public static class LivePlacer
         var root = Root(text);
         var location = YamlEdits.Location(MathF.Round(actor.X, 2), MathF.Round(actor.Y, 2), MathF.Round(actor.Z, 2));
         var yaw = YamlEdits.Degrees(MathF.Round(actor.YawDegrees, 2));
-        var found = Sections.SelectMany(s => root.Children.FirstOrDefault(c => Scalar(c.Key) == s).Value is YamlMappingNode m
-                ? m.Children.Select(c => (Section: s, Entry: c))
-                : [])
-            .Where(e => e.Entry.Value is YamlMappingNode body
-                        && body.Children.Any(c => Scalar(c.Key) == "tag" && Scalar(c.Value).Equals(actor.Tag, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-        if (found.Count > 1) throw new ArgumentException($"Several entries have tag '{actor.Tag}': {string.Join(", ", found.Select(f => $"{f.Section}.{Scalar(f.Entry.Key)}"))}.");
+        var found = YamlEdits.Tagged(root, actor.Tag);
 
         string entry, edited;
         List<string> changes;
-        var added = found.Count == 0;
-        if (!added)
+        var added = found is null;
+        if (found is { } f)
         {
-            entry = $"{found[0].Section}.{Scalar(found[0].Entry.Key)}";
-            (edited, changes) = YamlEdits.SetKeys(text, found[0].Entry.Value, [("location", location), ("yaw", yaw)]);
+            entry = $"{f.Section}.{Scalar(f.Entry.Key)}";
+            (edited, changes) = YamlEdits.SetKeys(text, f.Entry.Value, [("location", location), ("yaw", yaw)]);
         }
         else
         {
@@ -168,12 +159,11 @@ public static class LivePlacer
             var keys = new List<(string, string)> { ("tag", actor.Tag), ("template", TemplateOf(source, level)), ("location", location), ("yaw", yaw) };
             edited = YamlEdits.AddEntry(text, root, "props", key, keys, "Actors copied from a template and placed in the running game (live_place, then live_save).");
             changes = keys.Select(k => $"{k.Item1}: {k.Item2}").ToList();
-            if (Get(game, source, "Class")!.GetValue<string>() == "Engine.StaticMeshActor" && !root.Children.Keys.Any(k => Scalar(k) == "propTemplate"))
+            if (Get(game, source, "Class")!.GetValue<string>() == "Engine.StaticMeshActor")
             {
                 // The build shows a static mesh on a copy of a BioInert, lit where it stands (as live_place's stand-in).
-                var standIn = $"{{ package: {source.Split('.')[0]}.pcc, actor: {FileBioInert(game, source.Split('.')[0])} }}";
-                edited = YamlEdits.AddTopLevel(edited, Root(edited), "propTemplate", $"{standIn}   # a BioInert: copies of it show the static meshes, lit where they stand", "props");
-                changes.Insert(0, $"propTemplate: {standIn}");
+                (edited, var standIn) = YamlEdits.AddPropTemplate(game, edited, $"{source.Split('.')[0]}.pcc");
+                if (standIn is not null) changes.Insert(0, standIn);
             }
         }
         if (edited != text) File.WriteAllText(file, edited, new UTF8Encoding(false));
@@ -181,14 +171,6 @@ public static class LivePlacer
         var result = build ? LevelBuilder.Build(game, file, null) : null;
         if (result is not null) notes.Add("Install the level (game closed: mod_install) to see it there after a reload; the live copy lasts until then.");
         return new LiveSave(file, entry, added, changes, actor, result, notes);
-    }
-
-    /// <summary>A BioInert placed in a level file (not one spawned since), to copy for static meshes.</summary>
-    private static string FileBioInert(MEGame game, string level)
-    {
-        using var pcc = PackageInspector.Open(game, level + ".pcc");
-        return pcc.Exports.FirstOrDefault(e => e.ClassName == "BioInert" && e.Parent?.InstancedFullPath == "TheWorld.PersistentLevel")?.ObjectName.Instanced
-               ?? throw new ArgumentException($"{level}.pcc has no BioInert to show static meshes on: add 'propTemplate: {{ package: <file>, actor: <a BioInert> }}' to the YAML.");
     }
 
     /// <summary>{ package: BIOA_FRE31_00_LAY.pcc, actor: StaticMeshActor_12 }, or the bare actor name when it is in the level built.</summary>

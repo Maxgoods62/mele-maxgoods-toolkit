@@ -24,11 +24,12 @@ only handles whole classes (`getall`), and commands queued together run in rever
   written only while `MassEffect1.exe` is closed. The game check counts a failed `tasklist` as "running".
 - **Log:** `Binaries\Win64\Logs\MeleBridge.log`, rewritten at each start.
 
-## In-game editor (test build)
+## In-game editor
 
 F8 in the game opens a level editor drawn over the game: free cam, click a prop to select it, drag the red, green and blue
-arrows to move it. It is Phase 0 of [docs/07](../../docs/07-ingame-editor.md): a test build that checks the hooks, the input
-capture and the arrows line up with the game. Props, Save and anything kept after a map reload come in later phases.
+arrows to move it (T) or the ring to turn it (R). **Props** lists the meshes in memory; a click spawns one where the view
+points. Del deletes the selection, Ctrl+S saves. It is Phase 1 of [docs/07](../../docs/07-ingame-editor.md); thumbnails,
+undo and keeping edits across a map reload come in later phases.
 
 - **Threads:** the game thread does everything that touches game objects (`Editor.cpp`, after `BioHUD.PostRender` and
   `Camera.UpdateCamera`). The render thread draws [Dear ImGui](https://github.com/ocornut/imgui) and
@@ -37,9 +38,14 @@ capture and the arrows line up with the game. Props, Save and anything kept afte
 - **Input:** while the editor is open the game gets no mouse or keys: the window's messages are swallowed, the DirectInput
   mouse reads zero, and the game's `SetCursorPos`/`ClipCursor` calls are blocked. F8 and Alt+F4 always work.
 - **Pause:** `WorldInfo.bPlayersOnly`, as photo mode does. Closing gives the old value back.
-- **State:** the `editor` op (`live_editor` in mele-mcp) returns open, camera, selection, the projection check and counters.
-- **Tested 2026-10-27** in the freighter: all seven steps of [docs/07 §7](../../docs/07-ingame-editor.md#7-phase-0-the-test-build)
-  pass; the arrows sit within 0.6 px of where the engine projects the prop.
+- **Save:** one session file per map, `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json`, outside the install. It holds the
+  latest state of each actor spawned, moved, turned or deleted: spawned ones by tag, level actors by path. mele-mcp's
+  `editor_import` writes it into the level YAML and builds it.
+- **State:** the `editor` op (`live_editor` in mele-mcp) returns open, camera, selection, edits, the status line, the
+  projection check and counters.
+- **Tested 2026-10-27** in the freighter: Phase 0's seven steps ([docs/07 §7](../../docs/07-ingame-editor.md#7-phase-0-the-test-build)),
+  the arrows within 0.6 px of where the engine projects the prop; Phase 1's five ([§8](../../docs/07-ingame-editor.md#8-phase-1-the-first-usable-editor)),
+  a crate spawned and one deleted in game, both shipped by build + install.
 
 ## Protocol
 
