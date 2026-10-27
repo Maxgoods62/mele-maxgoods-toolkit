@@ -12,10 +12,12 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <utility>
 
-// The editor's game-thread half: open and close (F8, pause), the free camera, picking, moving, turning, spawning and deleting
-// actors, saving those edits to a session file, and the snapshot the overlay draws from. Everything here runs inside the
-// ProcessEvent hook, right after BioHUD.PostRender or Camera.UpdateCamera returned.
+// The editor's game-thread half: open and close (F8, pause), the free camera, picking, moving, turning, spawning (a mesh in
+// memory, or one loaded from the catalog package) and deleting actors, saving those edits to a session file, and the snapshot
+// the overlay draws from. Everything here runs inside the ProcessEvent hook, right after BioHUD.PostRender or
+// Camera.UpdateCamera returned.
 namespace MeleBridge::Editor
 {
     std::atomic<bool> Open{ false };
@@ -40,6 +42,9 @@ namespace MeleBridge::Editor
         constexpr float SpawnReach = 3000, SpawnDrop = 3000;
         /// Packages of engine and editor helper meshes (gizmos, node icons, UI): not props.
         constexpr wchar_t const* NotProps[] = { L"EngineMeshes", L"EditorMeshes", L"NodeBuddies", L"GUI_", L"EngineResources", L"EditorResources" };
+        /// The package catalog_build ports the catalog's meshes into ("package" in catalog.json). A mesh in memory under it is the
+        /// catalog's copy: only its catalog entry knows the vanilla mesh and file a session names.
+        constexpr char const CatalogPrefix[] = "MeleCatalog_Core.";
 
         thread_local bool InEditor = false;
 
@@ -57,6 +62,7 @@ namespace MeleBridge::Editor
             UFunction* Spawn = nullptr;
             UFunction* Destroy = nullptr;
             UFunction* SetStaticMesh = nullptr;
+            UFunction* DynamicLoadObject = nullptr;
             bool Tried = false;
         } Fn;
 
@@ -93,6 +99,8 @@ namespace MeleBridge::Editor
             AWorldInfo* PausedWorld = nullptr;
             int PausedIndex = -1;
             bool WasPlayersOnly = false;
+            /// We let the paused world tick once (TickOnce): the next tick takes the pause back without counting it as the game's.
+            bool TickingOnce = false;
             /// The player's world at the last tick: a new one means a map change or a load.
             AWorldInfo* World = nullptr;
             int WorldIndex = -1;
@@ -114,8 +122,9 @@ namespace MeleBridge::Editor
 
             std::vector<Edit> Edits;
             std::shared_ptr<std::vector<std::string> const> Meshes;
-            /// The level file of an actor showing each mesh: where the import finds it.
-            std::unordered_map<UObject*, std::string> MeshFiles;
+            /// The level file of an actor showing each mesh, by the mesh's lower-case path: where the import finds it. Not by
+            /// pointer: a mesh nothing shows any more is collected, and one loaded later (a catalog mesh) can take its address.
+            std::unordered_map<std::string, std::string> MeshFiles;
             std::string Status;
             unsigned long long StatusFrame = 0;
             /// How often the game took the pause back while the editor was open.
@@ -149,6 +158,12 @@ namespace MeleBridge::Editor
             std::wstring wide(text.Chars(), text.Length());
             while (!wide.empty() && wide.back() == L'\0') wide.pop_back();
             return ToUtf8(wide);
+        }
+
+        std::string Lower(std::string text)
+        {
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return text;
         }
 
         /// The package (file) an object is in: the first part of its path.
@@ -195,6 +210,17 @@ namespace MeleBridge::Editor
             }
             G.PausedWorld = nullptr;
             G.PausedIndex = -1;
+            G.TickingOnce = false;
+        }
+
+        /// Lets the paused world tick once. A DynamicLightEnvironment only updates in Tick: a prop spawned while paused renders
+        /// black, and a moved one keeps the light of where it was, until the world ticks. The next editor tick takes the pause
+        /// back (seen in game: one tick lights it).
+        void TickOnce()
+        {
+            if (!G.Open || !Alive(G.PausedWorld, G.PausedIndex) || !G.PausedWorld->bPlayersOnly) return;
+            G.PausedWorld->bPlayersOnly = 0;
+            G.TickingOnce = true;
         }
 
         void ResolveFunctions()
@@ -210,6 +236,7 @@ namespace MeleBridge::Editor
                 Fn.Spawn = FindFunctionByPath(L"Engine.Actor.Spawn");
                 Fn.Destroy = FindFunctionByPath(L"Engine.Actor.Destroy");
                 Fn.SetStaticMesh = FindFunctionByPath(L"Engine.DynamicSMActor.SetStaticMesh");
+                Fn.DynamicLoadObject = FindFunctionByPath(L"Core.Object.DynamicLoadObject");
             }
             catch (std::exception const& e)
             {
@@ -478,6 +505,8 @@ namespace MeleBridge::Editor
             auto const meshClass = UStaticMesh::StaticClass();
             auto const componentClass = UStaticMeshComponent::StaticClass();
             std::vector<std::string> meshes;
+            // By pointer within this pass only: nothing is collected while it runs.
+            std::unordered_map<UObject*, std::string> shownBy;
             for (UINT i = 0; i < objects.Count(); i++)
             {
                 auto const object = objects.GetData()[i];
@@ -490,8 +519,8 @@ namespace MeleBridge::Editor
                         // Another level before the persistent map: the mod builds that one, which has a mesh only from an earlier
                         // build or an editor spawn.
                         auto const level = LevelOf(component->Owner);
-                        auto const it = G.MeshFiles.find(component->StaticMesh);
-                        if (it == G.MeshFiles.end()) G.MeshFiles.emplace(component->StaticMesh, level);
+                        auto const it = shownBy.find(component->StaticMesh);
+                        if (it == shownBy.end()) shownBy.emplace(component->StaticMesh, level);
                         else if (_stricmp(it->second.c_str(), map.c_str()) == 0) it->second = level;
                     }
                 }
@@ -502,15 +531,10 @@ namespace MeleBridge::Editor
                     meshes.push_back(ToUtf8(path));
                 }
             }
+            for (auto const& [mesh, level] : shownBy) G.MeshFiles.emplace(Lower(ToUtf8(PathOf(mesh))), level);
             std::sort(meshes.begin(), meshes.end(), [](std::string const& a, std::string const& b) { return _stricmp(a.c_str(), b.c_str()) < 0; });
             LEASI_INFO("editor: {} meshes in memory, {} shown by an actor", meshes.size(), G.MeshFiles.size());
             G.Meshes = std::make_shared<std::vector<std::string> const>(std::move(meshes));
-        }
-
-        std::string Lower(std::string text)
-        {
-            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return text;
         }
 
         /// Base 36 of the seconds since 2026 when this game run first spawned: tags from other runs can't collide, even with props
@@ -601,29 +625,91 @@ namespace MeleBridge::Editor
             return down.ReturnValue != nullptr ? down.HitLocation : start;
         }
 
-        /// A DynamicSMActor_Spawnable showing a mesh in memory: it has its own light environment, so it is lit where it stands.
-        void Spawn(APlayerController* pc, UCanvas* canvas, std::string const& meshPath)
+        /// The mesh a Spawn asks for: the one in memory at its path, else, for a catalog entry, the catalog package's copy, which
+        /// DynamicLoadObject reads from disk (that mesh with its materials, not the rest of the file). Null once Say() told why.
+        /// A loaded mesh nothing shows is collected within a minute: the caller spawns and sets it in the same tick.
+        UStaticMesh* MeshToSpawn(APlayerController* pc, Command const& c, double& loadMs)
+        {
+            loadMs = -1;
+            // The overlay spawns an In this level row under the catalog package as its catalog entry. One no entry loads (the
+            // catalog was rebuilt, or can't be read, since the copy loaded) comes here as is: the session would name the copy.
+            if (_strnicmp(c.Text.c_str(), CatalogPrefix, sizeof CatalogPrefix - 1) == 0)
+            {
+                Say(std::format("not spawned: {} is the catalog package's copy, and no entry of the catalog as last read loads it: "
+                                "spawn the prop from the Catalog tab",
+                                c.Text));
+                return nullptr;
+            }
+            UObject* found = nullptr;
+            std::string missing;
+            try
+            {
+                found = FindByPath(ToWide(c.Text));
+            }
+            catch (std::exception const& e)
+            {
+                missing = e.what();
+            }
+            auto const meshClass = UStaticMesh::StaticClass();
+            if (Real(found) && found->IsA(meshClass)) return static_cast<UStaticMesh*>(found);
+            if (c.Load.empty())
+            {
+                // The In this level list: its meshes were in memory when it was read.
+                if (found == nullptr) Say(std::format("not spawned: {}", missing));
+                else if (!Real(found)) Say(std::format("not spawned: {} is being unloaded (Refresh the list)", c.Text));
+                else Say(std::format("not spawned: {} is not a StaticMesh", c.Text));
+                return nullptr;
+            }
+            if (Fn.DynamicLoadObject == nullptr)
+            {
+                Say("not spawned: Core.Object.DynamicLoadObject was not found, so catalog props no level has in memory can't load");
+                return nullptr;
+            }
+
+            // A static function: any object will do. Core.Default__Object is the one tested in game.
+            UObject* caller = UObject::StaticClass()->ClassDefaultObject;
+            if (caller == nullptr) caller = pc;
+            LARGE_INTEGER start, end, frequency;
+            QueryPerformanceCounter(&start);
+            UObject_execDynamicLoadObject_Parms load;
+            load.ObjectName = ToWide(c.Load).c_str();
+            load.ObjectClass = meshClass;
+            // Null instead of an error dialog when the catalog package is not installed or has no such mesh.
+            load.MayFail = 1;
+            CallProcessEvent(caller, Fn.DynamicLoadObject, &load);
+            // A union member: the parameter block's destructor leaves it, and the string is on the game's heap.
+            std::destroy_at(&load.ObjectName);
+            QueryPerformanceCounter(&end);
+            QueryPerformanceFrequency(&frequency);
+            loadMs = static_cast<double>(end.QuadPart - start.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+
+            auto const loaded = load.ReturnValue;
+            if (loaded == nullptr || !loaded->IsA(meshClass))
+            {
+                LEASI_WARN("editor: DynamicLoadObject({}) returned {} in {:.1f} ms", c.Load, ToUtf8(PathOf(loaded)), loadMs);
+                auto const name = c.Load.substr(c.Load.rfind('.') + 1);
+                Say(std::format("not spawned: {} is not in memory, and not in the catalog package ({}): install the Mele Catalog mod "
+                                "(mod_install, game closed) and restart the game",
+                                name, c.Load));
+                return nullptr;
+            }
+            LEASI_INFO("editor: loaded {} from the catalog in {:.1f} ms", ToUtf8(PathOf(loaded)), loadMs);
+            return static_cast<UStaticMesh*>(loaded);
+        }
+
+        /// A DynamicSMActor_Spawnable showing a mesh: it has its own light environment, so it is lit where it stands once the
+        /// world ticks. The mesh is one in memory (the In this level list, or a catalog entry a level has), or a catalog entry's
+        /// copy loaded from the catalog package; the session names the vanilla mesh and a vanilla file either way.
+        void Spawn(APlayerController* pc, UCanvas* canvas, Command const& c)
         {
             if (Fn.Spawn == nullptr || Fn.SetStaticMesh == nullptr || Fn.DeProject == nullptr || Fn.Trace == nullptr)
             {
                 Say("spawning is off: Actor.Spawn, DynamicSMActor.SetStaticMesh, Canvas.DeProject or Actor.Trace was not found");
                 return;
             }
-            UObject* mesh = nullptr;
-            try
-            {
-                mesh = FindByPath(ToWide(meshPath));
-            }
-            catch (std::exception const& e)
-            {
-                Say(std::format("not spawned: {}", e.what()));
-                return;
-            }
-            if (!mesh->IsA(UStaticMesh::StaticClass()))
-            {
-                Say(std::format("not spawned: {} is not a StaticMesh", meshPath));
-                return;
-            }
+            double loadMs = -1;
+            auto const mesh = MeshToSpawn(pc, c, loadMs);
+            if (mesh == nullptr) return;
 
             // Facing the camera.
             auto const cameraYaw = pc->PlayerCamera != nullptr ? pc->PlayerCamera->CameraCache.POV.Rotation.Yaw : pc->Rotation.Yaw;
@@ -638,32 +724,36 @@ namespace MeleBridge::Editor
             auto const actor = spawn.ReturnValue;
             if (actor == nullptr)
             {
-                Say(std::format("the engine refused to spawn {}", meshPath));
+                Say(std::format("the engine refused to spawn {}", c.Text));
                 return;
             }
             ADynamicSMActor_execSetStaticMesh_Parms set;
-            set.NewMesh = static_cast<UStaticMesh*>(mesh);
+            set.NewMesh = mesh;
             CallProcessEvent(actor, Fn.SetStaticMesh, &set);
 
             auto& edit = Touch(actor);
             edit.Spawned = true;
-            edit.MeshPath = meshPath;
-            auto const file = G.MeshFiles.find(mesh);
-            edit.MeshFile = file != G.MeshFiles.end() ? file->second : std::string{};
+            edit.MeshPath = c.Text;
+            if (!c.Source.empty())
+            {
+                edit.MeshFile = c.Source;
+            }
+            else
+            {
+                auto const file = G.MeshFiles.find(Lower(c.Text));
+                edit.MeshFile = file != G.MeshFiles.end() ? file->second : std::string{};
+            }
             Select(actor);
-            Say(std::format("spawned {} as {}", meshPath, tag));
+            // Paused, the new actor has no light yet: it would render black.
+            TickOnce();
+            Say(loadMs >= 0 ? std::format("spawned {} as {} (loaded from the catalog in {:.0f} ms)", c.Text, tag, loadMs)
+                            : std::format("spawned {} as {}", c.Text, tag));
         }
 
         // ! Save
         // ========================================
 
-        std::filesystem::path SessionFolder()
-        {
-            wchar_t buffer[MAX_PATH];
-            auto const length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH);
-            if (length == 0 || length >= MAX_PATH) throw BridgeError("LOCALAPPDATA is not set");
-            return std::filesystem::path(buffer) / L"MeleBridge" / L"LE1" / L"sessions";
-        }
+        std::filesystem::path SessionFolder() { return std::filesystem::path(DataFolder()) / L"sessions"; }
 
         /// Spawned actors by tag (their path changes with each spawn), level actors by path (their tag is often their class name).
         std::string KeyOf(json const& actor)
@@ -819,10 +909,11 @@ namespace MeleBridge::Editor
             case Command::Kind::Rotate: Rotate(c.X); break;
             case Command::Kind::Deselect: Select(nullptr); break;
             case Command::Kind::Speed: G.Speed = std::clamp(G.Speed * std::pow(1.25f, c.X), MinSpeed, MaxSpeed); break;
-            case Command::Kind::Spawn: Spawn(pc, canvas, c.Text); break;
+            case Command::Kind::Spawn: Spawn(pc, canvas, c); break;
             case Command::Kind::Delete: Delete(); break;
             case Command::Kind::Save: Save(); break;
             case Command::Kind::RefreshMeshes: RefreshMeshes(); break;
+            case Command::Kind::TickWorld: TickOnce(); break;
             }
         }
 
@@ -907,13 +998,21 @@ namespace MeleBridge::Editor
             }
 
             // The game pauses this way too (seen while it was unfocused) and unpauses when it is done: the editor keeps its pause.
-            if (G.Open && G.PausedWorld != nullptr && G.PausedWorld == pc->WorldInfo && !G.PausedWorld->bPlayersOnly)
+            if (G.Open && G.PausedWorld != nullptr && G.PausedWorld == pc->WorldInfo)
             {
-                // The game wrote 0: whatever pause it had when the editor opened is over, so closing gives back 0.
-                if (G.WasPlayersOnly) LEASI_INFO("editor: the game ended its own pause while the editor was open; closing will give back 0");
-                G.WasPlayersOnly = false;
-                G.PausedWorld->bPlayersOnly = 1;
-                if (G.PauseRetaken++ == 0) LEASI_INFO("editor: the game cleared bPlayersOnly while the editor was open; set again");
+                // Our own one-tick release (a spawn, or the end of a drag) is over: not the game's doing.
+                auto const ownTick = std::exchange(G.TickingOnce, false);
+                if (!G.PausedWorld->bPlayersOnly)
+                {
+                    G.PausedWorld->bPlayersOnly = 1;
+                    if (!ownTick)
+                    {
+                        // The game wrote 0: whatever pause it had when the editor opened is over, so closing gives back 0.
+                        if (G.WasPlayersOnly) LEASI_INFO("editor: the game ended its own pause while the editor was open; closing will give back 0");
+                        G.WasPlayersOnly = false;
+                        if (G.PauseRetaken++ == 0) LEASI_INFO("editor: the game cleared bPlayersOnly while the editor was open; set again");
+                    }
+                }
             }
 
             auto const f8 = Focused() && Down(VK_F8);
@@ -1081,16 +1180,25 @@ namespace MeleBridge::Editor
         if (drag && !Commands.empty() && Commands.back().Type == command.Type) Commands.back() = command;
         else if (command.Type == Command::Kind::Spawn)
         {
-            // A double click on a list row is two clicks: one crate, not two.
-            static std::string lastPath;
+            // A double click on a list row or a catalog cell is two clicks: one crate, not two.
+            static std::string lastKey;
             static ULONGLONG lastTime = 0;
+            auto const key = command.Text + '\n' + command.Load;
             auto const now = GetTickCount64();
-            if (command.Text == lastPath && now - lastTime < GetDoubleClickTime()) return;
-            lastPath = command.Text;
+            if (key == lastKey && now - lastTime < GetDoubleClickTime()) return;
+            lastKey = key;
             lastTime = now;
             Commands.push_back(command);
         }
         else Commands.push_back(command);
+    }
+
+    std::wstring DataFolder()
+    {
+        wchar_t buffer[MAX_PATH];
+        auto const length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) throw BridgeError("LOCALAPPDATA is not set");
+        return (std::filesystem::path(buffer) / L"MeleBridge" / L"LE1").wstring();
     }
 
     void SetCalibration(Calibration const& calibration)
@@ -1123,6 +1231,8 @@ namespace MeleBridge::Editor
             { "status", s.Status },
             { "edits", { { "count", s.Edits }, { "unsaved", s.Unsaved } } },
             { "meshesInMemory", s.Meshes != nullptr ? json(s.Meshes->size()) : json(nullptr) },
+            { "catalog", { { "entries", Diag.CatalogEntries.load() >= 0 ? json(Diag.CatalogEntries.load()) : json(nullptr) },
+                           { "thumbnails", Diag.Thumbnails.load() } } },
             { "selection", nullptr },
             { "calibration", nullptr },
             { "threads", { { "present", Diag.PresentThread.load() }, { "postRender", Diag.PostRenderThread.load() },

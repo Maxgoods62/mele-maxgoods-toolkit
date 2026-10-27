@@ -37,6 +37,7 @@ asi_target (MeleBridge
     "d3d11"
     "dxgi"
     "dxguid"
+    "windowscodecs"
   VLINKS
     "Common"
     "LESDK"

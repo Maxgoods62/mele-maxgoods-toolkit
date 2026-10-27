@@ -27,9 +27,14 @@ only handles whole classes (`getall`), and commands queued together run in rever
 ## In-game editor
 
 F8 in the game opens a level editor drawn over the game: free cam, click a prop to select it, drag the red, green and blue
-arrows to move it (T) or the ring to turn it (R). **Props** lists the meshes in memory; a click spawns one where the view
-points. Del deletes the selection, Ctrl+S saves. It is Phase 1 of [docs/07](../../docs/07-ingame-editor.md); thumbnails,
-undo and keeping edits across a map reload come in later phases.
+arrows to move it (T) or the ring to turn it (R). Del deletes the selection, Ctrl+S saves. **Props** spawns a prop where
+the view points, from one of two tabs:
+
+- **Catalog:** a grid of thumbnails of the curated props mele-mcp's `catalog_build` writes, with a category list and a
+  search. A tooltip gives the size, triangles, how often the game's levels place it and the file it comes from.
+- **In this level:** the meshes in memory, as a list (Phase 1's).
+
+It is Phase 2 of [docs/07](../../docs/07-ingame-editor.md); undo and keeping edits across a map reload come in later phases.
 
 - **Threads:** the game thread does everything that touches game objects (`Editor.cpp`, after `BioHUD.PostRender` and
   `Camera.UpdateCamera`). The render thread draws [Dear ImGui](https://github.com/ocornut/imgui) and
@@ -38,14 +43,57 @@ undo and keeping edits across a map reload come in later phases.
 - **Input:** while the editor is open the game gets no mouse or keys: the window's messages are swallowed, the DirectInput
   mouse reads zero, and the game's `SetCursorPos`/`ClipCursor` calls are blocked. F8 and Alt+F4 always work.
 - **Pause:** `WorldInfo.bPlayersOnly`, as photo mode does. Closing gives the old value back.
+  - A spawned prop's `DynamicLightEnvironment` only updates when the world ticks: paused, it would render black. After a
+    spawn, and when an arrow or ring drag ends, the editor lets the world tick once and takes the pause back at its next
+    tick. That release is its own: it isn't logged or counted as the game ending the pause.
 - **Save:** one session file per map, `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json`, outside the install. It holds the
   latest state of each actor spawned, moved, turned or deleted: spawned ones by tag, level actors by path. mele-mcp's
   `editor_import` writes it into the level YAML and builds it.
 - **State:** the `editor` op (`live_editor` in mele-mcp) returns open, camera, selection, edits, the status line, the
-  projection check and counters.
+  projection check, the catalog (props read, thumbnails on the GPU) and counters.
 - **Tested 2026-10-27** in the freighter: Phase 0's seven steps ([docs/07 §7](../../docs/07-ingame-editor.md#7-phase-0-the-test-build)),
   the arrows within 0.6 px of where the engine projects the prop; Phase 1's five ([§8](../../docs/07-ingame-editor.md#8-phase-1-the-first-usable-editor)),
-  a crate spawned and one deleted in game, both shipped by build + install.
+  a crate spawned and one deleted in game, both shipped by build + install. The Catalog tab is not tested in game yet.
+
+### The prop catalog
+
+mele-mcp's `catalog_build` writes two things, both outside the game install:
+
+- `%LOCALAPPDATA%\MeleBridge\LE1\catalog\catalog.json` and its `thumbs\` (128x128 PNGs, transparent background);
+- `MeleCatalog_Core.pcc`, the meshes in a group per category, in a dev mod of its own, **Mele Catalog**
+  (`DLC_MOD_MeleCatalog` in the M3 library). `mod_install` installs it with the game closed; M3's AutoTOC lists the file,
+  so the game finds it by name.
+
+`catalog.json` (UTF-8, version 1):
+
+```json
+{ "version": 1, "built": "2026-10-27T03:00:00Z", "package": "MeleCatalog_Core",
+  "categories": ["Crates", "Furniture", "Medical", "Consoles", "Lights", "Industrial", "Debris", "Alien", "Small items", "Signs", "Plants", "Other"],
+  "entries": [ { "name": "Crate_XLarge_03", "category": "Crates",
+                 "mesh": "biog_apl_phy_crate_xlarge_01_l.Crate_XLarge_03", "source": "BIOA_STA30_02_DSG",
+                 "load": "MeleCatalog_Core.Crates.Crate_XLarge_03", "thumb": "thumbs/Crates_Crate_XLarge_03.png",
+                 "size": [78, 168, 170], "tris": 1290, "placed": 264, "large": false } ] }
+```
+
+| Field | What the bridge does with it |
+|---|---|
+| `mesh` | The vanilla path, also the path in memory when a level has the mesh: used as is when it is there, and written to the session as `mesh.path`. |
+| `load` | When no level has the mesh: `Core.Object.DynamicLoadObject(load, StaticMesh, MayFail)`. That reads the one mesh and its materials from the catalog package, not the rest of the file. |
+| `source` | A vanilla file with the mesh as an export, written to the session as `mesh.file`: `editor_import` and `level_build` port the vanilla mesh, never the catalog's copy. |
+| `thumb` | Relative to the catalog folder; `null` for none. A path that is absolute or leaves the folder is ignored. |
+| `size`, `tris`, `placed`, `large` | Shown in the tooltip. |
+
+- **Reading:** in the background, the first time the Catalog tab shows and again on **Reload**. A missing or unreadable
+  file shows in the tab, and the In this level tab still works. An entry without a name or a mesh is skipped; a category
+  the list doesn't name is added at its end.
+- **Thumbnails:** decoded with WIC (part of Windows) into D3D11 textures on the render thread, only for cells on screen and
+  at most four a frame. They are released when the editor closes or the catalog is read again.
+- **Loading and garbage collection:** a loaded mesh that no actor shows is collected within about a minute, so the load,
+  `Actor.Spawn` and `SetStaticMesh` happen in the same game-thread tick. A failed load (the mod is not installed, or the
+  game was not restarted since) is reported on the status line, and so is the time a load took.
+- **In this level:** a catalog mesh loaded earlier shows there under its `MeleCatalog_Core` path; a click on it spawns it as
+  its catalog entry, so the session still names the vanilla mesh and file. One that no entry of the catalog as last read
+  loads (it was rebuilt, or can't be read, since the copy loaded) is refused: spawn the prop from the Catalog tab.
 
 ## Protocol
 

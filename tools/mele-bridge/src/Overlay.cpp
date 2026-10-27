@@ -2,12 +2,17 @@
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #include <cmath>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <future>
 
 #pragma warning(push, 0)
 #include "imgui.h"
@@ -17,6 +22,7 @@
 
 // The editor's render-thread half: Dear ImGui and ImGuizmo drawn into the game's back buffer from a hooked
 // IDXGISwapChain::Present. It never touches game objects: it draws from the game thread's snapshot and posts commands back.
+// It also reads the prop catalog mele-mcp builds (catalog.json and its thumbnail PNGs) for the Props window's grid.
 namespace MeleBridge::Editor
 {
     namespace
@@ -344,7 +350,523 @@ namespace MeleBridge::Editor
                    }) != text.end();
         }
 
-        /// The meshes in memory, searchable; a click spawns one where the view points.
+        // ! Catalog
+        // ========================================
+
+        /// Thumbnails are drawn 96 px in a cell a little wider, the name under them. A few are decoded a frame, as cells show.
+        constexpr float ThumbSize = 96;
+        constexpr float CellWidth = 112;
+        constexpr int ThumbsPerFrame = 4;
+        /// They are 128 px; anything past this is not a thumbnail.
+        constexpr UINT MaxThumbSide = 1024;
+
+        /// One prop of %LOCALAPPDATA%\MeleBridge\LE1\catalog\catalog.json (mele-mcp's catalog_build writes it).
+        struct CatalogEntry
+        {
+            std::string Name;
+            /// Index into Catalog::Categories.
+            int Category = 0;
+            /// The vanilla path, which is also the path in memory when a level has the mesh.
+            std::string Mesh;
+            /// A vanilla file (no .pcc) with the mesh as an export: the session's mesh.file, which editor_import ports it from.
+            std::string Source;
+            /// The catalog package's copy (MeleCatalog_Core.<group>.<name>, a group per category), which DynamicLoadObject reads.
+            std::string Load;
+            /// The thumbnail PNG's full path; empty when there is none.
+            std::wstring ThumbFile;
+            float Size[3]{};
+            int Tris = 0;
+            /// How often the vanilla levels place it.
+            int Placed = 0;
+            /// Bigger than a prop usually is.
+            bool Large = false;
+        };
+
+        /// Read once, then shared and never changed: Reload makes a new one.
+        struct Catalog
+        {
+            std::string File;
+            std::string Built;
+            std::string Package;
+            std::vector<std::string> Categories;
+            /// Entries per category, for the combo.
+            std::vector<int> Counts;
+            std::vector<CatalogEntry> Entries;
+            /// Entries without a name or a mesh.
+            int Skipped = 0;
+            /// Why there are no entries: no file yet, or one that can't be read.
+            std::string Error;
+        };
+
+        /// A catalog entry's thumbnail on the GPU. The view holds the texture.
+        struct Thumb
+        {
+            ID3D11ShaderResourceView* View = nullptr;
+            /// Decoded, or found missing or unreadable: not tried again until the editor reopens or the catalog is read again.
+            bool Tried = false;
+            float Width = 0;
+            float Height = 0;
+        };
+
+        // Render thread only.
+        std::shared_ptr<Catalog const> TheCatalog;
+        std::future<std::shared_ptr<Catalog const>> CatalogReading;
+        /// By entry index of TheCatalog.
+        std::vector<Thumb> Thumbs;
+        int ThumbFailures = 0;
+        bool WicFailureLogged = false;
+        /// The Catalog tab: -1 for All, else a category index; and its rows (entry indexes) for the catalog, category and
+        /// search they were made from.
+        int CatalogCategory = -1;
+        char CatalogFilter[128]{};
+        std::vector<int> CatalogShown;
+        std::string CatalogShownFilter;
+        int CatalogShownCategory = -1;
+        std::shared_ptr<Catalog const> CatalogShownFrom;
+
+        std::string StringOf(json const& object, char const* key)
+        {
+            auto const it = object.find(key);
+            return it != object.end() && it->is_string() ? it->get<std::string>() : std::string{};
+        }
+
+        double NumberOf(json const& object, char const* key)
+        {
+            auto const it = object.find(key);
+            return it != object.end() && it->is_number() ? it->get<double>() : 0;
+        }
+
+        /// A thumbnail's full path from its path relative to the catalog folder; empty for none, or for one that is absolute or
+        /// leaves the folder.
+        std::wstring ThumbPath(std::filesystem::path const& folder, std::string const& relative)
+        {
+            if (relative.empty()) return {};
+            std::filesystem::path const path(ToWide(relative));
+            if (path.has_root_name() || path.has_root_directory()) return {};
+            for (auto const& part : path)
+            {
+                if (part == L"..") return {};
+            }
+            return (folder / path).lexically_normal().wstring();
+        }
+
+        /// Any thread: it touches no game object and no GPU state. A missing or bad file comes back as Error, never as an
+        /// exception.
+        std::shared_ptr<Catalog const> ReadCatalog()
+        {
+            auto catalog = std::make_shared<Catalog>();
+            try
+            {
+                auto const folder = std::filesystem::path(DataFolder()) / L"catalog";
+                auto const file = folder / L"catalog.json";
+                catalog->File = ToUtf8(file.wstring());
+                if (!std::filesystem::exists(file))
+                {
+                    catalog->Error = std::format("No catalog yet ({}): build it with catalog_build in mele-mcp, then Reload.", catalog->File);
+                    return catalog;
+                }
+                std::ifstream in(file, std::ios::binary);
+                auto const doc = json::parse(in);
+                auto const version = doc.at("version").get<int>();
+                if (version != 1) throw BridgeError(std::format("version {}, and this bridge reads version 1", version));
+                catalog->Built = StringOf(doc, "built");
+                catalog->Package = StringOf(doc, "package");
+                for (auto const& c : doc.at("categories")) catalog->Categories.push_back(c.get<std::string>());
+                for (auto const& e : doc.at("entries"))
+                {
+                    CatalogEntry entry;
+                    entry.Name = StringOf(e, "name");
+                    entry.Mesh = StringOf(e, "mesh");
+                    if (entry.Name.empty() || entry.Mesh.empty())
+                    {
+                        catalog->Skipped++;
+                        continue;
+                    }
+                    entry.Source = StringOf(e, "source");
+                    entry.Load = StringOf(e, "load");
+                    entry.ThumbFile = ThumbPath(folder, StringOf(e, "thumb"));
+                    // A category the list doesn't name joins it at the end.
+                    auto category = StringOf(e, "category");
+                    if (category.empty()) category = "Other";
+                    auto const known = std::find(catalog->Categories.begin(), catalog->Categories.end(), category);
+                    entry.Category = static_cast<int>(known - catalog->Categories.begin());
+                    if (known == catalog->Categories.end()) catalog->Categories.push_back(category);
+                    if (auto const size = e.find("size"); size != e.end() && size->is_array() && size->size() == 3)
+                    {
+                        for (size_t i = 0; i < 3; i++) entry.Size[i] = (*size)[i].is_number() ? (*size)[i].get<float>() : 0;
+                    }
+                    entry.Tris = static_cast<int>(NumberOf(e, "tris"));
+                    entry.Placed = static_cast<int>(NumberOf(e, "placed"));
+                    auto const large = e.find("large");
+                    entry.Large = large != e.end() && large->is_boolean() && large->get<bool>();
+                    catalog->Entries.push_back(std::move(entry));
+                }
+                catalog->Counts.assign(catalog->Categories.size(), 0);
+                for (auto const& entry : catalog->Entries) catalog->Counts[static_cast<size_t>(entry.Category)]++;
+            }
+            catch (std::exception const& e)
+            {
+                catalog->Entries.clear();
+                catalog->Counts.assign(catalog->Categories.size(), 0);
+                catalog->Error = std::format("{} can't be read: {}", catalog->File.empty() ? std::string("catalog.json") : catalog->File, e.what());
+            }
+            return catalog;
+        }
+
+        /// The GPU copies go when the editor closes or the catalog is read again; they come back a few a frame as cells show.
+        void ReleaseThumbnails()
+        {
+            for (auto& thumb : Thumbs)
+            {
+                if (thumb.View != nullptr) thumb.View->Release();
+                thumb = {};
+            }
+            Diag.Thumbnails.store(0);
+        }
+
+        /// WIC for one frame's thumbnails. The Present thread is the game's: COM is set up for the frame only, and left as it
+        /// was found. A thread already in a single-threaded apartment is fine too (WIC works in both).
+        struct WicScope
+        {
+            bool Tried = false;
+            HRESULT Com = E_FAIL;
+            Microsoft::WRL::ComPtr<IWICImagingFactory> Factory;
+
+            WicScope() = default;
+            WicScope(WicScope const&) = delete;
+            WicScope& operator=(WicScope const&) = delete;
+            ~WicScope()
+            {
+                Factory.Reset();
+                if (SUCCEEDED(Com)) CoUninitialize();
+            }
+
+            IWICImagingFactory* Get()
+            {
+                if (Tried) return Factory.Get();
+                Tried = true;
+                Com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                auto hr = Com;
+                if (SUCCEEDED(Com) || Com == RPC_E_CHANGED_MODE)
+                    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Factory));
+                if (FAILED(hr) && !WicFailureLogged)
+                {
+                    WicFailureLogged = true;
+                    LEASI_ERROR("editor: no WIC imaging factory (0x{:08X}), thumbnails off", static_cast<unsigned>(hr));
+                }
+                return Factory.Get();
+            }
+        };
+
+        /// A PNG as a texture ImGui can draw: WIC converts it to 32-bit RGBA with straight alpha, which is how ImGui blends.
+        HRESULT LoadThumbnail(IWICImagingFactory* wic, std::wstring const& file, Thumb& thumb)
+        {
+            using Microsoft::WRL::ComPtr;
+            ComPtr<IWICBitmapDecoder> decoder;
+            ComPtr<IWICBitmapFrameDecode> frame;
+            ComPtr<IWICFormatConverter> converter;
+            UINT width = 0, height = 0;
+            auto hr = wic->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder);
+            if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+            if (SUCCEEDED(hr)) hr = wic->CreateFormatConverter(&converter);
+            if (SUCCEEDED(hr))
+                hr = converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom);
+            if (SUCCEEDED(hr)) hr = converter->GetSize(&width, &height);
+            if (SUCCEEDED(hr) && (width == 0 || height == 0 || width > MaxThumbSide || height > MaxThumbSide)) hr = WINCODEC_ERR_IMAGESIZEOUTOFRANGE;
+            if (FAILED(hr)) return hr;
+
+            std::vector<BYTE> pixels(static_cast<size_t>(width) * height * 4);
+            hr = converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(pixels.size()), pixels.data());
+            if (FAILED(hr)) return hr;
+
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = width;
+            desc.Height = height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_IMMUTABLE;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA const data{ pixels.data(), width * 4, 0 };
+            ComPtr<ID3D11Texture2D> texture;
+            hr = Device->CreateTexture2D(&desc, &data, &texture);
+            if (SUCCEEDED(hr)) hr = Device->CreateShaderResourceView(texture.Get(), nullptr, &thumb.View);
+            if (FAILED(hr)) return hr;
+            thumb.Width = static_cast<float>(width);
+            thumb.Height = static_cast<float>(height);
+            return S_OK;
+        }
+
+        /// An entry's thumbnail, decoded the first time its cell shows, at most ThumbsPerFrame a frame. No view: still waiting
+        /// (not Tried), or none.
+        Thumb const& ThumbnailOf(int index, WicScope& wic, int& budget)
+        {
+            auto& thumb = Thumbs[static_cast<size_t>(index)];
+            if (thumb.Tried) return thumb;
+            auto const& entry = TheCatalog->Entries[static_cast<size_t>(index)];
+            if (entry.ThumbFile.empty())
+            {
+                thumb.Tried = true;
+                return thumb;
+            }
+            if (budget <= 0) return thumb;
+            budget--;
+            thumb.Tried = true;
+            auto const factory = wic.Get();
+            auto const hr = factory != nullptr ? LoadThumbnail(factory, entry.ThumbFile, thumb) : E_NOINTERFACE;
+            if (SUCCEEDED(hr)) Diag.Thumbnails.fetch_add(1);
+            else if (ThumbFailures++ < 3) LEASI_WARN("editor: thumbnail {} not loaded (0x{:08X})", ToUtf8(entry.ThumbFile), static_cast<unsigned>(hr));
+            return thumb;
+        }
+
+        /// The text cut to fit a width, with "..." when cut (never inside a UTF-8 sequence).
+        std::string Fit(std::string const& text, float width)
+        {
+            if (ImGui::CalcTextSize(text.c_str()).x <= width) return text;
+            auto keep = text.size();
+            while (keep > 0)
+            {
+                keep--;
+                while (keep > 0 && (static_cast<unsigned char>(text[keep]) & 0xC0) == 0x80) keep--;
+                auto const cut = text.substr(0, keep) + "...";
+                if (ImGui::CalcTextSize(cut.c_str()).x <= width) return cut;
+            }
+            return "...";
+        }
+
+        /// In the game thread's list of meshes in memory, which is sorted the way _stricmp orders.
+        bool InMemory(std::vector<std::string> const& sorted, std::string const& path)
+        {
+            if (path.empty()) return false;
+            auto const it = std::lower_bound(sorted.begin(), sorted.end(), path,
+                                             [](std::string const& a, std::string const& b) { return _stricmp(a.c_str(), b.c_str()) < 0; });
+            return it != sorted.end() && _stricmp(it->c_str(), path.c_str()) == 0;
+        }
+
+        Command SpawnOf(CatalogEntry const& entry)
+        {
+            return { .Type = Command::Kind::Spawn, .Text = entry.Mesh, .Load = entry.Load, .Source = entry.Source };
+        }
+
+        /// A Spawn for a row of the In this level list. A catalog mesh loaded earlier shows there under the catalog package's
+        /// path: it spawns as its entry, so the session names the vanilla mesh and file that editor_import ports. One no entry
+        /// loads goes as is, and the game thread refuses it.
+        Command SpawnOfListed(std::string const& path)
+        {
+            if (TheCatalog != nullptr)
+            {
+                for (auto const& entry : TheCatalog->Entries)
+                {
+                    if (!entry.Load.empty() && _stricmp(entry.Load.c_str(), path.c_str()) == 0) return SpawnOf(entry);
+                }
+            }
+            return { .Type = Command::Kind::Spawn, .Text = path };
+        }
+
+        /// One cell of the grid: the thumbnail (or a placeholder), the name under it, the details in a tooltip. A click spawns.
+        void DrawCell(Snapshot const& s, int index, WicScope& wic, int& budget)
+        {
+            auto const& entry = TheCatalog->Entries[static_cast<size_t>(index)];
+            ImGui::PushID(index);
+            auto const clicked = ImGui::InvisibleButton("##prop", { CellWidth, ThumbSize + 4 + ImGui::GetTextLineHeight() });
+            ImGui::PopID();
+            auto const hovered = ImGui::IsItemHovered();
+            auto const held = ImGui::IsItemActive();
+            auto const min = ImGui::GetItemRectMin();
+            auto const draw = ImGui::GetWindowDrawList();
+
+            ImVec2 const box{ min.x + (CellWidth - ThumbSize) * 0.5f, min.y };
+            ImVec2 const boxEnd{ box.x + ThumbSize, box.y + ThumbSize };
+            draw->AddRectFilled(box, boxEnd, ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : hovered ? ImGuiCol_ButtonHovered : ImGuiCol_FrameBg), 4);
+            auto const& thumb = ThumbnailOf(index, wic, budget);
+            if (thumb.View != nullptr)
+            {
+                // Fitted to the square, its shape kept.
+                auto const scale = ThumbSize / std::max(thumb.Width, thumb.Height);
+                auto const w = thumb.Width * scale, h = thumb.Height * scale;
+                ImVec2 const at{ box.x + (ThumbSize - w) * 0.5f, box.y + (ThumbSize - h) * 0.5f };
+                draw->AddImage(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(thumb.View)), at, { at.x + w, at.y + h });
+            }
+            else if (thumb.Tried)
+            {
+                auto const size = ImGui::CalcTextSize("no image");
+                draw->AddText({ box.x + (ThumbSize - size.x) * 0.5f, box.y + (ThumbSize - size.y) * 0.5f }, ImGui::GetColorU32(ImGuiCol_TextDisabled), "no image");
+            }
+            auto const label = Fit(entry.Name, CellWidth);
+            draw->AddText({ min.x + (CellWidth - ImGui::CalcTextSize(label.c_str()).x) * 0.5f, boxEnd.y + 4 }, ImGui::GetColorU32(ImGuiCol_Text), label.c_str());
+
+            if (ImGui::BeginItemTooltip())
+            {
+                ImGui::TextUnformatted(entry.Name.c_str());
+                ImGui::TextDisabled("%s", TheCatalog->Categories[static_cast<size_t>(entry.Category)].c_str());
+                ImGui::Text("Size %.0f x %.0f x %.0f%s   %d triangles", entry.Size[0], entry.Size[1], entry.Size[2], entry.Large ? " (large)" : "", entry.Tris);
+                if (entry.Placed > 0) ImGui::Text("Placed %d times in the game's levels", entry.Placed);
+                ImGui::Text("From %s", entry.Source.empty() ? "-" : entry.Source.c_str());
+                ImGui::TextDisabled("%s", entry.Mesh.c_str());
+                // As of the In this level list's last read.
+                if (s.Meshes != nullptr)
+                {
+                    if (InMemory(*s.Meshes, entry.Mesh)) ImGui::TextDisabled("In memory: a level here has it");
+                    else if (InMemory(*s.Meshes, entry.Load)) ImGui::TextDisabled("In memory: loaded from the catalog");
+                    else if (!entry.Load.empty()) ImGui::TextDisabled("Loaded from the catalog package on click");
+                    else ImGui::TextDisabled("Not in memory, and not in the catalog package");
+                }
+                ImGui::EndTooltip();
+            }
+            if (clicked) Post(SpawnOf(entry));
+        }
+
+        /// The shown entries in rows of cells; only the rows on screen are drawn (and their thumbnails decoded).
+        void DrawCatalogGrid(Snapshot const& s)
+        {
+            auto const& style = ImGui::GetStyle();
+            auto const columns = std::max(1, static_cast<int>((ImGui::GetContentRegionAvail().x + style.ItemSpacing.x) / (CellWidth + style.ItemSpacing.x)));
+            auto const count = static_cast<int>(CatalogShown.size());
+            auto const rows = (count + columns - 1) / columns;
+            WicScope wic;
+            auto budget = ThumbsPerFrame;
+            ImGuiListClipper clipper;
+            clipper.Begin(rows, ThumbSize + 4 + ImGui::GetTextLineHeight() + style.ItemSpacing.y);
+            while (clipper.Step())
+            {
+                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
+                {
+                    for (int column = 0; column < columns; column++)
+                    {
+                        auto const at = row * columns + column;
+                        if (at >= count) break;
+                        if (column > 0) ImGui::SameLine();
+                        DrawCell(s, CatalogShown[static_cast<size_t>(at)], wic, budget);
+                    }
+                }
+            }
+        }
+
+        /// The Catalog tab: a category, a search, and the grid. The file is read on first sight and on Reload, in the
+        /// background (a few hundred kilobytes of JSON).
+        void DrawCatalog(Snapshot const& s)
+        {
+            if (TheCatalog == nullptr && !CatalogReading.valid()) CatalogReading = std::async(std::launch::async, ReadCatalog);
+            if (CatalogReading.valid() && CatalogReading.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            {
+                // Swapped before the grid draws: no cell of this frame holds an old thumbnail.
+                ReleaseThumbnails();
+                TheCatalog = CatalogReading.get();
+                Thumbs.assign(TheCatalog->Entries.size(), Thumb{});
+                ThumbFailures = 0;
+                if (CatalogCategory >= static_cast<int>(TheCatalog->Categories.size())) CatalogCategory = -1;
+                Diag.CatalogEntries.store(TheCatalog->Error.empty() ? static_cast<int>(TheCatalog->Entries.size()) : -1);
+                if (TheCatalog->Error.empty())
+                    LEASI_INFO("editor: catalog {} read: {} props ({} skipped), package {}, built {}", TheCatalog->File, TheCatalog->Entries.size(),
+                               TheCatalog->Skipped, TheCatalog->Package, TheCatalog->Built);
+                else
+                    LEASI_WARN("editor: {}", TheCatalog->Error);
+            }
+            auto const catalog = TheCatalog;
+
+            auto const all = catalog != nullptr ? static_cast<int>(catalog->Entries.size()) : 0;
+            auto const preview = catalog == nullptr || CatalogCategory < 0 ? std::string("All") : catalog->Categories[static_cast<size_t>(CatalogCategory)];
+            ImGui::SetNextItemWidth(150);
+            if (ImGui::BeginCombo("##category", preview.c_str()))
+            {
+                if (ImGui::Selectable(std::format("All ({})", all).c_str(), CatalogCategory < 0)) CatalogCategory = -1;
+                for (size_t i = 0; catalog != nullptr && i < catalog->Categories.size(); i++)
+                {
+                    ImGui::PushID(static_cast<int>(i));
+                    if (ImGui::Selectable(std::format("{} ({})", catalog->Categories[i], catalog->Counts[i]).c_str(), CatalogCategory == static_cast<int>(i)))
+                        CatalogCategory = static_cast<int>(i);
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-80);
+            ImGui::InputTextWithHint("##catalogFilter", "Search, e.g. crate", CatalogFilter, sizeof CatalogFilter);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(CatalogReading.valid());
+            if (ImGui::Button("Reload")) CatalogReading = std::async(std::launch::async, ReadCatalog);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Reads catalog.json again, after catalog_build in mele-mcp.");
+
+            if (catalog == nullptr)
+            {
+                ImGui::TextDisabled("Reading the catalog...");
+                return;
+            }
+            if (!catalog->Error.empty())
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.6f, 0.3f, 1));
+                ImGui::TextWrapped("%s", catalog->Error.c_str());
+                ImGui::PopStyleColor();
+                ImGui::TextDisabled("The In this level tab still lists the meshes in memory.");
+                return;
+            }
+
+            if (CatalogShownFrom != catalog || CatalogShownFilter != CatalogFilter || CatalogShownCategory != CatalogCategory)
+            {
+                CatalogShownFrom = catalog;
+                CatalogShownFilter = CatalogFilter;
+                CatalogShownCategory = CatalogCategory;
+                CatalogShown.clear();
+                for (int i = 0; i < all; i++)
+                {
+                    auto const& entry = catalog->Entries[static_cast<size_t>(i)];
+                    if (CatalogCategory >= 0 && entry.Category != CatalogCategory) continue;
+                    if (!CatalogShownFilter.empty() && !ContainsNoCase(entry.Name, CatalogShownFilter) && !ContainsNoCase(entry.Mesh, CatalogShownFilter)) continue;
+                    CatalogShown.push_back(i);
+                }
+            }
+            ImGui::TextDisabled("%d of %d. Click one: it appears where the view points.", static_cast<int>(CatalogShown.size()), all);
+            if (ImGui::BeginChild("##grid")) DrawCatalogGrid(s);
+            ImGui::EndChild();
+        }
+
+        /// The In this level tab (Phase 1's list): the meshes in memory, searchable; a click spawns one where the view points.
+        void DrawLevelMeshes(Snapshot const& s)
+        {
+            ImGui::TextDisabled("Meshes in memory. Click one: it appears where the view points.");
+            ImGui::SetNextItemWidth(-90);
+            ImGui::InputTextWithHint("##filter", "Search, e.g. crate", Filter, sizeof Filter);
+            ImGui::SameLine();
+            if (ImGui::Button("Refresh")) Post({ .Type = Command::Kind::RefreshMeshes });
+
+            if (s.Meshes == nullptr)
+            {
+                ImGui::TextDisabled("Reading the meshes in memory...");
+                return;
+            }
+            if (ShownFrom != s.Meshes || ShownFilter != Filter)
+            {
+                ShownFrom = s.Meshes;
+                ShownFilter = Filter;
+                Shown.clear();
+                for (int i = 0; i < static_cast<int>(s.Meshes->size()); i++)
+                {
+                    if (ShownFilter.empty() || ContainsNoCase((*s.Meshes)[i], ShownFilter)) Shown.push_back(i);
+                }
+            }
+            ImGui::TextDisabled("%d of %d", static_cast<int>(Shown.size()), static_cast<int>(s.Meshes->size()));
+            if (ImGui::BeginChild("##meshes"))
+            {
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(Shown.size()));
+                while (clipper.Step())
+                {
+                    for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
+                    {
+                        if (Shown[row] >= static_cast<int>(s.Meshes->size())) continue;
+                        auto const& path = (*s.Meshes)[Shown[row]];
+                        ImGui::PushID(row);
+                        if (ImGui::Selectable(path.c_str())) Post(SpawnOfListed(path));
+                        ImGui::PopID();
+                    }
+                }
+            }
+            ImGui::EndChild();
+        }
+
+        /// Props: the catalog as a grid of thumbnails, and the meshes in memory as a list.
         void DrawProps(Snapshot const& s, float height)
         {
             if (!ShowProps) return;
@@ -357,50 +879,23 @@ namespace MeleBridge::Editor
                 MeshesAsked = true;
             }
             ImGui::SetNextWindowPos({ 10, 70 }, ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize({ 470, height * 0.55f }, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize({ 540, height * 0.6f }, ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowBgAlpha(0.92f);
             if (ImGui::Begin("Props", &ShowProps, ImGuiWindowFlags_NoSavedSettings))
             {
-                ImGui::TextDisabled("Meshes in memory. Click one: it appears where the view points.");
-                ImGui::SetNextItemWidth(-90);
-                ImGui::InputTextWithHint("##filter", "Search, e.g. crate", Filter, sizeof Filter);
-                ImGui::SameLine();
-                if (ImGui::Button("Refresh")) Post({ .Type = Command::Kind::RefreshMeshes });
-
-                if (s.Meshes == nullptr)
+                if (ImGui::BeginTabBar("##props"))
                 {
-                    ImGui::TextDisabled("Reading the meshes in memory...");
-                }
-                else
-                {
-                    if (ShownFrom != s.Meshes || ShownFilter != Filter)
+                    if (ImGui::BeginTabItem("Catalog"))
                     {
-                        ShownFrom = s.Meshes;
-                        ShownFilter = Filter;
-                        Shown.clear();
-                        for (int i = 0; i < static_cast<int>(s.Meshes->size()); i++)
-                        {
-                            if (ShownFilter.empty() || ContainsNoCase((*s.Meshes)[i], ShownFilter)) Shown.push_back(i);
-                        }
+                        DrawCatalog(s);
+                        ImGui::EndTabItem();
                     }
-                    ImGui::TextDisabled("%d of %d", static_cast<int>(Shown.size()), static_cast<int>(s.Meshes->size()));
-                    if (ImGui::BeginChild("##meshes"))
+                    if (ImGui::BeginTabItem("In this level"))
                     {
-                        ImGuiListClipper clipper;
-                        clipper.Begin(static_cast<int>(Shown.size()));
-                        while (clipper.Step())
-                        {
-                            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
-                            {
-                                if (Shown[row] >= static_cast<int>(s.Meshes->size())) continue;
-                                auto const& path = (*s.Meshes)[Shown[row]];
-                                ImGui::PushID(row);
-                                if (ImGui::Selectable(path.c_str())) Post({ .Type = Command::Kind::Spawn, .Text = path });
-                                ImGui::PopID();
-                            }
-                        }
+                        DrawLevelMeshes(s);
+                        ImGui::EndTabItem();
                     }
-                    ImGui::EndChild();
+                    ImGui::EndTabBar();
                 }
             }
             ImGui::End();
@@ -423,6 +918,8 @@ namespace MeleBridge::Editor
                 ImGui::Text("Camera: %.0f %.0f %.0f   pitch %.1f yaw %.1f   FOV %.1f", s.Pov.Location.X, s.Pov.Location.Y, s.Pov.Location.Z,
                             static_cast<float>(s.Pov.Rotation.Pitch) * 360.f / 65536.f, static_cast<float>(s.Pov.Rotation.Yaw) * 360.f / 65536.f, s.Pov.FOV);
                 ImGui::Text("Last pick: %s", s.LastPick.empty() ? "-" : s.LastPick.c_str());
+                if (Diag.CatalogEntries.load() >= 0) ImGui::Text("Catalog: %d props   %d thumbnails on the GPU", Diag.CatalogEntries.load(), Diag.Thumbnails.load());
+                else ImGui::Text("Catalog: not read, or unreadable (see the Props window's Catalog tab)");
                 ImGui::Checkbox("ImGui demo window", &ShowDemo);
             }
             ImGui::End();
@@ -476,6 +973,8 @@ namespace MeleBridge::Editor
             }
             else
             {
+                // The drag ended: paused, the prop keeps the light of where it was until the world ticks.
+                if (Dragging) Post({ .Type = Command::Kind::TickWorld });
                 Dragging = false;
             }
 
@@ -664,6 +1163,7 @@ namespace MeleBridge::Editor
                     WantMouse.store(false);
                     WantKeyboard.store(false);
                     ResetGizmo();
+                    ReleaseThumbnails();
                 }
                 return;
             }
@@ -723,6 +1223,7 @@ namespace MeleBridge::Editor
                 Failed = true;
                 Diag.OverlayFailed.store(true);
                 LEASI_ERROR("editor overlay: {}", e.what());
+                ReleaseThumbnails();
             }
         }
 

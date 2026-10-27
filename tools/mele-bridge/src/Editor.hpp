@@ -67,18 +67,27 @@ namespace MeleBridge::Editor
     /// From the overlay to the game thread, run at the next BioHUD.PostRender.
     struct Command
     {
-        enum class Kind { Close, FreeCam, Pick, Move, Rotate, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes };
+        /// TickWorld: let the paused world tick once (after an arrow or ring drag), so the prop's light catches up.
+        enum class Kind { Close, FreeCam, Pick, Move, Rotate, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes, TickWorld };
         Kind Type;
         /// Pick: canvas pixels. Move: world location. Rotate: yaw in degrees. Speed: wheel notches.
         float X = 0;
         float Y = 0;
         float Z = 0;
         bool On = false;
-        /// Spawn: the StaticMesh's path, as the Props list shows it.
+        /// Spawn: the StaticMesh's path in memory, as the In this level list shows it, or a catalog entry's vanilla path.
         std::string Text;
+        /// Spawn from the catalog: the catalog package's path, which DynamicLoadObject reads when no level has Text in memory,
+        /// and a vanilla file that has the mesh (the session's mesh.file, for editor_import). Empty for the In this level list.
+        std::string Load;
+        std::string Source;
     };
 
     void Post(Command const& command);
+
+    /// %LOCALAPPDATA%\MeleBridge\LE1, outside the install: the session files and the prop catalog live there. Any thread.
+    /// Throws BridgeError when LOCALAPPDATA is not set.
+    std::wstring DataFolder();
 
     /// The overlay's projection of the selection against Canvas.Project, for diagnostics.
     struct Calibration
@@ -119,6 +128,10 @@ namespace MeleBridge::Editor
 
         std::atomic<int> BackbufferWidth{ 0 };
         std::atomic<int> BackbufferHeight{ 0 };
+
+        /// The Props catalog as the overlay last read it (-1: not read yet, or unreadable), and its thumbnails on the GPU.
+        std::atomic<int> CatalogEntries{ -1 };
+        std::atomic<int> Thumbnails{ 0 };
     };
 
     extern Counters Diag;
