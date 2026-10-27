@@ -96,6 +96,7 @@ public static class LivePlacer
         Set(game, path, "Rotation", placed.DeepClone());
         // Re-attaching the components moves what is drawn and what collides; a spawned copy's components are still where its template is.
         Call(game, path, "ForceUpdateComponents", true, false);
+        if (template is not null) Uncover(game, path, notes);
 
         if (from != "given") notes.Add(isPawn ? "At Shepard's height (a pawn's location is its middle)." : $"On the floor (Shepard's Z - {FloorBelowShepard}){(raise != 0 ? $", raised {raise}" : "")}.");
         notes.Add("Lasts until the map reloads: live_save writes it into the level YAML.");
@@ -124,8 +125,9 @@ public static class LivePlacer
     }
 
     /// <summary>
-    /// Writes a live actor's location and rotation into the level YAML entry with its tag (npcs, usables or props); with none, adds a
-    /// props entry copying the template. npcs and usables keep a yaw; props a yaw while upright, else a full rotation. Then builds the level.
+    /// Writes a live actor's location and rotation into the level YAML entry with its tag (npcs, usables, props or lights); with none, adds
+    /// a props entry copying the template. npcs and usables keep a yaw; props a yaw while upright, else a full rotation; lights a location
+    /// only. Then builds the level.
     /// </summary>
     public static LiveSave Save(MEGame game, string yamlPath, string objectPath, string? name, string? template, bool build)
     {
@@ -155,6 +157,12 @@ public static class LivePlacer
             (edited, var rotated) = YamlEdits.SetRotation(edited, YamlEdits.Tagged(Root(edited), actor.Tag)!.Value.Entry.Value, rotation);
             changes.AddRange(rotated);
         }
+        else if (found is { } light && light.Section == "lights")
+        {
+            // A light has a place, not a turn.
+            entry = $"lights.{Scalar(light.Entry.Key)}";
+            (edited, changes) = YamlEdits.SetKeys(text, light.Entry.Value, [("location", location)]);
+        }
         else if (found is { } other)
         {
             entry = $"{other.Section}.{Scalar(other.Entry.Key)}";
@@ -171,7 +179,8 @@ public static class LivePlacer
             changes = keys.Select(k => $"{k.Item1}: {k.Item2}").ToList();
             if (Get(game, source, "Class")!.GetValue<string>() == "Engine.StaticMeshActor")
             {
-                // The build shows a static mesh on a copy of a BioInert, lit where it stands (as live_place's stand-in).
+                // The build shows a static mesh on a copy of a BioInert, lit by its light environment (as live_place's stand-in), or by prop
+                // lights when a light of the lights section covers it.
                 (edited, var standIn) = YamlEdits.AddPropTemplate(game, edited, $"{source.Split('.')[0]}.pcc");
                 if (standIn is not null) changes.Insert(0, standIn);
             }
@@ -225,14 +234,60 @@ public static class LivePlacer
         }
         Call(game, standIn, "SetDrawScale", Get(game, template, "DrawScale")!.GetValue<float>());
         Call(game, standIn, "SetDrawScale3D", Get(game, template, "DrawScale3D")!.DeepClone());
-        notes.Add($"{template} is static, so a BioInert shows its mesh ({mesh}), lit by its own light environment. level_build shows it the same way, on a copy of the YAML's propTemplate.");
+        notes.Add($"{template} is static, so a BioInert shows its mesh ({mesh}), lit by its own light environment. level_build shows it the same way, on a copy of the YAML's "
+                  + "propTemplate, and lights it by prop lights instead when a light of the YAML's lights section covers it.");
         return (standIn, mesh);
     }
 
-    /// <summary>Actor.Spawn called on the template itself: any actor can spawn, and the copy goes into the template's level.</summary>
+    /// <summary>
+    /// Actor.Spawn of a copy of the template, called on the player controller: the copy goes into the spawning actor's level, the map's
+    /// (called on the template, a BioInert of BIOG_UIWorld landed there, where its light environment found no light: black).
+    /// </summary>
     private static string Spawned(MEGame game, string cls, string tag, string template, JsonObject location, JsonObject rotation) =>
-        Call(game, template, "Spawn", cls, null, tag, location.DeepClone(), rotation.DeepClone(), template, null, true, false)["return"]?.GetValue<string>()
+        Call(game, Controller(game), "Spawn", cls, null, tag, location.DeepClone(), rotation.DeepClone(), template, null, true, false)["return"]?.GetValue<string>()
         ?? throw new InvalidOperationException($"The game spawned nothing from {template} (an abstract class, or the spawn was refused).");
+
+    /// <summary>
+    /// A copy is lit by its light environment (docs/07 §11's uncovered state), as a build of a prop no prop light covers is: the BioInert it
+    /// copies may be a built prop lit by prop lights (its light environment off, its mesh on Gameplay_4 alone), which a copy elsewhere
+    /// would keep, black. The light environment is switched on, the mesh takes the channels of the first of its archetypes not on
+    /// Gameplay_4, and the components are re-attached twice: one re-attach leaves the light environment's lights on the old channels.
+    /// Any other copy (its mesh off Gameplay_4, or no light environment) is left as it is.
+    /// </summary>
+    private static void Uncover(MEGame game, string copy, List<string> notes)
+    {
+        var chain = Chain(game, copy);
+        var (meshName, environmentName) = chain.Contains("BioArtPlaceable") ? ("PlaceableMesh", "m_pLightEnvComponent")
+            : chain.Contains("DynamicSMActor") ? ("StaticMeshComponent", "LightEnvironment")
+            : (null, null);
+        if (meshName is null || Get(game, copy, meshName)?.GetValue<string>() is not { } mesh || Get(game, copy, environmentName!)?.GetValue<string>() is not { } environment) return;
+        static bool OnPropChannel(JsonNode? channels) => channels?["Gameplay_4"]?.GetValue<bool>() == true;
+        // Only a covered prop's mesh is on Gameplay_4 (no vanilla light uses it): a placeable whose light environment is off by design keeps it so.
+        if (!OnPropChannel(Get(game, mesh, "LightingChannels"))) return;
+
+        Call(game, environment, "SetEnabled", true);
+        JsonNode? channels = null;
+        try
+        {
+            for (var archetype = Get(game, mesh, "ObjectArchetype")?.GetValue<string>(); archetype is not null && channels is null;
+                 archetype = Get(game, archetype, "ObjectArchetype")?.GetValue<string>())
+            {
+                if (Get(game, archetype, "LightingChannels") is { } own && !OnPropChannel(own)) channels = own;
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // A refused read (past the last component class): the copy keeps its channels, and is still placed.
+        }
+        if (channels is not null) Set(game, mesh, "LightingChannels", channels.DeepClone());
+        else notes.Add($"No archetype of {mesh} has channels off the prop lights' (Gameplay_4): its channels are left as they are.");
+        Call(game, copy, "ForceUpdateComponents", false, false);
+        Call(game, copy, "ForceUpdateComponents", false, false);
+        notes.Add("Lit by its light environment, as level_build lights a prop no prop light covers (the copy it was made from was lit by prop lights).");
+    }
+
+    private static string Controller(MEGame game) =>
+        Find(game, "PlayerController", null).FirstOrDefault() ?? throw new InvalidOperationException("No player controller: is a map loaded?");
 
     private static PlacedActor Actor(MEGame game, string path, string? standIn)
     {
@@ -244,8 +299,7 @@ public static class LivePlacer
 
     private static Shepard Player(MEGame game)
     {
-        var controller = Find(game, "PlayerController", null).FirstOrDefault() ?? throw new InvalidOperationException("No player controller: is a map loaded?");
-        var pawn = Get(game, controller, "Pawn")?.GetValue<string>() ?? throw new InvalidOperationException("Shepard has no pawn right now (a cinematic or a conversation?).");
+        var pawn = Get(game, Controller(game), "Pawn")?.GetValue<string>() ?? throw new InvalidOperationException("Shepard has no pawn right now (a cinematic or a conversation?).");
         var location = Get(game, pawn, "Location")!;
         return new Shepard(pawn, location["X"]!.GetValue<float>(), location["Y"]!.GetValue<float>(), location["Z"]!.GetValue<float>(), Get(game, pawn, "Rotation.Yaw")!.GetValue<int>());
     }

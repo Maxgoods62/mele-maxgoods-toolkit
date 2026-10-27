@@ -113,8 +113,10 @@ public static class LiveTools
 
     [McpServerTool(Name = "live_place", Destructive = true),
      Description("Moves a live actor, or spawns a copy of one (MeleBridge ASI), in front of Shepard facing her, where she stands, or at "
-                 + "coordinates. Props land on the floor, pawns at Shepard's height. A static template (StaticMeshActor: most meshes of a "
-                 + "level) can't spawn, so a BioInert shows its mesh instead; pawns can't be copied (the engine crashes). Lasts until the map reloads: live_save writes the spot into "
+                 + "coordinates. Props land on the floor, pawns at Shepard's height. A copy goes into the map's level. A static template "
+                 + "(StaticMeshActor: most meshes of a level) can't spawn, so a BioInert shows its mesh instead, lit by its light environment "
+                 + "(level_build lights it by prop lights instead when a light of the lights section covers it); pawns can't be copied (the "
+                 + "engine crashes). Lasts until the map reloads: live_save writes the spot into "
                  + "the level YAML. Find templates with live_find, e.g. className=BioInert or StaticMeshActor, path=<level>.")]
     public static LivePlacement LivePlace(
         [Description("Actor to move (object path as live_find returns it). Give this or template.")] string? objectPath = null,
@@ -142,7 +144,8 @@ public static class LiveTools
     [McpServerTool(Name = "live_save", Destructive = true),
      Description("Writes where a live actor stands into a level_build YAML file, keeping its comments, then builds the level: location, "
                  + "and for npcs and usables a yaw; for props a yaw while the actor is upright, else 'rotation: [pitch, yaw, roll]' in place of "
-                 + "'yaw' (never both). The entry is the npcs, usables or props entry with the actor's tag; with none, a props entry is added that "
+                 + "'yaw' (never both); for lights the location only. The entry is the npcs, usables, props or lights entry with the actor's tag; "
+                 + "with none, a props entry is added that "
                  + "copies the template it was spawned from. Install the level (game closed) to keep it after a reload.")]
     public static LiveSave LiveSave(
         [Description("Level YAML file (level_build format).")] string file,

@@ -2,6 +2,8 @@
 
 #include "MeleBridge/Bridge.hpp"
 
+#include <array>
+
 // The in-game editor (F8): see docs/07-ingame-editor.md. Three threads meet here:
 // - the game thread (ProcessEvent hook) does everything that touches game objects (Editor.cpp);
 // - the render thread (IDXGISwapChain::Present hook) draws the ImGui overlay from a snapshot and posts commands (Overlay.cpp);
@@ -40,6 +42,59 @@ namespace MeleBridge::Editor
         unsigned long long PassFrame = 0;
     };
 
+    /// levels.json as the last map change read it (docs/07 §11): which level files are ours. Shared, not copied.
+    struct LevelsState
+    {
+        std::string File;
+        /// Why it was not read ("levels.json missing: run mod_build"); empty when it was.
+        std::string Problem;
+        /// The DLC folder our level files lie in.
+        std::string Dlc;
+        /// Its keys: the level files built from our YAMLs.
+        std::vector<std::string> Levels;
+        /// Its props and lights tags, all levels together: the built props the editor switches and the lights it lists.
+        int Props = 0;
+        int Lights = 0;
+    };
+
+    /// Props: a prop light, on the Gameplay_4 channel only (it lights props, never walls, pawns or vanilla meshes). Room: walls,
+    /// vanilla meshes, pawns and props too (BSP, Static, Dynamic, CompositeDynamic and Gameplay_4). Stored by name, never as bits.
+    enum class LightKind { Props, Room };
+
+    /// The widest prop light Auto light and L make (docs/07 §11): a prop that needs more from where the view is gets none and
+    /// keeps its light environment. A prop light lights every prop on Gameplay_4 within its radius, so a wider one adds to the
+    /// props around it, each tuned against the vanilla mesh beside it (the in-game test's huge catalog props got 2421 and 1991,
+    /// a whole area). 1024 is the engine's own default for a point light (a spawned one starts with it), three times the widest
+    /// the freighter's crates needed (190-340), and 2.5 bounds radii reach it at a bounds radius of about 410: about 310 of the
+    /// catalog's 354 meshes fit under it from every side and turn, tables and big crates included, and 330 from some side. The
+    /// rest are over about 450 units across (rock piles, drills, market stalls, cargo containers, and the catalog's large
+    /// ones, over 600 units: architecture), which a room light lights better, with the walls around them.
+    constexpr float MaxAutoRadius = 1024;
+
+    /// A light's settings as a session entry's light block holds them (docs/07 §11). Colour in 0-255; falloff is
+    /// FalloffExponent.
+    struct LightBlock
+    {
+        LightKind Kind = LightKind::Props;
+        float Radius = 350;
+        float Brightness = 0.15f;
+        std::array<int, 3> Color{ 255, 255, 255 };
+        float Falloff = 2;
+        bool Enabled = true;
+
+        bool operator==(LightBlock const&) const = default;
+    };
+
+    /// A light the editor lists (its own spawns and the YAMLs' lights: entries), for the icons and the Lights tab.
+    struct LightIcon
+    {
+        /// Its path: what a click on the icon or its row sends back.
+        std::string Path;
+        std::string Tag;
+        FVector Location{};
+        LightBlock Light;
+    };
+
     /// What the game thread saw at the end of its last BioHUD.PostRender, for the overlay.
     struct Snapshot
     {
@@ -66,6 +121,24 @@ namespace MeleBridge::Editor
         bool SelectedSpawned = false;
         /// Why Delete refuses the selection; empty when it can be deleted.
         std::string SelectedUndeletable;
+        /// Why Move, Turn and Scale refuse it (a vanilla actor that is not a prop, a room shell: docs/07 §11); empty when they take it.
+        std::string SelectedUnmovable;
+        /// Whether an edit of a vanilla selection ships ("ships: ...", "dev-only: ..."); empty for an actor of our levels, a spawn,
+        /// or an actor Move, Turn and Scale refuse (SelectedUnmovable).
+        std::string SelectedShips;
+        /// The file the selection's level was loaded from, while the game keeps its linker; empty otherwise.
+        std::string SelectedFile;
+        /// A light the editor lists: its settings, for the panel. It only moves.
+        bool SelectedLight = false;
+        LightBlock SelectedLightBlock;
+        /// A prop the editor switches to prop lights (docs/07 §11): whether a prop light covers it, what it gets from prop lights
+        /// (E) and what a fresh Auto light would give it (T), and that light's radius from where the view is: over
+        /// MaxAutoRadius, Auto light and L add none and the target is nothing.
+        bool SelectedProp = false;
+        bool SelectedCovered = false;
+        float SelectedReceived = 0;
+        float SelectedTarget = 0;
+        float SelectedAutoRadius = 0;
         /// Canvas.Project of the selection's location, in canvas pixels: the reference for the overlay's own projection.
         bool Projected = false;
         FVector Projection{};
@@ -74,6 +147,11 @@ namespace MeleBridge::Editor
 
         /// StaticMeshes in memory, for the Props list. Built when the list is opened or refreshed, then shared, not copied.
         std::shared_ptr<std::vector<std::string> const> Meshes;
+
+        /// The lights the editor lists in visible levels, deleted ones left out.
+        std::vector<LightIcon> Lights;
+        /// Auto light: a fresh spawn that gets too little from prop lights gets one of its own.
+        bool AutoLight = true;
 
         /// Actors spawned, moved, turned, scaled, deleted or re-applied from the session, and how many of them a Save would write
         /// (changed since the last Save; a spawn deleted before its first save leaves nothing).
@@ -90,6 +168,7 @@ namespace MeleBridge::Editor
         std::string UndoLabel;
         std::string RedoLabel;
         std::shared_ptr<SessionState const> Session;
+        std::shared_ptr<LevelsState const> OurLevels;
     };
 
     Snapshot Latest();
@@ -97,9 +176,12 @@ namespace MeleBridge::Editor
     /// From the overlay to the game thread, run at the next BioHUD.PostRender.
     struct Command
     {
-        /// Move, Rotate and Scale are drag commands: the first one of a drag opens its undo step. EndDrag closes it and lets the
-        /// paused world tick once, so the prop's light catches up.
-        enum class Kind { Close, FreeCam, Pick, Move, Rotate, Scale, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes, Undo, Redo, EndDrag };
+        /// Move, Rotate, Scale and Light are drag commands: the first one of a drag opens its undo step. EndDrag closes it and lets
+        /// the paused world tick once, so the prop's light catches up. PickLight selects a listed light, Light sets the selected
+        /// light's settings (the panel), AddLight spawns a prop light (On: a room light) where the view points, PropLight (L)
+        /// adds a prop light for the selected prop, AutoLight turns Auto light on or off.
+        enum class Kind { Close, FreeCam, Pick, Move, Rotate, Scale, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes, Undo, Redo, EndDrag,
+                          PickLight, Light, AddLight, PropLight, AutoLight };
         Kind Type;
         /// Pick: canvas pixels. Move: world location. Scale: DrawScale3D. Speed: wheel notches.
         float X = 0;
@@ -108,12 +190,15 @@ namespace MeleBridge::Editor
         /// Rotate: the whole rotation, in Unreal units (65536 = 360 degrees).
         FRotator Rotation{};
         bool On = false;
-        /// Spawn: the StaticMesh's path in memory, as the In this level list shows it, or a catalog entry's vanilla path.
+        /// Spawn: the StaticMesh's path in memory, as the In this level list shows it, or a catalog entry's vanilla path. PickLight:
+        /// the light's path.
         std::string Text;
         /// Spawn from the catalog: the catalog package's path, which DynamicLoadObject reads when no level has Text in memory,
         /// and a vanilla file that has the mesh (the session's mesh.file, for editor_import). Empty for the In this level list.
         std::string Load;
         std::string Source;
+        /// Light: the selected light's settings, all of them.
+        LightBlock Light{};
     };
 
     void Post(Command const& command);
@@ -169,7 +254,8 @@ namespace MeleBridge::Editor
 
     extern Counters Diag;
 
-    /// Pipe thread: open, camera, selection, edits, undo, the session's re-apply, calibration, threads, hooks and counters as JSON.
+    /// Pipe thread: open, camera, selection, edits, undo, the session's re-apply, levels.json, calibration, threads, hooks and
+    /// counters as JSON.
     json State();
 
     // ! Game thread (Editor.cpp)

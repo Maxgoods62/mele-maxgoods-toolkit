@@ -61,14 +61,29 @@ public static class KismetTools
                  + "type, text written to the GlobalTlk), skin/hair/eye colors on its own materials, fill lights at offsets that turn with her, and "
                  + "the Main_Sequence Kismet that starts her conversation when Shepard uses her (a conversation the level does not have yet is "
                  + "listed in MissingConversations: build it, then the level again). Its props: any actor copied from a template (prefab "
-                 + "archetypes baked in), placed; a StaticMeshActor's mesh goes on a copy of the BioInert 'propTemplate', lit where it stands "
+                 + "archetypes baked in), placed; a StaticMeshActor's mesh goes on a copy of the BioInert 'propTemplate' "
                  + "(live_place and live_save write these); or, instead of a template, a 'mesh' (a StaticMesh export of a file) shown the "
                  + "same way with its own materials (editor_import writes these). A new copy of 'propTemplate' starts turned as the template "
                  + "StaticMeshActor, or not at all for a mesh; then 'yaw' (degrees, pitch and roll kept) or 'rotation: [pitch, yaw, roll]' "
                  + "(degrees; not both), 'scale' (DrawScale) and 'scale3d: [x, y, z]' (DrawScale3D) set it. 'removed: true' hides the prop's "
-                 + "actor without collision (none: nothing is created), and a later build without it shows it again. Creates a missing level (full path) and the "
-                 + "Sideloader ConfigDelta that loads it. Only changed values are written; running it twice changes nothing. See the tool README "
-                 + "for the format. Backs every file up first and refuses files inside the game install.")]
+                 + "actor without collision (none: nothing is created), and a later build without it shows it again. A shown prop a light "
+                 + "of the lights section covers (enabled, at least 0.25 of its falloff at the prop's bounds centre) is lit by those lights "
+                 + "alone (its light environment off, its mesh on their channel, Gameplay_4); any other by its light environment, as its "
+                 + "source is, brighter than vanilla (a note names it). Its lights: tag, location, radius and brightness, 'kind' (props: "
+                 + "lights only props; room: walls, vanilla meshes and pawns too), 'color: [r, g, b]' (0-255, white), 'falloff' (2), "
+                 + "'enabled' (true; a light is switched off, never removed), 'template' (else 'lightTemplate', else LE1CP's "
+                 + "PointLightToggleable_7). Tags are unique across npcs (their lights too), usables, props and lights. Its vanilla actors "
+                 + "('vanilla: <file>.<actor>', a StaticMeshActor or BioInert of a file in streaming.levels): 'location', 'yaw' or 'rotation', "
+                 + "'scale', 'scale3d', 'removed: true'; a fork of the file (<map>_<file>, a renamed copy of its highest-mounted vanilla copy, "
+                 + "next to the level, with byte copies of the file's localized packages as <fork>_LOC_<lang>) gets them, and the level "
+                 + "streams it in place of the file (its waits for visible levels too); a file with no entries left streams again and its "
+                 + "fork is deleted. Refused, nothing written (any file's refusal stops every fork): any other class (a door, usable, pawn, "
+                 + "path node, volume, light, emitter), an actor a Kismet variable holds, 'removed' on an actor drawn whatever its owner "
+                 + "(bIgnoreOwnerHidden). Warned: a room shell, cover nearby, a non-uniform scale with no collision cooked "
+                 + "for it (a uniform one is made at load). The level's streamed files, shown props and lights go to MeleBridge's levels.json (not with 'package'). Creates a missing "
+                 + "level (full path) and the Sideloader ConfigDelta that loads it. Only changed values are written; running it twice changes "
+                 + "nothing. See the tool README for the format. Backs every file up first (not forks: each is built again from the vanilla "
+                 + "file) and refuses files inside the game install.")]
     public static LevelBuildResult LevelBuild(
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
         [Description("Level package, instead of the file's 'package'.")] string? package = null,

@@ -46,6 +46,11 @@ namespace MeleBridge
     /// ProcessEvent with a ready parameter block, opcode natives included. No check: the caller knows the function.
     void CallProcessEvent(UObject* object, UFunction* function, void* parms);
 
+    /// CallProcessEvent of a spawn (Actor.Spawn) with the bNoDelete bit of the spawned class's default object cleared for the
+    /// call only: Spawn refuses a class whose default is bNoDelete (every light but SpotLightMovable inherits it from Light), and
+    /// the instance copies the cleared bit, so it can be destroyed later. Only that bit is put back, whatever happens.
+    void CallSpawnWithoutNoDelete(UObject* object, UFunction* function, void* parms, AActor* classDefault);
+
     /// A function's parameters (not the return value) from a ProcessEvent parameter block.
     json ExportParams(UFunction* function, BYTE* parms);
 

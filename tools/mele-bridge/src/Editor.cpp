@@ -19,9 +19,10 @@
 #include <utility>
 
 // The editor's game-thread half: open and close (F8, pause), the free camera, picking, moving, turning, scaling, spawning (a
-// mesh in memory, or one loaded from the catalog package) and deleting (hiding) actors, undo and redo, saving those edits to a
-// session file and re-applying that file when a map loads, and the snapshot the overlay draws from. Everything here runs
-// inside the ProcessEvent hook, right after BioHUD.PostRender or Camera.UpdateCamera returned.
+// mesh in memory, or one loaded from the catalog package) and deleting (hiding) actors, which vanilla actors it may change
+// (levels.json says which levels are ours), lights (spawned, moved, set, switched off) and the prop lighting switch, undo and
+// redo, saving those edits to a session file and re-applying that file when a map loads, and the snapshot the overlay draws
+// from. Everything here runs inside the ProcessEvent hook, right after BioHUD.PostRender or Camera.UpdateCamera returned.
 namespace MeleBridge::Editor
 {
     std::atomic<bool> Open{ false };
@@ -64,6 +65,41 @@ namespace MeleBridge::Editor
         /// added would keep the session from ever being re-applied.
         constexpr ULONGLONG UnsettledMs = 5000;
 
+        /// FLightingChannelContainer's bits (Engine_structs.hpp): bInitialized, BSP, Static, Dynamic, CompositeDynamic, then the
+        /// named channels; Gameplay_4 (the SDK's Gameplay03) is free in every scanned level (docs/07 §11).
+        constexpr DWORD ChannelInitialized = 0x1, ChannelBsp = 0x2, ChannelStatic = 0x4, ChannelDynamic = 0x8, ChannelCompositeDynamic = 0x10;
+        constexpr DWORD ChannelGameplay4 = 0x02000000;
+        constexpr DWORD RoomChannels = ChannelBsp | ChannelStatic | ChannelDynamic | ChannelCompositeDynamic;
+        /// A covered prop's mesh: lit by prop lights (and room lights) only.
+        constexpr DWORD CoveredMeshChannels = ChannelInitialized | ChannelGameplay4;
+        /// A light covers a prop when its falloff at the prop's bounds centre is at least this (d <= 0.71 R at falloff 2).
+        constexpr float CoverShare = 0.25f;
+        /// Auto light adds a light when a fresh spawn gets less than this share of its target from prop lights; a prop drag that
+        /// leaves it under the other is said on the status line.
+        constexpr float AutoLightShare = 0.6f;
+        constexpr float DragWarnShare = 0.5f;
+        /// Auto light's radius is 2.5 bounds radii, never under this (nor over MaxAutoRadius: a prop that needs more gets none).
+        constexpr float MinAutoRadius = 120;
+        /// Nor under its distance to the prop's bounds centre over this: (1 - 0.65^2)^2 = 0.33 there at falloff 2, so the light
+        /// covers its prop. A turned or tilted prop's world box grows and its sphere doesn't, so its light may stand farther out
+        /// than 2.5 radii cover.
+        constexpr float AutoReach = 0.65f;
+        /// A prop light's brightness and colour with no prop light to take them from: one measurement (docs/07 §11 spike: radius
+        /// 350, about 210 units above the vanilla crate's pivot, 1.01 of its brightness), not a calibration.
+        constexpr float SeedBrightness = 0.15f;
+        /// A seed whose brightness times luminance is under this gives nothing (brightness 0, or black): a new prop light never
+        /// takes it, since it would cover its prop and leave it black.
+        constexpr float DarkSeed = 1e-3f;
+        /// The panel's ranges, which a Light command is held to.
+        constexpr float MinLightRadius = 16, MaxLightRadius = 4096, MaxBrightness = 10, MinFalloff = 1, MaxFalloff = 8;
+        static_assert(MinAutoRadius <= MaxAutoRadius && MaxAutoRadius <= MaxLightRadius, "an Auto light's radius is one the panel can set");
+        /// The Lights tab's buttons: a light this high over where the view points. A prop light the spike's radius (350); a room
+        /// light wider and brighter, a start to tune from.
+        constexpr float PropLightHeight = 150, PropLightRadius = 350;
+        constexpr float RoomLightHeight = 250, RoomLightRadius = 600, RoomLightBrightness = 0.5f;
+        /// A mesh's channels when neither the switch nor its archetype has better: what the engine gives a dynamic mesh.
+        constexpr DWORD DynamicMeshChannels = ChannelInitialized | ChannelDynamic | ChannelCompositeDynamic;
+
         thread_local bool InEditor = false;
 
         std::mutex SharedLock;
@@ -83,6 +119,7 @@ namespace MeleBridge::Editor
             UFunction* DynamicLoadObject = nullptr;
             UFunction* SetHidden = nullptr;
             UFunction* SetCollision = nullptr;
+            UFunction* SetEnvironmentEnabled = nullptr;
             bool Tried = false;
         } Fn;
 
@@ -101,6 +138,15 @@ namespace MeleBridge::Editor
             bool Hidden = false;
             bool CollideActors = true;
             bool BlockActors = true;
+        };
+
+        /// What a session entry holds of an actor's state, as last written to the session file or read from it: a field still at
+        /// it was not changed in game since, and Save takes the file's value for it, which an import may have moved on.
+        struct EntryState
+        {
+            Pose Transform;
+            std::optional<LightBlock> Light;
+            bool Deleted = false;
         };
 
         /// An actor the editor spawned, moved, turned, scaled or deleted, or one the session file named: everything its session
@@ -127,6 +173,9 @@ namespace MeleBridge::Editor
             /// the In this level list.
             std::string MeshLoad;
             Pose Now;
+            /// A light's settings (docs/07 §11); none for anything else. Of a light's pose only the location counts. Its on/off is
+            /// Light->Enabled: Deleted is only a spawned light the editor deleted, and the actor shows Enabled && !Deleted.
+            std::optional<LightBlock> Light;
             bool Deleted = false;
             /// What the YAML holds, for editor_import's three-way merge: the actor before the editor first changed it. None for a
             /// spawn never imported.
@@ -137,6 +186,8 @@ namespace MeleBridge::Editor
             /// the entry on it (the YAML built it so), else unknown (the game may have hidden it), and then left out: editor_import
             /// merges removed two-way without it.
             std::optional<bool> BaseHidden;
+            /// A light's base light block: what the YAML's lights: entry holds.
+            std::optional<LightBlock> BaseLight;
             /// The states the installed level may still show of it while an import's install is pending: imported.before of each
             /// import since the editor last made the entry anew (an import keeps one, Save carries them over as installed). Save
             /// leaves imported out (a saved edit is a new state), so the next import's before is the base, and one of these builds
@@ -146,10 +197,13 @@ namespace MeleBridge::Editor
             /// copy that turns up later is judged against it as the entry would have been. Cleared once judged against an actor,
             /// or once saved.
             json Source;
-            /// The pose last written to the session file or read from it. A field still at it was not changed in game since:
-            /// Save takes the file's value for it, which an import may have moved on.
-            std::optional<Pose> SavedPose;
+            /// The state last written to the session file or read from it (pose, light block, deleted).
+            std::optional<EntryState> SavedState;
             HideFlags ShownFlags;
+            /// The room-shell test's measure (docs/07 §11): the largest half-extent of its primitives' world boxes with the actor
+            /// as its level file has it, taken when the edit bound it, before anything wrote to it. None when its level was not
+            /// visible then (its components not attached: no bounds yet).
+            std::optional<float> FileExtent;
             bool Saved = false;
             /// Written to the session file at least once: editor_import may have made a props entry of it, so its delete is kept.
             bool EverSaved = false;
@@ -161,19 +215,30 @@ namespace MeleBridge::Editor
             bool Rebindable = false;
             /// On a built copy of the spawn: when the copy's level leaves, the edit waits for it instead of spawning again.
             bool OnCopy = false;
+            /// A light Auto light made for a fresh spawn: that prop's edit (docs/07 §11's link). It holds while both were never saved
+            /// and the light is unedited (a tuned light is the user's own and never goes with a prop); meanwhile a drag of the prop
+            /// takes the light along (Follow).
+            std::optional<size_t> MadeFor;
+            /// A linked auto light Follow deleted, as its prop got too big for one prop light from any side, or an undo or redo
+            /// of that drag: a later drag of the prop takes it along again, and brings it back once the prop fits. A light the
+            /// user deleted stays deleted.
+            bool DragDeleted = false;
         };
 
-        /// An edit's state as an undo step holds it: shown or not, the three flags it has when shown, the transform.
+        /// An edit's state as an undo step holds it: shown or not, the three flags it has when shown, the transform, and a
+        /// light's settings.
         struct StepState
         {
             bool Shown = true;
             HideFlags ShownFlags;
             Pose Transform;
+            std::optional<LightBlock> Light;
         };
 
-        enum class StepKind { Spawn, Delete, Move, Turn, Scale };
+        /// Light: a change of a light's settings (the panel, or a built light switched off by Delete).
+        enum class StepKind { Spawn, Delete, Move, Turn, Scale, Light };
 
-        /// One undo step: a spawn, a delete or a drag.
+        /// One undo step: a spawn, a delete, a drag or a light change.
         struct Step
         {
             /// The edit's index: edits are erased only on a map change, which clears the steps too.
@@ -181,6 +246,11 @@ namespace MeleBridge::Editor
             StepKind Kind = StepKind::Move;
             StepState Before;
             StepState After;
+            /// The auto light that goes with a spawn or a delete of its prop (docs/07 §11's link), written with it while the link
+            /// still holds; or the one that followed a drag of its prop, written with it whenever it has its actor (AlsoOf).
+            std::optional<size_t> Also;
+            StepState AlsoBefore;
+            StepState AlsoAfter;
         };
 
         /// A session file's entry waiting for its actor; it becomes an edit once a pass applies it.
@@ -204,6 +274,64 @@ namespace MeleBridge::Editor
             bool Settled = true;
 
             bool operator==(LevelSeen const&) const = default;
+        };
+
+        /// levels.json (docs/07 §11), read on each map change: the level files built from our YAMLs, and the vanilla files each
+        /// streams. Without it, every actor keeps Phase 3's rules.
+        struct LevelsFile
+        {
+            bool Read = false;
+            /// Why it was not read, as the status line says it.
+            std::string Problem;
+            /// The DLC folder our level files lie in; empty when the file doesn't say.
+            std::string Dlc;
+            /// The vanilla files each level streams, by the level's lower-case name.
+            std::unordered_map<std::string, std::vector<std::string>> Streams;
+            /// The tags of its built props (the editor switches them to prop lights) and of its lights: entries (the editor lists
+            /// them), lower-case, by the level's lower-case name.
+            std::unordered_map<std::string, std::unordered_set<std::string>> Props;
+            std::unordered_map<std::string, std::unordered_set<std::string>> Lights;
+            std::shared_ptr<LevelsState const> Summary;
+        };
+
+        /// An actor the props switch or the light list tracks, as long as its slot holds it.
+        struct Tracked
+        {
+            AActor* Actor = nullptr;
+            int Index = -1;
+            UClass* Class = nullptr;
+        };
+
+        /// A light as the prop lighting rule sees it (docs/07 §11): where, its settings as the component has them (on is bEnabled),
+        /// and whether its channels include Gameplay_4.
+        struct LightSeen
+        {
+            AActor* Actor = nullptr;
+            FVector Location{};
+            LightBlock Light;
+            bool Gameplay4 = false;
+        };
+
+        /// A prop's bounds: the box of its shown meshes and the radius of the sphere around them.
+        struct PropBounds
+        {
+            FVector Centre{};
+            FVector Extent{};
+            float Radius = 0;
+        };
+
+        /// Where Auto light and L put a prop light, and its radius.
+        struct Placement
+        {
+            FVector Location{};
+            float Radius = 0;
+        };
+
+        /// The brightness and colour a new prop light takes.
+        struct Seed
+        {
+            float Brightness = SeedBrightness;
+            std::array<int, 3> Color{ 255, 255, 255 };
         };
 
         /// Game thread only.
@@ -278,6 +406,34 @@ namespace MeleBridge::Editor
             /// catalog.json's load path by lower-case vanilla mesh, for spawning a session's props again; read once.
             std::unordered_map<std::string, std::string> CatalogLoads;
             bool CatalogRead = false;
+            LevelsFile Ours;
+
+            /// The listed lights and the switched props of the loaded levels (docs/07 §11), read again when stale: after a map
+            /// change, a change of the loaded levels, a pass, a spawn.
+            std::vector<Tracked> Lights;
+            std::vector<Tracked> Props;
+            bool TrackedStale = true;
+            /// Props whose switch is to be checked at the end of the tick, by edit index, or all of them. Set where game memory
+            /// may not be touched (CloseDrag runs in Fail()), done by Reswitch().
+            std::set<size_t> Reswitch;
+            bool ReswitchAll = false;
+            /// A prop drag's share of its target before the drag (-1: not a switched prop), and the closed drag's, for the warning.
+            float DragShare = -1;
+            std::optional<std::pair<size_t, float>> DragWarn;
+            /// The side of its prop (horizontal, unit length) the followed light stood on when the drag began: Follow's place for
+            /// it when the view now needs a radius over MaxAutoRadius. Zero when none.
+            FVector DragSide{};
+            /// A mesh component's channels before the switch first covered it, by component, while its slot holds it: uncovered,
+            /// they come back.
+            std::unordered_map<UObject*, std::pair<int, DWORD>> MeshChannels;
+            /// The brightness and colour of the last prop light edited in this map; reset on a map change.
+            std::optional<Seed> LastSeed;
+            bool AutoLight = true;
+            /// Where the view is at this tick (the free cam's, else the game camera's): Auto light places toward it.
+            FVector ViewLocation{};
+            int ViewYaw = 0;
+            /// The props switch faulted: not tried again until the loaded levels change.
+            bool ReswitchFaulted = false;
         } G;
 
         FVector Add(FVector a, FVector b) { return { a.X + b.X, a.Y + b.Y, a.Z + b.Z }; }
@@ -360,6 +516,47 @@ namespace MeleBridge::Editor
             return !tag.empty() && !SameText(tag, "None") && !SameText(tag, className);
         }
 
+        // ! Forks
+        // ========================================
+
+        /// A file or map name without its BIOA_ prefix (any case), as fork names drop it.
+        std::string WithoutBioa(std::string const& name)
+        {
+            return name.size() >= 5 && _strnicmp(name.c_str(), "BIOA_", 5) == 0 ? name.substr(5) : name;
+        }
+
+        /// The fork of a vanilla level file in a map (docs/07 §11): a renamed copy the map streams instead, named
+        /// <map minus BIOA_>_<file minus BIOA_> (BIOA_CLD01 and BIOA_FRE31_00_LAY: CLD01_FRE31_00_LAY), as level_build and
+        /// editor_import name it. Nothing stores the pair: the rule is the link.
+        std::string ForkName(std::string const& map, std::string const& file) { return WithoutBioa(map) + "_" + WithoutBioa(file); }
+
+        /// The vanilla file a level forks in a map: <map minus BIOA_>_<rest> is BIOA_<rest>, or <rest> when that already starts
+        /// with BIO (a file that had no BIOA_ to drop). Empty when the level is not a fork by the rule.
+        std::string VanillaOf(std::string const& level, std::string const& map)
+        {
+            if (map.empty()) return {};
+            auto const prefix = WithoutBioa(map) + "_";
+            if (level.size() <= prefix.size() || _strnicmp(level.c_str(), prefix.c_str(), prefix.size()) != 0) return {};
+            auto const rest = level.substr(prefix.size());
+            return _strnicmp(rest.c_str(), "BIO", 3) == 0 ? rest : "BIOA_" + rest;
+        }
+
+        /// A path whose level (the part before the first dot) is a fork of the map, named by the vanilla file instead: session
+        /// entries name a vanilla actor by its vanilla path, also while it stands in a fork. Other paths stay as they are.
+        std::string Canonical(std::string const& path, std::string const& map)
+        {
+            auto const dot = path.find('.');
+            auto const vanilla = VanillaOf(path.substr(0, dot), map);
+            return vanilla.empty() ? path : vanilla + (dot == std::string::npos ? std::string{} : path.substr(dot));
+        }
+
+        /// The same path in the map's fork of its level: where a vanilla actor stands once the map streams the fork.
+        std::string ForkPath(std::string const& path, std::string const& map)
+        {
+            auto const dot = path.find('.');
+            return ForkName(map, path.substr(0, dot)) + (dot == std::string::npos ? std::string{} : path.substr(dot));
+        }
+
         // ! Comparing states
         // ========================================
 
@@ -395,13 +592,28 @@ namespace MeleBridge::Editor
             return true;
         }
 
+        /// Two light blocks as editor_import compares them, on/off left out: the radius within 0.01, brightness and falloff within
+        /// 0.001, colour and kind exact.
+        bool SameLightFields(LightBlock const& a, LightBlock const& b)
+        {
+            return a.Kind == b.Kind && a.Color == b.Color && std::fabs(a.Radius - b.Radius) <= 0.01f + 1e-5f
+                && std::fabs(a.Brightness - b.Brightness) <= 0.001f + 1e-6f && std::fabs(a.Falloff - b.Falloff) <= 0.001f + 1e-6f;
+        }
+
+        bool SameLight(LightBlock const& a, LightBlock const& b) { return a.Enabled == b.Enabled && SameLightFields(a, b); }
+
+        bool SameLight(std::optional<LightBlock> const& a, std::optional<LightBlock> const& b)
+        {
+            return a.has_value() == b.has_value() && (!a || SameLight(*a, *b));
+        }
+
         /// What an undo step tells apart: a drag that came back where it started changed nothing.
         bool SameStep(StepState const& a, StepState const& b)
         {
             return a.Shown == b.Shown && a.ShownFlags.Hidden == b.ShownFlags.Hidden && a.ShownFlags.CollideActors == b.ShownFlags.CollideActors
                 && a.ShownFlags.BlockActors == b.ShownFlags.BlockActors && Near(a.Transform.Location, b.Transform.Location, LocationNoise)
                 && SameOrientation(a.Transform.Rotation, b.Transform.Rotation) && std::fabs(a.Transform.DrawScale - b.Transform.DrawScale) <= ScaleNoise
-                && Near(a.Transform.DrawScale3D, b.Transform.DrawScale3D, ScaleNoise);
+                && Near(a.Transform.DrawScale3D, b.Transform.DrawScale3D, ScaleNoise) && SameLight(a.Light, b.Light);
         }
 
         /// Locations as editor_import compares them: within 0.01 once both are rounded to 2 decimals.
@@ -475,6 +687,45 @@ namespace MeleBridge::Editor
             return pose;
         }
 
+        char const* KindName(LightKind kind) { return kind == LightKind::Room ? "room" : "props"; }
+
+        /// A light block as an entry (its base, imported.before, installed) writes it: kind by name, colour as three integers.
+        json LightJson(LightBlock const& light)
+        {
+            return { { "kind", KindName(light.Kind) }, { "radius", light.Radius }, { "brightness", light.Brightness },
+                     { "color", json::array({ light.Color[0], light.Color[1], light.Color[2] }) }, { "falloff", light.Falloff },
+                     { "enabled", light.Enabled } };
+        }
+
+        /// The light block of an entry, its base, imported.before or one of installed. A field it lacks or can't be read is the
+        /// fallback's (the actor's own, or the edit's), as PoseFrom does; a colour component is rounded and held to 0-255.
+        LightBlock LightFrom(json const& state, LightBlock const& fallback)
+        {
+            auto light = fallback;
+            auto const block = state.find("light");
+            if (block == state.end() || !block->is_object()) return light;
+            auto const number = [&](char const* key, float& out) {
+                if (auto const it = block->find(key); it != block->end() && it->is_number()) out = static_cast<float>(it->get<double>());
+            };
+            if (auto const kind = Text(*block, "kind"); kind == "props" || kind == "room") light.Kind = kind == "room" ? LightKind::Room : LightKind::Props;
+            number("radius", light.Radius);
+            number("brightness", light.Brightness);
+            number("falloff", light.Falloff);
+            if (double rgb[3]; Numbers(*block, "color", rgb))
+            {
+                for (size_t i = 0; i < 3; i++) light.Color[i] = static_cast<int>(std::clamp(std::lround(rgb[i]), 0L, 255L));
+            }
+            if (auto const enabled = block->find("enabled"); enabled != block->end() && enabled->is_boolean()) light.Enabled = enabled->get<bool>();
+            return light;
+        }
+
+        /// Whether an entry (or a state of it) is a light's: it has a light block.
+        bool HasLightBlock(json const& state)
+        {
+            auto const block = state.find("light");
+            return block != state.end() && block->is_object();
+        }
+
         /// The states the installed level may show of an entry's actor while an install is pending: its imported.before (written
         /// by editor_import), and the installed ones Save carried over from earlier imports (editor_import leaves them as they are).
         json Candidates(json const& entry)
@@ -494,12 +745,14 @@ namespace MeleBridge::Editor
             return list;
         }
 
-        /// Spawned actors by tag (their path changes with each spawn), level actors by path (their tag is often their class name).
-        std::string KeyOf(json const& actor)
+        /// Spawned actors by tag (their path changes with each spawn), level actors by path (their tag is often their class name):
+        /// the canonical one, the vanilla path of an actor in a fork of the session's map.
+        std::string KeyOf(json const& actor, std::string const& map)
         {
-            return Flag(actor, "spawned") ? "tag:" + Text(actor, "tag") : "path:" + Text(actor, "path");
+            return Flag(actor, "spawned") ? "tag:" + Text(actor, "tag") : "path:" + Canonical(Text(actor, "path"), map);
         }
 
+        /// An edit's path is canonical already (NewEdit, EditFrom).
         std::string KeyOf(Edit const& e) { return e.Spawned ? "tag:" + e.Tag : "path:" + e.Path; }
 
         /// How the status line and undo name an edit: its tag when it is a real one, else its object name.
@@ -550,6 +803,181 @@ namespace MeleBridge::Editor
             return true;
         }
 
+        // ! Lights
+        // ========================================
+
+        /// A light actor's point light component; null for any other actor, and for a light of another shape.
+        UPointLightComponent* PointOf(AActor* actor)
+        {
+            if (actor == nullptr || !actor->IsA(ALight::StaticClass())) return nullptr;
+            auto const component = static_cast<ALight*>(actor)->LightComponent;
+            return Real(component) && component->IsA(UPointLightComponent::StaticClass()) ? static_cast<UPointLightComponent*>(component) : nullptr;
+        }
+
+        /// A point light: what the editor spawns and the build copies. Every light is bHidden by class default, so nothing reads a
+        /// light's bHidden as deleted, and nothing hides one (docs/07 §11).
+        bool IsLight(AActor* actor) { return PointOf(actor) != nullptr; }
+
+        DWORD BitsOf(FLightingChannelContainer const& channels)
+        {
+            static_assert(sizeof(FLightingChannelContainer) == sizeof(DWORD));
+            DWORD bits;
+            std::memcpy(&bits, &channels, sizeof bits);
+            return bits;
+        }
+
+        void SetBits(FLightingChannelContainer& channels, DWORD bits) { std::memcpy(&channels, &bits, sizeof bits); }
+
+        /// A kind's channels, always initialized: props {Gameplay_4}; room {BSP, Static, Dynamic, CompositeDynamic, Gameplay_4}.
+        DWORD ChannelsOf(LightKind kind) { return ChannelInitialized | ChannelGameplay4 | (kind == LightKind::Room ? RoomChannels : 0); }
+
+        /// The kind a light's channels make: a room light when it lights walls, vanilla meshes or pawns.
+        LightKind KindOf(DWORD bits) { return (bits & RoomChannels) != 0 ? LightKind::Room : LightKind::Props; }
+
+        /// A light's settings as its component has them; enabled is the component's bEnabled.
+        LightBlock LightOf(AActor* actor)
+        {
+            LightBlock light;
+            auto const component = PointOf(actor);
+            if (component == nullptr) return light;
+            light.Kind = KindOf(BitsOf(component->LightingChannels));
+            light.Radius = component->Radius;
+            light.Brightness = component->Brightness;
+            light.Color = { component->LightColor.R, component->LightColor.G, component->LightColor.B };
+            light.Falloff = component->FalloffExponent;
+            light.Enabled = component->bEnabled != 0;
+            return light;
+        }
+
+        /// Writes a light's settings raw, with every field a spawned light would otherwise take from its class default (it starts
+        /// casting shadows, on BSP, Static, Dynamic and CompositeDynamic, colour alpha 0): what level_build writes for a lights:
+        /// entry. The actor shows enabled && !deleted, on the component and the actor. The caller reattaches once, unless the
+        /// actor's level is loaded but not visible.
+        void WriteLight(AActor* actor, LightBlock const& light, bool deleted)
+        {
+            auto const component = PointOf(actor);
+            if (component == nullptr) return;
+            auto const on = light.Enabled && !deleted;
+            component->Radius = light.Radius;
+            component->Brightness = light.Brightness;
+            // FColor is B, G, R, A in memory.
+            component->LightColor = { static_cast<unsigned char>(light.Color[2]), static_cast<unsigned char>(light.Color[1]),
+                                      static_cast<unsigned char>(light.Color[0]), 255 };
+            component->FalloffExponent = light.Falloff;
+            component->CastShadows = 0;
+            component->bOnlyAffectSameAndSpecifiedLevels = 0;
+            component->bForceDynamicLight = 1;
+            SetBits(component->LightingChannels, ChannelsOf(light.Kind));
+            component->bEnabled = on ? 1 : 0;
+            static_cast<ALight*>(actor)->bEnabled = on ? 1 : 0;
+        }
+
+        /// Whether a light already shows a state (docs/07 §11), as editor_import counts two equal: the location to 2 decimals, the
+        /// component's bEnabled as light.enabled && !deleted, each light field within editor_import's tolerances. Its rotation, its
+        /// scales and bHidden don't count. A field the state lacks is the light's own.
+        bool HasLight(AActor* actor, json const& state, bool deleted)
+        {
+            auto const component = PointOf(actor);
+            if (component == nullptr) return false;
+            auto const now = LightOf(actor);
+            auto const light = LightFrom(state, now);
+            double v[3];
+            auto const location = Numbers(state, "location", v) ? FVector{ static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]) }
+                                                                : actor->Location;
+            return SameLocation(actor->Location, location) && (component->bEnabled != 0) == (light.Enabled && !deleted) && SameLightFields(now, light);
+        }
+
+        float Distance(FVector a, FVector b)
+        {
+            return static_cast<float>(std::sqrt(double(a.X - b.X) * (a.X - b.X) + double(a.Y - b.Y) * (a.Y - b.Y) + double(a.Z - b.Z) * (a.Z - b.Z)));
+        }
+
+        /// A light's falloff at a distance (docs/07 §11): (1 - (d/R)^2)^falloff, 0 from the radius out. The bridge and level_build
+        /// use this one rule.
+        float Attenuation(float distance, float radius, float falloff)
+        {
+            if (!(radius > 0) || distance >= radius) return 0;
+            auto const x = double(distance) / radius;
+            return static_cast<float>(std::pow(1.0 - x * x, double(falloff)));
+        }
+
+        /// Rec. 709 luminance of a colour, each component over 255.
+        float Luminance(std::array<int, 3> const& color)
+        {
+            return (0.2126f * static_cast<float>(color[0]) + 0.7152f * static_cast<float>(color[1]) + 0.0722f * static_cast<float>(color[2])) / 255.f;
+        }
+
+        /// A light covers a prop when it is enabled, its channels include Gameplay_4 (both kinds' do), and its falloff at the prop's
+        /// bounds centre is at least 0.25.
+        bool Covers(LightSeen const& light, FVector centre)
+        {
+            return light.Light.Enabled && light.Gameplay4
+                && Attenuation(Distance(light.Location, centre), light.Light.Radius, light.Light.Falloff) >= CoverShare;
+        }
+
+        /// What a prop gets from prop lights (E): brightness times luminance times falloff, over the enabled props-kind lights. Room
+        /// lights don't count: they light the vanilla mesh beside it as well, so they add to both sides of the match.
+        float Received(std::vector<LightSeen> const& lights, FVector centre)
+        {
+            auto sum = 0.f;
+            for (auto const& l : lights)
+            {
+                if (!l.Light.Enabled || l.Light.Kind != LightKind::Props) continue;
+                sum += l.Light.Brightness * Luminance(l.Light.Color) * Attenuation(Distance(l.Location, centre), l.Light.Radius, l.Light.Falloff);
+            }
+            return sum;
+        }
+
+        /// Where Auto light and L put a prop light (docs/07 §11): outside the bounds box's near face toward the camera, horizontally,
+        /// by half the bounds radius, at the box's top plus half the bounds radius; radius 2.5 bounds radii, never under 120, and
+        /// never under its distance to the bounds centre over AutoReach, so it always covers the prop (the box of a turned prop is
+        /// wider than its sphere). A camera straight above stands for the direction it looks from.
+        Placement AutoPlacement(PropBounds const& bounds, FVector camera, int cameraYaw)
+        {
+            auto dx = double(camera.X) - bounds.Centre.X, dy = double(camera.Y) - bounds.Centre.Y;
+            auto length = std::hypot(dx, dy);
+            if (length < 1)
+            {
+                auto const yaw = cameraYaw * Pi / 32768.0;
+                dx = -std::cos(yaw);
+                dy = -std::sin(yaw);
+                length = 1;
+            }
+            dx /= length;
+            dy /= length;
+            // Where the ray from the centre toward the camera leaves the box.
+            auto exit = 1e30;
+            if (std::fabs(dx) > 1e-6) exit = std::min(exit, bounds.Extent.X / std::fabs(dx));
+            if (std::fabs(dy) > 1e-6) exit = std::min(exit, bounds.Extent.Y / std::fabs(dy));
+            auto const out = exit + 0.5 * bounds.Radius;
+            FVector const at{ static_cast<float>(bounds.Centre.X + dx * out), static_cast<float>(bounds.Centre.Y + dy * out),
+                              bounds.Centre.Z + bounds.Extent.Z + 0.5f * bounds.Radius };
+            return { at, std::max({ MinAutoRadius, 2.5f * bounds.Radius, Distance(at, bounds.Centre) / AutoReach }) };
+        }
+
+        /// What a fresh Auto light would give a prop (T): the seed's brightness and colour, Auto light's place and radius (at),
+        /// falloff 2. Nothing for a prop that needs a radius over MaxAutoRadius: Auto light and L add no light for it, so there
+        /// is nothing to fall short of (no "L adds one", no drag warning).
+        float Target(PropBounds const& bounds, Placement const& at, Seed const& seed)
+        {
+            if (at.Radius > MaxAutoRadius) return 0;
+            return seed.Brightness * Luminance(seed.Color) * Attenuation(Distance(at.Location, bounds.Centre), at.Radius, 2);
+        }
+
+        /// Why Auto light and L add no light for a prop that needs a radius over MaxAutoRadius from where the view is.
+        std::string TooBig(std::string const& prop, float radius)
+        {
+            return std::format("{} is too big for one prop light: from here it needs radius {:.0f}, over the cap of {:.0f} (a prop light "
+                               "lights every prop within its radius)",
+                               prop, radius, MaxAutoRadius);
+        }
+
+        /// What a prop too big for one prop light is told to use instead.
+        constexpr char const RoomLightHint[] = "a room light (Lights tab) lights it with the walls around it";
+
+        /// E over T; a target of nothing is met (no light could add to it).
+        float ShareOf(float received, float target) { return target > 0 ? received / target : 1.f; }
+
         // ! Edits
         // ========================================
 
@@ -570,8 +998,11 @@ namespace MeleBridge::Editor
             e.LevelIndex = -1;
         }
 
+        float ExtentOf(AActor* actor);
+
         /// An edit takes an actor as it stands, shown: hidden by the game (Kismet) is not deleted by the editor, and the flags it
-        /// has are the ones undo gives back. The Put that follows hides it if the edit is deleted.
+        /// has are the ones undo gives back. The Put that follows hides it if the edit is deleted. Every caller binds an actor
+        /// nothing has written to yet (a level's, as its file has it, or a fresh spawn): its bounds are taken then.
         void Bind(Edit& e, AActor* actor)
         {
             e.Actor = actor;
@@ -582,7 +1013,12 @@ namespace MeleBridge::Editor
             e.Pending = false;
             e.PendingWhy.clear();
             e.Deleted = false;
-            e.ShownFlags = FlagsOf(actor);
+            // A light's bHidden is its class default, not a delete: Put switches a light off instead of hiding it. Its edit has its
+            // settings; one from an entry without them (none should be) takes the light's own.
+            e.ShownFlags = IsLight(actor) ? HideFlags{} : FlagsOf(actor);
+            if (IsLight(actor) && !e.Light) e.Light = LightOf(actor);
+            e.FileExtent.reset();
+            if (auto const extent = Visible(actor) ? ExtentOf(actor) : 0.f; extent > 0) e.FileExtent = extent;
         }
 
         /// The edit bound to an actor, if any.
@@ -594,22 +1030,51 @@ namespace MeleBridge::Editor
             return it != G.Edits.end() ? &*it : nullptr;
         }
 
+        /// Whether an actor's tag is in one of levels.json's lists (props or lights) for its level, as lower-case instanced text.
+        bool Listed(std::unordered_map<std::string, std::unordered_set<std::string>> const& lists, AActor* actor)
+        {
+            auto const level = lists.find(Lower(LevelOf(actor)));
+            return level != lists.end() && level->second.contains(Lower(NameText(actor->Tag)));
+        }
+
+        /// A light the editor lists and lets be picked (docs/07 §11): one it spawned (or a session entry's light), or a built
+        /// lights: entry of our YAMLs (levels.json's lights tags of its level). Vanilla lights (baked into the level) and NPC lights
+        /// (edited in the YAML) are neither.
+        bool ListedLight(AActor* actor)
+        {
+            if (!IsLight(actor)) return false;
+            auto const edit = EditOf(actor);
+            return (edit != nullptr && edit->Light) || Listed(G.Ours.Lights, actor);
+        }
+
+        /// A prop the switch puts on prop lights (docs/07 §11): an editor spawn, or a built prop of our levels (levels.json's props
+        /// tags of its level). Usables, live_place copies and vanilla meshes keep their light environment.
+        bool SwitchedProp(AActor* actor)
+        {
+            if (IsLight(actor)) return false;
+            auto const edit = EditOf(actor);
+            return (edit != nullptr && edit->Spawned) || Listed(G.Ours.Props, actor);
+        }
+
         /// A new edit of an untouched, shown actor, before anything writes to it: its state now, and for a level actor its base
-        /// (what the YAML holds; the build that made it shown did not remove it). Adding an edit moves the others: hold indexes
-        /// across it, not pointers.
+        /// (what the YAML holds; the build that made it shown did not remove it). A light's state is its settings, its on/off the
+        /// component's bEnabled; its base is never removed (a light is switched off, never removed). Adding an edit moves the
+        /// others: hold indexes across it, not pointers.
         Edit& NewEdit(AActor* actor)
         {
             auto& edit = G.Edits.emplace_back();
             Bind(edit, actor);
             edit.Map = ToUtf8(MapName());
             edit.Tag = NameText(actor->Tag);
-            edit.Path = ToUtf8(PathOf(actor));
-            edit.Level = LevelOf(actor);
+            // An actor in a fork is saved under its vanilla path and file: the YAML's vanilla: section names it so.
+            edit.Path = Canonical(ToUtf8(PathOf(actor)), edit.Map);
+            edit.Level = edit.Path.substr(0, edit.Path.find('.'));
             edit.ClassName = ToUtf8(NameOf(actor->Class));
             edit.Now = PoseOf(actor);
             // Spawn() takes them back: the YAML has nothing of a new spawn.
             edit.Base = edit.Now;
             edit.BaseHidden = false;
+            edit.BaseLight = edit.Light;
             return edit;
         }
 
@@ -642,6 +1107,8 @@ namespace MeleBridge::Editor
         /// visible, so the engine updates its collision and touching; raw in a level loaded but not visible.
         void WriteFlags(AActor* actor, HideFlags const& flags, bool visible)
         {
+            // A light is bHidden by class default and has no collision: it is switched off instead (WriteLight).
+            if (IsLight(actor)) return;
             if (visible && Fn.SetHidden != nullptr && Fn.SetCollision != nullptr)
             {
                 AActor_execSetHidden_Parms hide;
@@ -665,6 +1132,14 @@ namespace MeleBridge::Editor
         void SetDeleted(Edit& e, bool deleted, bool visible)
         {
             if (deleted == e.Deleted) return;
+            if (e.Light)
+            {
+                // A spawned light the editor deleted is switched off, not hidden: bEnabled is enabled && !deleted. The caller
+                // reattaches.
+                e.Deleted = deleted;
+                WriteLight(e.Actor, *e.Light, deleted);
+                return;
+            }
             if (deleted)
             {
                 e.ShownFlags = FlagsOf(e.Actor);
@@ -678,11 +1153,22 @@ namespace MeleBridge::Editor
         }
 
         /// Writes a whole state to an edit's actor and to the edit (undo, redo, re-apply): Location, Rotation, DrawScale and
-        /// DrawScale3D raw, hidden or shown, then the components follow, unless the actor's level is loaded but not visible.
+        /// DrawScale3D raw, hidden or shown, then the components follow, unless the actor's level is loaded but not visible. A
+        /// light: its location and its settings (the edit's Light), on as Light->Enabled && !deleted, then one reattach; its
+        /// rotation and scales stay the actor's (only the location counts).
         void Put(Edit& e, Pose const& pose, bool deleted)
         {
             auto const actor = e.Actor;
             auto const visible = Visible(actor);
+            if (e.Light)
+            {
+                actor->Location = pose.Location;
+                e.Now = PoseOf(actor);
+                e.Deleted = deleted;
+                WriteLight(actor, *e.Light, deleted);
+                if (visible) UpdateComponents(actor);
+                return;
+            }
             actor->Location = pose.Location;
             actor->Rotation = pose.Rotation;
             actor->DrawScale = pose.DrawScale;
@@ -697,6 +1183,8 @@ namespace MeleBridge::Editor
         /// shown (the game hides actors too); only the YAML's own removed says the build did it.
         void TakeBuiltHidden(Edit& e)
         {
+            // Never for a light: lights are bHidden by class default, and the YAML never removes one.
+            if (e.Light) return;
             auto const defaults = e.Actor->Class != nullptr ? static_cast<AActor*>(e.Actor->Class->ClassDefaultObject) : nullptr;
             e.ShownFlags = { false, defaults == nullptr || defaults->bCollideActors != 0, defaults == nullptr || defaults->bBlockActors != 0 };
             e.Deleted = true;
@@ -705,13 +1193,44 @@ namespace MeleBridge::Editor
         // ! Undo
         // ========================================
 
-        StepState StateOf(Edit const& e) { return { !e.Deleted, e.ShownFlags, e.Now }; }
+        StepState StateOf(Edit const& e) { return { !e.Deleted, e.ShownFlags, e.Now, e.Light }; }
 
-        /// "move ed_crate_x_1": what the toolbar's Undo and Redo name.
+        std::optional<size_t> LinkOf(Edit const& light);
+
+        /// The light a step writes besides its prop, if it still does. A spawn's or a delete's auto light only while the link
+        /// holds: undone after a save or a tuning, the prop goes and the light, now the user's own, stays. A light that followed a
+        /// drag of its prop whenever it has its actor: undo and redo only put back what the drag did to it, and the light is
+        /// there again as the drag found it or left it once every later step is undone, link or not.
+        std::optional<size_t> AlsoOf(Step const& step)
+        {
+            if (!step.Also || *step.Also >= G.Edits.size() || !Bound(G.Edits[*step.Also])) return std::nullopt;
+            auto const drag = step.Kind == StepKind::Move || step.Kind == StepKind::Turn || step.Kind == StepKind::Scale;
+            if (!drag && LinkOf(G.Edits[*step.Also]) != step.Target) return std::nullopt;
+            return step.Also;
+        }
+
+        /// "move ed_crate_x_1", "spawn ed_crate_x_1 and ed_light_x_2": what the toolbar's Undo and Redo name. A step's light only
+        /// when the step writes it (AlsoOf).
         std::string Label(Step const& step)
         {
-            constexpr char const* Kinds[] = { "spawn", "delete", "move", "turn", "scale" };
-            return std::format("{} {}", Kinds[static_cast<int>(step.Kind)], step.Target < G.Edits.size() ? Called(G.Edits[step.Target]) : "?");
+            constexpr char const* Kinds[] = { "spawn", "delete", "move", "turn", "scale", "change" };
+            std::string kind = Kinds[static_cast<int>(step.Kind)];
+            auto const& before = step.Before.Light;
+            auto const& after = step.After.Light;
+            if (step.Kind == StepKind::Light && before && after && before->Enabled != after->Enabled) kind = after->Enabled ? "switch on" : "switch off";
+            auto text = std::format("{} {}", kind, step.Target < G.Edits.size() ? Called(G.Edits[step.Target]) : "?");
+            if (auto const also = AlsoOf(step)) text += " and " + Called(G.Edits[*also]);
+            return text;
+        }
+
+        /// The props whose prop lighting an edit's change may change (docs/07 §11): a light's change any prop's, a prop's change
+        /// its own. Checked at the end of the tick (Reswitch): this only takes note, since CloseDrag runs in Fail(), which must
+        /// not touch game memory.
+        void NoteChanged(size_t index)
+        {
+            if (index >= G.Edits.size()) return;
+            if (G.Edits[index].Light) G.ReswitchAll = true;
+            else G.Reswitch.insert(index);
         }
 
         /// A new step clears what could be redone.
@@ -722,25 +1241,67 @@ namespace MeleBridge::Editor
             while (G.Undo.size() > MaxSteps) G.Undo.pop_front();
         }
 
-        /// Ends the drag step under way: its after is the edit's state now, read from the edit only, so Fail() can call this. A
-        /// drag that came back where it started leaves no step.
+        /// Ends the drag step under way: its after is the edit's state now, and the followed light's (Follow), read from the edits
+        /// only, so Fail() can call this. The light stays in the step only if it changed; a drag that changed neither leaves no
+        /// step.
         void CloseDrag()
         {
             if (!G.Drag) return;
             auto step = std::move(*G.Drag);
             G.Drag.reset();
+            auto const share = std::exchange(G.DragShare, -1.f);
             if (step.Target >= G.Edits.size()) return;
             step.After = StateOf(G.Edits[step.Target]);
-            if (!SameStep(step.Before, step.After)) PushStep(std::move(step));
+            if (step.Also)
+            {
+                if (*step.Also < G.Edits.size()) step.AlsoAfter = StateOf(G.Edits[*step.Also]);
+                if (*step.Also >= G.Edits.size() || SameStep(step.AlsoBefore, step.AlsoAfter)) step.Also.reset();
+            }
+            // A prop that came back where it started while its light did not (the view moved mid-drag) still leaves a step.
+            if (SameStep(step.Before, step.After) && !step.Also) return;
+            NoteChanged(step.Target);
+            if (step.Also) NoteChanged(*step.Also);
+            // A prop's drag: the reswitch says so when it leaves the prop under half its target (docs/07 §11).
+            if (share >= 0) G.DragWarn = { step.Target, share };
+            PushStep(std::move(step));
         }
 
+        std::optional<float> PropShare(AActor* actor);
+        std::optional<size_t> LinkedLight(size_t prop);
+        std::string NeededBy(AActor* light, AActor* prop);
+        bool Covered(AActor* prop);
+        FVector SideOf(AActor* prop, FVector light);
+
         /// The first drag command of a drag opens its step, with the edit's state before it; one for another edit or tool closes
-        /// the step under way first.
+        /// the step under way first. A prop's share of its target is taken then, for the warning when the drag ends. A prop's
+        /// linked auto light joins the step, to follow it (Follow), with the side of the prop it stands on, unless another shown
+        /// prop needs the light where it is (NeededBy), as a delete of the prop keeps it then. One a drag deleted (DragDeleted)
+        /// joins only while no other light covers the prop: a light added for it since (L, a room light) is the user's choice.
         void OpenDrag(Edit const& edit, StepKind kind)
         {
             auto const index = IndexOf(edit);
             if (G.Drag && (G.Drag->Target != index || G.Drag->Kind != kind)) CloseDrag();
-            if (!G.Drag) G.Drag = Step{ index, kind, StateOf(edit), {} };
+            if (G.Drag) return;
+            G.Drag = Step{ index, kind, StateOf(edit), {} };
+            G.DragShare = -1;
+            G.DragSide = {};
+            if (!edit.Light && Bound(edit))
+            {
+                if (auto const share = PropShare(edit.Actor)) G.DragShare = *share;
+                if (auto const light = LinkedLight(index))
+                {
+                    auto const& made = G.Edits[*light];
+                    if (made.Deleted && Covered(edit.Actor)) return;
+                    if (auto const other = NeededBy(made.Actor, edit.Actor); !other.empty())
+                    {
+                        Say(std::format("{} stays where it is: {} needs it", Called(made), other));
+                        return;
+                    }
+                    G.Drag->Also = light;
+                    G.Drag->AlsoBefore = StateOf(made);
+                    G.DragSide = SideOf(edit.Actor, made.Now.Location);
+                }
+            }
         }
 
         /// Gives the paused world its own bPlayersOnly back, if that world still exists. Called on close and after a failure, so
@@ -796,6 +1357,7 @@ namespace MeleBridge::Editor
             Fn.DynamicLoadObject = find(L"Core.Object.DynamicLoadObject");
             Fn.SetHidden = find(L"Engine.Actor.SetHidden");
             Fn.SetCollision = find(L"Engine.Actor.SetCollision");
+            Fn.SetEnvironmentEnabled = find(L"Engine.LightEnvironmentComponent.SetEnabled");
         }
 
         void SetFreeCam(APlayerController* pc, bool on)
@@ -845,6 +1407,8 @@ namespace MeleBridge::Editor
                     LEASI_INFO("editor: paused {} (bPlayersOnly was {}{})", ToUtf8(PathOf(world)), G.WasPlayersOnly,
                                G.WasPlayersOnly ? ": the game's own pause, given back on close unless the game ends it meanwhile" : "");
                 }
+                // Until then the editor can't tell our levels from vanilla ones: every actor keeps Phase 3's rules.
+                if (!G.Ours.Read && !G.Ours.Problem.empty()) Say(G.Ours.Problem);
             }
             else
             {
@@ -950,16 +1514,857 @@ namespace MeleBridge::Editor
                        ray.WorldOrigin.Z, G.LastPick);
         }
 
-        // ! Changes
+        // ! Vanilla actors
         // ========================================
 
-        /// The selection, for a drag command: none when nothing is selected, or when it is hidden (deleted; undo shows it again).
+        /// levels.json's content into ours and its keys: a missing key, or one of another type, reads as empty, and an unknown
+        /// one is skipped. Tags are kept lower-case: FNames ignore case. Throws BridgeError on a version this bridge doesn't know.
+        void ParseLevels(json const& doc, LevelsFile& ours, std::vector<std::string>& keys)
+        {
+            if (!doc.is_object()) throw BridgeError("not a JSON object");
+            if (auto const version = doc.find("version"); version != doc.end() && (!version->is_number() || version->get<double>() != 1))
+                throw BridgeError(std::format("version {}, and this bridge reads version 1", version->dump()));
+            ours.Dlc = Text(doc, "dlc");
+            auto const levels = doc.find("levels");
+            if (levels == doc.end() || !levels->is_object()) return;
+            for (auto const& item : levels->items())
+            {
+                auto const key = Lower(item.key());
+                auto& streams = ours.Streams[key];
+                keys.push_back(item.key());
+                auto const& level = item.value();
+                if (!level.is_object()) continue;
+                if (auto const list = level.find("streams"); list != level.end() && list->is_array())
+                {
+                    for (auto const& name : *list)
+                    {
+                        if (name.is_string()) streams.push_back(name.get<std::string>());
+                    }
+                }
+                // The props the switch may change and the lights the editor lists (docs/07 §11), by tag.
+                for (auto const& [field, tags] : { std::pair{ "props", &ours.Props }, std::pair{ "lights", &ours.Lights } })
+                {
+                    auto const list = level.find(field);
+                    if (list == level.end() || !list->is_array()) continue;
+                    auto& set = (*tags)[key];
+                    for (auto const& tag : *list)
+                    {
+                        if (tag.is_string()) set.insert(Lower(tag.get<std::string>()));
+                    }
+                }
+            }
+        }
+
+        /// levels.json (docs/07 §11), read again on each map change: level_build rewrites it. A missing or broken file reads as
+        /// unknown, and every actor keeps Phase 3's rules.
+        void ReadLevels()
+        {
+            auto& ours = G.Ours;
+            ours = {};
+            auto summary = std::make_shared<LevelsState>();
+            try
+            {
+                auto const file = std::filesystem::path(DataFolder()) / L"levels.json";
+                summary->File = ToUtf8(file.wstring());
+                if (!std::filesystem::exists(file))
+                {
+                    ours.Problem = "levels.json missing: run mod_build";
+                }
+                else
+                {
+                    std::ifstream in(file, std::ios::binary);
+                    ParseLevels(json::parse(in), ours, summary->Levels);
+                    ours.Read = true;
+                }
+            }
+            catch (std::exception const& e)
+            {
+                ours = {};
+                summary->Levels.clear();
+                ours.Problem = std::format("levels.json can't be read ({}): run mod_build", e.what());
+            }
+            summary->Problem = ours.Problem;
+            summary->Dlc = ours.Dlc;
+            for (auto const& [level, tags] : ours.Props) summary->Props += static_cast<int>(tags.size());
+            for (auto const& [level, tags] : ours.Lights) summary->Lights += static_cast<int>(tags.size());
+            ours.Summary = std::move(summary);
+            if (ours.Read)
+                LEASI_INFO("editor: {}: {} levels of ours, in {}; {} built props switched, {} lights listed", ours.Summary->File, ours.Streams.size(),
+                           ours.Dlc.empty() ? "no dlc folder" : ours.Dlc, ours.Summary->Props, ours.Summary->Lights);
+            else
+                LEASI_WARN("editor: {}; until then every actor keeps Phase 3's rules", ours.Problem);
+        }
+
+        /// The file an object was loaded from: its linker's, while the game keeps the linker attached. Empty otherwise: a cooked
+        /// game may detach a level's linker once it is loaded, and an actor spawned at run time never had one.
+        std::string FileOf(UObject* object)
+        {
+            // Looked up once: a class FindClass doesn't find is looked for again on each call, through every object.
+            static UClass* const linkerClass = ULinker::StaticClass();
+            auto const linker = object != nullptr ? object->Linker : nullptr;
+            if (!Real(linker) || !linker->IsA(linkerClass)) return {};
+            std::wstring file(linker->Filename.Chars(), linker->Filename.Length());
+            while (!file.empty() && file.back() == L'\0') file.pop_back();
+            return ToUtf8(file);
+        }
+
+        /// Whether a file's path has this folder as one of its parts (either slash, any case).
+        bool InFolder(std::string const& file, std::string const& folder)
+        {
+            for (size_t start = 0;;)
+            {
+                auto const end = file.find_first_of("\\/", start);
+                if (SameText(file.substr(start, end == std::string::npos ? std::string::npos : end - start), folder)) return true;
+                if (end == std::string::npos) return false;
+                start = end + 1;
+            }
+        }
+
+        /// One of our levels (docs/07 §11): a levels.json key, or a file in our DLC folder that is not a fork by the rule (a level
+        /// of ours built before levels.json had it). The level by name, and its object (an actor's Outer) for its linker's file.
+        bool OurLevel(std::string const& level, UObject* levelObject)
+        {
+            if (G.Ours.Streams.contains(Lower(level))) return true;
+            if (G.Ours.Dlc.empty() || !VanillaOf(level, ToUtf8(MapName())).empty()) return false;
+            return InFolder(FileOf(levelObject), G.Ours.Dlc);
+        }
+
+        /// What to do when OurLevel can't tell, or empty: a level that is not a levels.json key, not a fork by the rule, not a file
+        /// a key streams (those are vanilla), and whose linker is detached, so its file is unknown. A level of ours that no build
+        /// since Phase 4 has written into levels.json (a level_build of another YAML writes only its own key) then reads as
+        /// vanilla: the gate refuses its npcs and usables, and its edits read as dev-only. Refusal and ShipsOf say so.
+        std::string Unsure(std::string const& level, UObject* levelObject)
+        {
+            if (!G.Ours.Read || G.Ours.Streams.contains(Lower(level)) || !VanillaOf(level, ToUtf8(MapName())).empty()) return {};
+            for (auto const& [key, streams] : G.Ours.Streams)
+            {
+                if (std::any_of(streams.begin(), streams.end(), [&](std::string const& file) { return SameText(file, level); })) return {};
+            }
+            if (!FileOf(levelObject).empty()) return {};
+            return std::format("{} is not in levels.json and its file can't be read: if it is ours, run mod_build", level);
+        }
+
+        bool SpawnedByEditor(AActor* actor)
+        {
+            auto const edit = EditOf(actor);
+            return edit != nullptr && edit->Spawned;
+        }
+
+        /// Changed under Phase 3's rules (docs/07 §10): an editor spawn, an actor of one of our levels, or any actor while
+        /// levels.json is missing. Any other actor is a vanilla one, which the refusal gate below decides on.
+        bool Phase3Rules(AActor* actor)
+        {
+            return !G.Ours.Read || SpawnedByEditor(actor) || OurLevel(LevelOf(actor), actor->Outer);
+        }
+
+        /// The classes of a vanilla level the editor changes: props. Matched up the class chain, by name.
+        constexpr char const* EditableClasses[] = { "StaticMeshActor", "BioInert" };
+
+        /// Why the editor leaves a vanilla actor of a class alone: the first of these up its class chain says it.
+        struct ClassReason
+        {
+            char const* Class;
+            char const* Why;
+        };
+        constexpr ClassReason ClassReasons[] = {
+            { "BioDoor", "doors carry Kismet and door volumes" },
+            { "BioUseable", "usables carry Kismet" },
+            { "BioArtPlaceable", "placeables carry Kismet" },
+            { "Pawn", "npcs carry Kismet and AI" },
+            { "Controller", "npcs carry Kismet and AI" },
+            { "CoverLink", "the AI's cover" },
+            { "CoverSlotMarker", "the AI's cover" },
+            { "PathNode", "the AI's paths" },
+            { "NavigationPoint", "the AI's paths" },
+            { "BioTriggerStream", "it streams the map's levels" },
+            { "Volume", "volumes carry Kismet, streaming and physics" },
+            { "Brush", "the level's geometry" },
+            { "StaticLightCollectionActor", "the level's baked lights" },
+            { "Light", "vanilla lights are baked into the level" },
+            { "Emitter", "effects are not edited" },
+            { "InterpActor", "Kismet moves it" },
+            { "SkeletalMeshActor", "Kismet and matinees animate it" },
+            { "Trigger", "triggers carry Kismet" },
+        };
+
+        /// "a BioDoor", "an Emitter".
+        std::string Article(std::string const& name)
+        {
+            auto const vowel = !name.empty() && std::strchr("AEIOUaeiou", name[0]) != nullptr;
+            return (vowel ? "an " : "a ") + name;
+        }
+
+        /// Why a vanilla actor's class keeps the editor away ("a BioDoor: doors carry Kismet and door volumes"), or empty for a
+        /// prop: a StaticMeshActor or a BioInert, or a class derived from one.
+        std::string ClassRefusal(UClass* cls)
+        {
+            char const* why = nullptr;
+            for (UStruct const* s = cls; s != nullptr; s = static_cast<UStruct const*>(s->SuperField))
+            {
+                auto const name = ToUtf8(NameOf(s));
+                auto const named = [&](char const* c) { return SameText(name, c); };
+                if (std::any_of(std::begin(EditableClasses), std::end(EditableClasses), named)) return {};
+                auto const known = std::find_if(std::begin(ClassReasons), std::end(ClassReasons), [&](ClassReason const& r) { return named(r.Class); });
+                if (why == nullptr && known != std::end(ClassReasons)) why = known->Why;
+            }
+            if (why == nullptr) why = "only StaticMeshActors and BioInerts of a vanilla level are edited";
+            return std::format("{}: {}", Article(ToUtf8(NameOf(cls))), why);
+        }
+
+        /// Loaded from a level file, not spawned at run time (by the game, or live_place): it has a linker, or the load flags its
+        /// export gave it (RF_LoadForClient, RF_LoadForServer, RF_LoadForEdit: a cooked game may detach a level's linker once
+        /// the level is loaded). Spawn sets neither.
+        bool FromFile(AActor* actor)
+        {
+            constexpr unsigned long long LoadFlags = 0x0007000000000000;
+            return actor->Linker != nullptr || (static_cast<unsigned long long>(actor->ObjectFlags) & LoadFlags) != 0;
+        }
+
+        /// An actor's primitive components: Components (its file's) and AllComponents (those attached at run time too).
+        std::vector<UPrimitiveComponent*> PrimitivesOf(AActor* actor)
+        {
+            std::vector<UPrimitiveComponent*> found;
+            auto const primitive = UPrimitiveComponent::StaticClass();
+            for (auto const list : { &actor->Components, &actor->AllComponents })
+            {
+                for (auto const component : *list)
+                {
+                    if (!Real(component) || !component->IsA(primitive)) continue;
+                    auto const p = static_cast<UPrimitiveComponent*>(component);
+                    if (std::find(found.begin(), found.end(), p) == found.end()) found.push_back(p);
+                }
+            }
+            return found;
+        }
+
+        /// The largest half-extent of an actor's primitives' world boxes (Bounds.BoxExtent: each part's box turned and scaled as the
+        /// actor stands now); 0 with none.
+        float ExtentOf(AActor* actor)
+        {
+            auto extent = 0.f;
+            for (auto const p : PrimitivesOf(actor)) extent = std::max({ extent, p->Bounds.BoxExtent.X, p->Bounds.BoxExtent.Y, p->Bounds.BoxExtent.Z });
+            return extent;
+        }
+
+        /// The room-shell test's measure (docs/07 §11): ExtentOf the actor as its level file has it, before the editor's own edits,
+        /// as editor_import and the build measure it at the file's pose. A scale or a turn made in the editor then never turns a
+        /// prop into a room shell halfway through a drag, nor locks it after one. An actor with no edit stands as its file has
+        /// it; an edit took the measure when it bound the actor (Bind). One bound while its level was not visible (a pass wrote
+        /// its pose before its components attached): today's boxes, each world axis scaled back by the base's total scale over
+        /// today's, the local axes' ratios weighted by how much of each lies along that world axis (exact for a turn by right
+        /// angles). A turn since the base can't be taken back out of a world box: it stays in the measure.
+        float FileExtentOf(AActor* actor)
+        {
+            auto const edit = EditOf(actor);
+            if (edit != nullptr && edit->FileExtent) return *edit->FileExtent;
+            double back[3] = { 1, 1, 1 };
+            if (edit != nullptr && edit->Base)
+            {
+                auto const& base = *edit->Base;
+                double const was[3] = { base.DrawScale * base.DrawScale3D.X, base.DrawScale * base.DrawScale3D.Y, base.DrawScale * base.DrawScale3D.Z };
+                double const now[3] = { actor->DrawScale * actor->DrawScale3D.X, actor->DrawScale * actor->DrawScale3D.Y, actor->DrawScale * actor->DrawScale3D.Z };
+                double axes[3][3];
+                AxesOf(actor->Rotation, axes);
+                for (int world = 0; world < 3; world++)
+                {
+                    auto ratio = 0.0;
+                    for (int local = 0; local < 3; local++)
+                    {
+                        auto const r = was[local] / now[local];
+                        ratio += axes[local][world] * axes[local][world] * (std::isfinite(r) && r > 0 ? r : 1);
+                    }
+                    back[world] = ratio;
+                }
+            }
+            auto extent = 0.0;
+            for (auto const p : PrimitivesOf(actor))
+            {
+                auto const& e = p->Bounds.BoxExtent;
+                extent = std::max({ extent, e.X * back[0], e.Y * back[1], e.Z * back[2] });
+            }
+            return static_cast<float>(extent);
+        }
+
+        /// Why Delete refuses an actor under Phase 3's rules (docs/07 §10).
+        std::string Undeletable(AActor* actor)
+        {
+            if (actor->IsA(APawn::StaticClass()) || actor->IsA(AController::StaticClass())) return "pawns and controllers are not deleted";
+            if (actor->bStatic)
+            {
+                return G.Ours.Read ? "a static actor of one of our levels (baked into its lighting): change it in its YAML"
+                                   : "a static actor (baked into the level's lighting): " + G.Ours.Problem;
+            }
+            if (actor->bNoDelete) return "the engine won't destroy it (bNoDelete)";
+            return {};
+        }
+
+        /// Why the vanilla gate refuses an actor (docs/07 §11); empty when it may change: a prop (by class) loaded from its file and
+        /// not a room shell (measured as its file has it: FileExtentOf), and, to be deleted, with no part that stays drawn while
+        /// it is hidden. bStatic and bNoDelete no longer refuse it: hiding destroys nothing.
+        std::string VanillaRefusal(AActor* actor, bool deleting)
+        {
+            if (deleting && (actor->IsA(APawn::StaticClass()) || actor->IsA(AController::StaticClass()))) return "pawns and controllers are not deleted";
+            if (auto why = ClassRefusal(actor->Class); !why.empty()) return why;
+            if (!FromFile(actor)) return "spawned at run time: no level file has it";
+            // Its size in metres: a box twice its extent.
+            if (auto const extent = FileExtentOf(actor); extent > MaxPropExtent)
+                return std::format("a room shell ({:.0f} m): hiding it opens the room", extent * 2 / 100);
+            if (deleting)
+            {
+                auto const parts = PrimitivesOf(actor);
+                if (std::any_of(parts.begin(), parts.end(), [](UPrimitiveComponent* p) { return p->bIgnoreOwnerHidden != 0; }))
+                    return "a part of it ignores its owner's bHidden (bIgnoreOwnerHidden): hidden, it would stay drawn";
+            }
+            return {};
+        }
+
+        /// Why the editor refuses to delete an actor (deleting), or to move, turn or scale it; empty when it may (docs/07 §11). An
+        /// editor spawn and an actor of our levels keep Phase 3's rules, and so does every actor while levels.json is missing. Any
+        /// other actor is a vanilla one: VanillaRefusal. When the bridge can't tell whether its level is ours (Unsure), the
+        /// refusal says what to do.
+        std::string NameFor(AActor* actor);
+
+        std::string Refusal(AActor* actor, bool deleting)
+        {
+            if (IsLight(actor))
+            {
+                // A light is never hidden nor destroyed: Delete switches it off, so bStatic and bNoDelete don't matter (docs/07
+                // §11). Only a listed one is edited, a spawned one already deleted is not deleted again, and a light of the YAML
+                // already off is not switched off again (that would only make an edit that changes nothing).
+                if (!ListedLight(actor))
+                    return "a light the editor doesn't list: NPC lights are edited in the YAML (npcs: lights:), and vanilla lights are "
+                           "baked into the level";
+                auto const edit = EditOf(actor);
+                if (deleting && edit != nullptr && edit->Deleted) return std::format("{} is deleted already", Called(*edit));
+                if (deleting && (edit == nullptr || !edit->Spawned) && !(edit != nullptr && edit->Light ? edit->Light->Enabled : LightOf(actor).Enabled))
+                    return std::format("{} is switched off already (a light of the YAML is switched off, never removed)",
+                                       edit != nullptr ? Called(*edit) : NameFor(actor));
+                return {};
+            }
+            if (Phase3Rules(actor)) return deleting ? Undeletable(actor) : std::string{};
+            auto why = VanillaRefusal(actor, deleting);
+            if (why.empty()) return why;
+            if (auto const unsure = Unsure(LevelOf(actor), actor->Outer); !unsure.empty()) why += "; " + unsure;
+            return why;
+        }
+
+        /// Whether the running map streams a file now: a WorldInfo.StreamingLevels entry names it.
+        bool StreamsNow(AWorldInfo* world, std::string const& file)
+        {
+            for (auto const streaming : world->StreamingLevels)
+            {
+                if (streaming != nullptr && SameText(NameText(streaming->PackageName), file)) return true;
+            }
+            return false;
+        }
+
+        /// Whether an edit of a vanilla actor ships (docs/07 §11): the actor stands in a fork already, or in a vanilla file the
+        /// running map streams (its levels.json streams), which the next build forks. Anything else is dev-only: the bridge
+        /// re-applies it, no build ships it (and when the bridge can't tell whether the level is ours, Unsure says what to do).
+        /// No text for an editor spawn or an actor of our levels.
+        struct Shipping
+        {
+            bool Ships = false;
+            std::string Text;
+        };
+
+        Shipping ShipsOf(AActor* actor, AWorldInfo* world)
+        {
+            if (SpawnedByEditor(actor)) return {};
+            if (!G.Ours.Read) return { false, "ships: unknown, " + G.Ours.Problem };
+            auto const level = LevelOf(actor);
+            if (OurLevel(level, actor->Outer)) return {};
+            auto const map = ToUtf8(MapName());
+            if (!VanillaOf(level, map).empty()) return { true, std::format("ships: forked into {}", level) };
+            if (auto const ours = G.Ours.Streams.find(Lower(map)); ours != G.Ours.Streams.end())
+            {
+                auto const& streams = ours->second;
+                if (std::any_of(streams.begin(), streams.end(), [&](std::string const& file) { return SameText(file, level); }))
+                    return { true, std::format("ships: {} streams it (forked on the next build)", map) };
+            }
+            else if (OurLevel(map, world->Outer) && StreamsNow(world, level))
+            {
+                // A map of ours built before levels.json had it: whether its YAML streams the file, the next build tells.
+                return { false, std::format("ships if {}'s YAML streams it: {} is not in levels.json yet, run mod_build", map, map) };
+            }
+            auto text = std::format("dev-only: no map of ours streams {}", level);
+            if (auto const unsure = Unsure(level, actor->Outer); !unsure.empty()) text += "; " + unsure;
+            return { false, std::move(text) };
+        }
+
+        // ! Prop lighting
+        // ========================================
+
+        /// What the switch writes of a prop (docs/07 §11): its static mesh components that show a mesh through a dynamic light
+        /// environment, and those environments. None for a mesh lit by its lightmap (a StaticMeshActor's): the switch leaves it.
+        struct PropParts
+        {
+            std::vector<UStaticMeshComponent*> Meshes;
+            std::vector<ULightEnvironmentComponent*> Environments;
+        };
+
+        PropParts PartsOf(AActor* actor)
+        {
+            PropParts parts;
+            auto const meshClass = UStaticMeshComponent::StaticClass();
+            auto const environmentClass = UDynamicLightEnvironmentComponent::StaticClass();
+            for (auto const p : PrimitivesOf(actor))
+            {
+                auto const environment = p->LightEnvironment;
+                if (!p->IsA(meshClass) || static_cast<UStaticMeshComponent*>(p)->StaticMesh == nullptr || !Real(environment) || !environment->IsA(environmentClass))
+                    continue;
+                parts.Meshes.push_back(static_cast<UStaticMeshComponent*>(p));
+                if (std::find(parts.Environments.begin(), parts.Environments.end(), environment) == parts.Environments.end()) parts.Environments.push_back(environment);
+            }
+            return parts;
+        }
+
+        /// A prop's bounds: the box around its meshes' world boxes, and the sphere around their spheres. None while a mesh is not
+        /// attached (its level is loaded but not visible): the engine computes bounds when it attaches.
+        std::optional<PropBounds> BoundsOf(PropParts const& parts)
+        {
+            if (parts.Meshes.empty()) return std::nullopt;
+            FVector lo{ 1e30f, 1e30f, 1e30f }, hi{ -1e30f, -1e30f, -1e30f };
+            for (auto const mesh : parts.Meshes)
+            {
+                if (!mesh->bAttached) return std::nullopt;
+                auto const& b = mesh->Bounds;
+                lo = { std::min(lo.X, b.Origin.X - b.BoxExtent.X), std::min(lo.Y, b.Origin.Y - b.BoxExtent.Y), std::min(lo.Z, b.Origin.Z - b.BoxExtent.Z) };
+                hi = { std::max(hi.X, b.Origin.X + b.BoxExtent.X), std::max(hi.Y, b.Origin.Y + b.BoxExtent.Y), std::max(hi.Z, b.Origin.Z + b.BoxExtent.Z) };
+            }
+            PropBounds bounds;
+            bounds.Centre = { (lo.X + hi.X) / 2, (lo.Y + hi.Y) / 2, (lo.Z + hi.Z) / 2 };
+            bounds.Extent = { (hi.X - lo.X) / 2, (hi.Y - lo.Y) / 2, (hi.Z - lo.Z) / 2 };
+            for (auto const mesh : parts.Meshes) bounds.Radius = std::max(bounds.Radius, Distance(bounds.Centre, mesh->Bounds.Origin) + mesh->Bounds.SphereRadius);
+            return bounds;
+        }
+
+        bool StillThere(Tracked const& t) { return Alive(t.Actor, t.Index) && t.Actor->Class == t.Class && !t.Actor->bDeleteMe; }
+
+        /// How the status line names an actor with no edit: its tag when it is a real one, else its object name.
+        std::string NameFor(AActor* actor)
+        {
+            auto const tag = NameText(actor->Tag);
+            return RealTag(tag, ToUtf8(NameOf(actor->Class))) ? tag : ToUtf8(NameOf(actor));
+        }
+
+        /// The listed lights and the switched props of the loaded levels (ListedLight, SwitchedProp), read again when stale. A
+        /// level's tag lists are looked up once per level, so no actor's path is built.
+        void RefreshTracked()
+        {
+            if (!G.TrackedStale) return;
+            G.TrackedStale = false;
+            G.Lights.clear();
+            G.Props.clear();
+            std::unordered_map<AActor*, Edit const*> edits;
+            for (auto const& e : G.Edits)
+            {
+                if (Bound(e)) edits.emplace(e.Actor, &e);
+            }
+            auto const tags = [](std::unordered_map<std::string, std::unordered_set<std::string>> const& lists, std::string const& level) {
+                auto const it = lists.find(level);
+                return it != lists.end() ? &it->second : nullptr;
+            };
+            for (auto const& level : G.Levels)
+            {
+                auto const name = Lower(LevelOf(level.Level));
+                auto const lightTags = tags(G.Ours.Lights, name);
+                auto const propTags = tags(G.Ours.Props, name);
+                for (auto const actor : static_cast<ULevelBase*>(level.Level)->Actors)
+                {
+                    if (!Real(actor) || actor->bDeleteMe) continue;
+                    auto const found = edits.find(actor);
+                    auto const edit = found != edits.end() ? found->second : nullptr;
+                    auto const tagged = [&](std::unordered_set<std::string> const* list) { return list != nullptr && list->contains(Lower(NameText(actor->Tag))); };
+                    if (IsLight(actor))
+                    {
+                        if ((edit != nullptr && edit->Light) || tagged(lightTags)) G.Lights.push_back({ actor, actor->ObjectInternalInteger, actor->Class });
+                    }
+                    else if ((edit != nullptr && edit->Spawned) || tagged(propTags))
+                    {
+                        G.Props.push_back({ actor, actor->ObjectInternalInteger, actor->Class });
+                    }
+                }
+            }
+        }
+
+        /// The listed lights of the visible levels as the prop lighting rule sees them, on or off. A light of a level loaded but not
+        /// visible lights nothing: its components are not attached.
+        std::vector<LightSeen> CoverLights()
+        {
+            RefreshTracked();
+            std::vector<LightSeen> lights;
+            for (auto const& t : G.Lights)
+            {
+                if (!StillThere(t) || !Visible(t.Actor)) continue;
+                auto const component = PointOf(t.Actor);
+                if (component == nullptr) continue;
+                lights.push_back({ t.Actor, t.Actor->Location, LightOf(t.Actor), (BitsOf(component->LightingChannels) & ChannelGameplay4) != 0 });
+            }
+            return lights;
+        }
+
+        /// Whether a seed gives nothing: brightness 0, or black (DarkSeed).
+        bool Dark(Seed const& seed) { return seed.Brightness * Luminance(seed.Color) < DarkSeed; }
+
+        /// A new prop light's brightness and colour (docs/07 §11): the last prop light edited in this map, else the nearest prop
+        /// light that is on, else 0.15 white. One that gives nothing is passed over: the new light would cover its prop, turn it
+        /// black and make its target nothing, so the selection would read 100%.
+        Seed SeedFor(FVector at, std::vector<LightSeen> const& lights)
+        {
+            if (G.LastSeed && !Dark(*G.LastSeed)) return *G.LastSeed;
+            LightSeen const* nearest = nullptr;
+            for (auto const& l : lights)
+            {
+                if (!l.Light.Enabled || l.Light.Kind != LightKind::Props || Dark({ l.Light.Brightness, l.Light.Color })) continue;
+                if (nearest == nullptr || Distance(l.Location, at) < Distance(nearest->Location, at)) nearest = &l;
+            }
+            return nearest != nullptr ? Seed{ nearest->Light.Brightness, nearest->Light.Color } : Seed{};
+        }
+
+        /// How prop lights light a switched prop: whether one covers it, what it gets from them (E), where a fresh Auto light would
+        /// stand and its radius from where the view is (over MaxAutoRadius, Auto light and L add none), and what it would give it
+        /// (T).
+        struct PropLighting
+        {
+            PropBounds Bounds;
+            bool Covered = false;
+            float Received = 0;
+            Placement Auto;
+            float Target = 0;
+        };
+
+        /// Whether a light counts for a prop. A built prop (levels.json props) is switched at its build by the lights: of its own
+        /// file only, so in game only its own level's lights and the editor's spawned ones (imported with it) count; a spawn counts
+        /// them all.
+        bool CountsFor(LightSeen const& light, AActor* prop)
+        {
+            if (auto const edit = EditOf(prop); edit != nullptr && edit->Spawned) return true;
+            auto const edit = EditOf(light.Actor);
+            return (edit != nullptr && edit->Spawned) || Lower(LevelOf(light.Actor)) == Lower(LevelOf(prop));
+        }
+
+        std::vector<LightSeen> LightsFor(AActor* prop, std::vector<LightSeen> const& lights)
+        {
+            std::vector<LightSeen> counted;
+            std::copy_if(lights.begin(), lights.end(), std::back_inserter(counted), [&](LightSeen const& l) { return CountsFor(l, prop); });
+            return counted;
+        }
+
+        /// None for an actor the switch leaves alone, and for a prop with no bounds yet.
+        std::optional<PropLighting> LightingOf(AActor* actor, std::vector<LightSeen> const& all)
+        {
+            if (!SwitchedProp(actor) || !Visible(actor)) return std::nullopt;
+            auto const bounds = BoundsOf(PartsOf(actor));
+            if (!bounds) return std::nullopt;
+            auto const lights = LightsFor(actor, all);
+            PropLighting lighting;
+            lighting.Bounds = *bounds;
+            lighting.Covered = std::any_of(lights.begin(), lights.end(), [&](LightSeen const& l) { return Covers(l, bounds->Centre); });
+            lighting.Received = Received(lights, bounds->Centre);
+            lighting.Auto = AutoPlacement(*bounds, G.ViewLocation, G.ViewYaw);
+            lighting.Target = Target(*bounds, lighting.Auto, SeedFor(bounds->Centre, lights));
+            return lighting;
+        }
+
+        /// E over T for a switched prop; none for anything else.
+        std::optional<float> PropShare(AActor* actor)
+        {
+            auto const lighting = LightingOf(actor, CoverLights());
+            if (!lighting) return std::nullopt;
+            return ShareOf(lighting->Received, lighting->Target);
+        }
+
+        /// Whether a light that counts for a switched prop covers it now.
+        bool Covered(AActor* actor)
+        {
+            auto const lighting = LightingOf(actor, CoverLights());
+            return lighting && lighting->Covered;
+        }
+
+        /// A mesh on the prop lights' channel alone, bInitialized aside.
+        bool OnPropChannel(DWORD bits) { return (bits & ~ChannelInitialized) == ChannelGameplay4; }
+
+        /// The channels a mesh goes back to once no prop light covers it: its own from before the switch first covered it, else its
+        /// archetype's (a prop the build covered: the build writes the archetype's back too), else a dynamic mesh's.
+        DWORD UncoveredChannels(UStaticMeshComponent* mesh)
+        {
+            if (auto const it = G.MeshChannels.find(mesh); it != G.MeshChannels.end() && it->second.first == mesh->ObjectInternalInteger) return it->second.second;
+            auto const archetype = mesh->ObjectArchetype;
+            if (archetype != nullptr && archetype->IsA(UPrimitiveComponent::StaticClass()))
+            {
+                auto const bits = BitsOf(static_cast<UPrimitiveComponent*>(archetype)->LightingChannels);
+                if (!OnPropChannel(bits) && (bits & ~ChannelInitialized) != 0) return bits;
+            }
+            return DynamicMeshChannels;
+        }
+
+        /// SetEnabled when the function was found: the environment drops or takes its lights. Raw otherwise.
+        void SetEnvironment(ULightEnvironmentComponent* environment, bool on)
+        {
+            if (Fn.SetEnvironmentEnabled == nullptr)
+            {
+                environment->bEnabled = on ? 1 : 0;
+                return;
+            }
+            ULightEnvironmentComponent_execSetEnabled_Parms parms;
+            parms.bNewEnabled = on ? 1 : 0;
+            CallProcessEvent(environment, Fn.SetEnvironmentEnabled, &parms);
+        }
+
+        /// The switch of docs/07 §11 for one shown prop of a visible level: covered by a light, its light environment off and its
+        /// meshes on Gameplay_4 alone; not covered, its environment on and its meshes back on their own channels. A prop already so
+        /// is left alone. The environment off first, then the channels, two reattaches (one leaves the environment's lights on the
+        /// old channels: spike), then the environment on again when uncovered. Returns whether it wrote anything.
+        bool SwitchProp(AActor* actor, std::vector<LightSeen> const& lights)
+        {
+            if (actor->bHidden || !Visible(actor)) return false;
+            auto const parts = PartsOf(actor);
+            auto const bounds = BoundsOf(parts);
+            if (!bounds) return false;
+            auto const covered = std::any_of(lights.begin(), lights.end(), [&](LightSeen const& l) { return CountsFor(l, actor) && Covers(l, bounds->Centre); });
+            auto const right = std::all_of(parts.Environments.begin(), parts.Environments.end(), [&](ULightEnvironmentComponent* e) { return (e->bEnabled != 0) != covered; })
+                               && std::all_of(parts.Meshes.begin(), parts.Meshes.end(), [&](UStaticMeshComponent* m) { return OnPropChannel(BitsOf(m->LightingChannels)) == covered; });
+            if (right) return false;
+            for (auto const environment : parts.Environments) SetEnvironment(environment, false);
+            for (auto const mesh : parts.Meshes)
+            {
+                auto const bits = BitsOf(mesh->LightingChannels);
+                if (covered)
+                {
+                    if (!OnPropChannel(bits)) G.MeshChannels[mesh] = { mesh->ObjectInternalInteger, bits };
+                    SetBits(mesh->LightingChannels, CoveredMeshChannels);
+                }
+                else if (OnPropChannel(bits))
+                {
+                    SetBits(mesh->LightingChannels, UncoveredChannels(mesh));
+                }
+            }
+            UpdateComponents(actor);
+            UpdateComponents(actor);
+            if (!covered)
+            {
+                for (auto const environment : parts.Environments) SetEnvironment(environment, true);
+            }
+            return true;
+        }
+
+        /// At the end of the tick: the switch of the props a change, a pass or a spawn asked for (NoteChanged, ReswitchAll), then the
+        /// line for a prop drag that left its prop under half its target.
+        void Reswitch()
+        {
+            if (!G.ReswitchAll && G.Reswitch.empty() && !G.DragWarn) return;
+            auto const lights = CoverLights();
+            std::vector<AActor*> props;
+            if (G.ReswitchAll)
+            {
+                for (auto const& t : G.Props)
+                {
+                    if (StillThere(t)) props.push_back(t.Actor);
+                }
+            }
+            else
+            {
+                for (auto const i : G.Reswitch)
+                {
+                    if (i < G.Edits.size() && Bound(G.Edits[i]) && SwitchedProp(G.Edits[i].Actor)) props.push_back(G.Edits[i].Actor);
+                }
+            }
+            G.ReswitchAll = false;
+            G.Reswitch.clear();
+            auto switched = 0;
+            for (auto const actor : props)
+            {
+                if (SwitchProp(actor, lights)) switched++;
+            }
+            if (switched > 0)
+            {
+                LEASI_INFO("editor: {} prop{} switched between prop lights and their light environment", switched, switched == 1 ? "" : "s");
+                // Paused, a light environment turned on keeps its old light until the world ticks.
+                TickOnce();
+            }
+            auto const warn = std::exchange(G.DragWarn, std::nullopt);
+            if (!warn || warn->first >= G.Edits.size() || !Bound(G.Edits[warn->first])) return;
+            auto const& e = G.Edits[warn->first];
+            if (auto const lighting = LightingOf(e.Actor, lights))
+            {
+                auto const share = ShareOf(lighting->Received, lighting->Target);
+                if (share < DragWarnShare && warn->second >= DragWarnShare)
+                    Say(std::format("{} gets {:.0f}% of its target from prop lights here: L adds one", Called(e), share * 100));
+            }
+        }
+
+        /// Reswitch, guarded on its own: a fault leaves it off until the loaded levels change, as a pass's does. No C++ object may
+        /// live in Guarded's frame, so the work is here.
+        void ReswitchEntry(UObject*)
+        {
+            try
+            {
+                Reswitch();
+            }
+            catch (std::exception const& e)
+            {
+                LEASI_ERROR("editor: prop lighting: {}", e.what());
+            }
+        }
+
+        /// The prop an auto light was made for, while the link holds (docs/07 §11): neither ever saved, and the light unedited (a
+        /// move or a panel change clears MadeFor).
+        std::optional<size_t> LinkOf(Edit const& light)
+        {
+            if (!light.MadeFor || light.EverSaved || *light.MadeFor >= G.Edits.size() || G.Edits[*light.MadeFor].EverSaved) return std::nullopt;
+            return light.MadeFor;
+        }
+
+        /// A prop's linked auto light that a drag of the prop takes along: the link holds, the light has its actor, and it is
+        /// shown or a drag deleted it (DragDeleted). A light the user deleted stays so; Ctrl+Z brings it back, linked.
+        std::optional<size_t> LinkedLight(size_t prop)
+        {
+            for (size_t i = 0; i < G.Edits.size(); i++)
+            {
+                auto const& light = G.Edits[i];
+                if (light.Light && (!light.Deleted || light.DragDeleted) && LinkOf(light) == prop && Bound(light)) return i;
+            }
+            return std::nullopt;
+        }
+
+        /// A shown switched prop other than this one that needs the light, by name: the light covers it and no other light that
+        /// counts for it does, so without the light it would go back to its light environment. Delete keeps a linked light for
+        /// it, and a drag leaves it where it is. A prop another light covers too doesn't need it: it only loses brightness that
+        /// light added on top of its own (a prop spawned beside one already lit gets a light that covers both). Empty for none.
+        std::string NeededBy(AActor* light, AActor* prop)
+        {
+            auto const lights = CoverLights();
+            auto const seen = std::find_if(lights.begin(), lights.end(), [&](LightSeen const& l) { return l.Actor == light; });
+            if (seen == lights.end()) return {};
+            for (auto const& t : G.Props)
+            {
+                if (!StillThere(t) || t.Actor == prop || t.Actor->bHidden || !Visible(t.Actor)) continue;
+                auto const bounds = BoundsOf(PartsOf(t.Actor));
+                if (!bounds || !CountsFor(*seen, t.Actor) || !Covers(*seen, bounds->Centre)) continue;
+                auto const others = std::any_of(lights.begin(), lights.end(), [&](LightSeen const& l) {
+                    return l.Actor != light && CountsFor(l, t.Actor) && Covers(l, bounds->Centre);
+                });
+                if (others) continue;
+                auto const edit = EditOf(t.Actor);
+                return edit != nullptr ? Called(*edit) : NameFor(t.Actor);
+            }
+            return {};
+        }
+
+        /// The side of a prop a light stands on: the horizontal direction from the prop's bounds centre to it, unit length. Zero
+        /// when the prop has no bounds or the light stands right over its centre.
+        FVector SideOf(AActor* prop, FVector light)
+        {
+            auto const bounds = BoundsOf(PartsOf(prop));
+            if (!bounds) return {};
+            auto const dx = light.X - bounds->Centre.X, dy = light.Y - bounds->Centre.Y;
+            auto const length = std::hypot(dx, dy);
+            return length >= 1 ? FVector{ dx / length, dy / length, 0 } : FVector{};
+        }
+
+        /// Where a followed light goes (Follow): the first of these that needs no radius over MaxAutoRadius.
+        /// - Where a fresh Auto light would, from the view now (see Follow).
+        /// - From the side the light stood on when the drag began (DragSide): a view moved to a long side or a corner of the
+        ///   prop can need more than the side the light was placed from, and a move changes nothing of what that side needs.
+        /// - From the box's narrower side, toward the view: the ray leaves the box soonest there, so it needs the smallest radius
+        ///   any view gives.
+        /// Over MaxAutoRadius still, the last: no side fits one prop light, and its radius is the least the prop needs.
+        Placement FollowPlacement(PropBounds const& bounds)
+        {
+            auto at = AutoPlacement(bounds, G.ViewLocation, G.ViewYaw);
+            if (at.Radius <= MaxAutoRadius) return at;
+            // A point 1000 units out on a side stands for a camera there: AutoPlacement only takes its direction.
+            auto const from = [&](FVector side) { return AutoPlacement(bounds, Add(bounds.Centre, Scale(side, 1000)), G.ViewYaw); };
+            if (G.DragSide.X != 0 || G.DragSide.Y != 0)
+            {
+                at = from(G.DragSide);
+                if (at.Radius <= MaxAutoRadius) return at;
+            }
+            auto const alongX = bounds.Extent.X <= bounds.Extent.Y;
+            auto const toward = (alongX ? G.ViewLocation.X - bounds.Centre.X : G.ViewLocation.Y - bounds.Centre.Y) < 0 ? -1.f : 1.f;
+            return from(alongX ? FVector{ toward, 0, 0 } : FVector{ 0, toward, 0 });
+        }
+
+        /// A drag of a prop takes its linked auto light along (docs/07 §11's link), at each drag command, once the prop's
+        /// components were updated (its bounds are where it is now): the light goes where a fresh Auto light would, for the prop's
+        /// bounds now and from the view now, with the radius that gives; its brightness, colour, falloff and kind stay.
+        /// - The view now, not the light's old side: T is measured from it, so the light meets T by construction and neither the
+        ///   drag warning nor the uncovered switch fires; and it lights the faces the user looks at. A kept side could give an
+        ///   elongated prop about half its target (a light at the end of a 3:1 crate seen from its long side).
+        /// - Every command, not only the last: the drag's step holds the light from its first command (OpenDrag) and closes from
+        ///   the edits alone (CloseDrag runs in Fail(), which must not touch game memory), and the prop, lit by the light live,
+        ///   stays lit while it moves instead of darkening until the release.
+        /// When the view now needs a radius over MaxAutoRadius, the light keeps its side, or failing that takes the side that needs
+        /// the least (FollowPlacement): where the view stands never deletes a light that fits from some side. While none does, the
+        /// prop is too big for one prop light and the light is deleted, as Auto light would add none (DragDeleted); it comes back
+        /// once the prop fits, within this drag or a later one, and Ctrl+Z brings both back. Either way the prop is switched at the
+        /// end of this tick (to its light environment, and back), not at the release, so it is never left on a light that is off.
+        void Follow()
+        {
+            if (!G.Drag || !G.Drag->Also) return;
+            auto const target = G.Drag->Target, also = *G.Drag->Also;
+            if (target >= G.Edits.size() || also >= G.Edits.size()) return;
+            auto const& prop = G.Edits[target];
+            auto& light = G.Edits[also];
+            if (!Bound(prop) || !Bound(light) || !light.Light) return;
+            auto const bounds = BoundsOf(PartsOf(prop.Actor));
+            if (!bounds) return;
+            auto const at = FollowPlacement(*bounds);
+            auto const visible = Visible(light.Actor);
+            if (at.Radius > MaxAutoRadius)
+            {
+                // Said once, when it goes: the needed radius changes with every command.
+                if (light.Deleted) return;
+                SetDeleted(light, true, visible);
+                light.DragDeleted = true;
+                if (visible) UpdateComponents(light.Actor);
+                light.Saved = false;
+                NoteChanged(also);
+                Say(std::format("{} is too big for one prop light from any side (radius {:.0f} at least, over {:.0f}): its Auto light {} is "
+                                "deleted with this drag, and comes back once it fits (Ctrl+Z brings both back); {}",
+                                Called(prop), at.Radius, MaxAutoRadius, Called(light), RoomLightHint));
+                return;
+            }
+            auto const back = light.Deleted;
+            if (!back && Near(light.Actor->Location, at.Location, LocationNoise) && std::fabs(light.Light->Radius - at.Radius) <= 0.01f) return;
+            light.Light->Radius = at.Radius;
+            auto pose = light.Now;
+            pose.Location = at.Location;
+            Put(light, pose, false);
+            light.DragDeleted = false;
+            light.Saved = false;
+            if (back)
+            {
+                NoteChanged(also);
+                Say(std::format("{} fits one prop light again: {} follows it", Called(prop), Called(light)));
+            }
+        }
+
+        // ========================================
+
+        /// The selection, for a drag command: none when nothing is selected, when it is hidden (deleted; undo shows it again), or
+        /// when the editor refuses to change it (a vanilla actor that is not a prop, a room shell: Refusal). A light is bHidden by
+        /// class default: it is moved on or off, and only a spawned light the editor deleted is refused.
         AActor* DragTarget(char const* verb)
         {
             if (!SelectionAlive() || Fn.ForceUpdateComponents == nullptr) return nullptr;
-            if (G.Selected->bHidden)
+            if (IsLight(G.Selected))
+            {
+                if (auto const edit = EditOf(G.Selected); edit != nullptr && edit->Deleted)
+                {
+                    SayOnce(std::format("not {}: {} is deleted (Ctrl+Z brings it back)", verb, Called(*edit)));
+                    return nullptr;
+                }
+            }
+            else if (G.Selected->bHidden)
             {
                 SayOnce(std::format("not {}: {} is hidden", verb, ToUtf8(NameOf(G.Selected))));
+                return nullptr;
+            }
+            if (auto const why = Refusal(G.Selected, false); !why.empty())
+            {
+                SayOnce(std::format("not {}: {}", verb, why));
                 return nullptr;
             }
             return G.Selected;
@@ -979,12 +2384,20 @@ namespace MeleBridge::Editor
             UpdateComponents(actor);
             edit->Now.Location = to;
             edit->Saved = false;
+            // A moved auto light is the user's own: it no longer goes with its prop.
+            edit->MadeFor.reset();
+            Follow();
         }
 
         void Rotate(FRotator to)
         {
             auto const actor = DragTarget("turned");
             if (actor == nullptr) return;
+            if (IsLight(actor))
+            {
+                SayOnce("not turned: a light only moves (a point light shines all ways)");
+                return;
+            }
             // npcs keep a yaw in the level YAML: a pawn turns about the vertical only.
             if (actor->IsA(APawn::StaticClass()))
             {
@@ -1000,6 +2413,7 @@ namespace MeleBridge::Editor
             UpdateComponents(actor);
             edit->Now.Rotation = to;
             edit->Saved = false;
+            Follow();
         }
 
         /// DrawScale3D only: DrawScale is never changed by the editor.
@@ -1007,6 +2421,11 @@ namespace MeleBridge::Editor
         {
             auto const actor = DragTarget("scaled");
             if (actor == nullptr) return;
+            if (IsLight(actor))
+            {
+                SayOnce("not scaled: a light only moves (its radius is in the panel)");
+                return;
+            }
             if (actor->IsA(APawn::StaticClass()))
             {
                 SayOnce("not scaled: npcs keep a yaw and no scale");
@@ -1026,25 +2445,87 @@ namespace MeleBridge::Editor
             UpdateComponents(actor);
             edit->Now.DrawScale3D = to;
             edit->Saved = false;
+            Follow();
         }
 
-        /// Why Delete refuses an actor, or empty. Level actors other than props are for Phase 4 (docs/07 §4).
-        std::string Undeletable(AActor* actor)
+        /// The panel's settings for the selected light, all of them: a drag command, one step from the first change to the release.
+        /// A field the command changes is held to the panel's range; one it sends back as the light has it passes as it is, so a
+        /// lights: entry built outside the ranges (a radius of 6000) keeps it when another control moves. A command that changes
+        /// nothing makes no edit. A prop light's brightness and colour seed the next prop light of the map.
+        void SetLight(LightBlock wanted)
         {
-            if (actor->IsA(APawn::StaticClass()) || actor->IsA(AController::StaticClass())) return "pawns and controllers are not deleted";
-            if (actor->bStatic) return "a static actor (baked into the level's lighting): hiding vanilla actors comes in Phase 4";
-            if (actor->bNoDelete) return "the engine won't destroy it (bNoDelete)";
-            return {};
+            auto const actor = DragTarget("changed");
+            if (actor == nullptr || !IsLight(actor)) return;
+            auto const existing = EditOf(actor);
+            auto const now = existing != nullptr && existing->Light ? *existing->Light : LightOf(actor);
+            auto const held = [](float value, float low, float high, float was) {
+                if (value == was) return value;
+                return std::isfinite(value) ? std::clamp(value, low, high) : was;
+            };
+            wanted.Radius = held(wanted.Radius, MinLightRadius, MaxLightRadius, now.Radius);
+            wanted.Brightness = held(wanted.Brightness, 0, MaxBrightness, now.Brightness);
+            wanted.Falloff = held(wanted.Falloff, MinFalloff, MaxFalloff, now.Falloff);
+            for (auto& c : wanted.Color) c = std::clamp(c, 0, 255);
+            if (wanted == now) return;
+            auto const edit = Touch(actor, "changed");
+            if (edit == nullptr || !edit->Light || wanted == *edit->Light) return;
+            OpenDrag(*edit, StepKind::Light);
+            edit->Light = wanted;
+            WriteLight(actor, wanted, edit->Deleted);
+            if (Visible(actor)) UpdateComponents(actor);
+            edit->Saved = false;
+            // Tuned, an auto light is the user's own.
+            edit->MadeFor.reset();
+            if (wanted.Kind == LightKind::Props) G.LastSeed = Seed{ wanted.Brightness, wanted.Color };
         }
 
-        /// Hides the selection without collision (SetHidden, SetCollision), so undo can show it again.
-        void Delete()
+        /// Delete of a listed light (docs/07 §11): switched off, never destroyed nor hidden, so undo writes the old state back to the
+        /// same actor. A built light: light.enabled false, a light step. A spawned light: deleted, like a spawned prop. Refusal has
+        /// turned down a built light already off before anything touches it: it would leave an edit that changes nothing.
+        void DeleteLight(AActor* actor)
+        {
+            auto const touched = Touch(actor, "deleted", Say);
+            if (touched == nullptr || !touched->Light) return;
+            auto& edit = *touched;
+            auto const before = StateOf(edit);
+            auto const visible = Visible(actor);
+            auto kind = StepKind::Delete;
+            std::string text;
+            if (edit.Spawned)
+            {
+                SetDeleted(edit, true, visible);
+                text = std::format("deleted {} (Ctrl+Z brings it back)", Called(edit));
+            }
+            else
+            {
+                edit.Light->Enabled = false;
+                WriteLight(actor, *edit.Light, edit.Deleted);
+                kind = StepKind::Light;
+                text = std::format("switched {} off: a light of the YAML is switched off, never removed (Ctrl+Z switches it on)", Called(edit));
+            }
+            if (visible) UpdateComponents(actor);
+            edit.Saved = false;
+            PushStep({ IndexOf(edit), kind, before, StateOf(edit) });
+            NoteChanged(IndexOf(edit));
+            Select(nullptr);
+            Say(std::move(text));
+        }
+
+        /// Hides the selection without collision (SetHidden, SetCollision), so undo can show it again. A light is switched off
+        /// instead (DeleteLight). A prop's auto light goes with it in the same step while the link holds, unless another shown
+        /// prop needs it (NeededBy).
+        void Delete(AWorldInfo* world)
         {
             if (!SelectionAlive() || Fn.ForceUpdateComponents == nullptr) return;
             auto const actor = G.Selected;
-            if (auto const why = Undeletable(actor); !why.empty())
+            if (auto const why = Refusal(actor, true); !why.empty())
             {
                 Say(std::format("not deleted: {}", why));
+                return;
+            }
+            if (IsLight(actor))
+            {
+                DeleteLight(actor);
                 return;
             }
             if (Fn.SetHidden == nullptr || Fn.SetCollision == nullptr)
@@ -1065,9 +2546,52 @@ namespace MeleBridge::Editor
             SetDeleted(edit, true, visible);
             if (visible) UpdateComponents(actor);
             edit.Saved = false;
-            PushStep({ IndexOf(edit), StepKind::Delete, before, StateOf(edit) });
+            Step step{ IndexOf(edit), StepKind::Delete, before, StateOf(edit) };
+            NoteChanged(step.Target);
+            // Its auto light, while the link holds: deleted with it, unless another shown prop needs it.
+            std::string kept;
+            for (size_t i = 0; i < G.Edits.size(); i++)
+            {
+                auto& light = G.Edits[i];
+                if (LinkOf(light) != step.Target || !Bound(light) || light.Deleted) continue;
+                if (auto const other = NeededBy(light.Actor, actor); !other.empty())
+                {
+                    kept = std::format("; {} stays: {} needs it", Called(light), other);
+                    break;
+                }
+                step.Also = i;
+                step.AlsoBefore = StateOf(light);
+                SetDeleted(light, true, Visible(light.Actor));
+                if (Visible(light.Actor)) UpdateComponents(light.Actor);
+                light.Saved = false;
+                step.AlsoAfter = StateOf(light);
+                NoteChanged(i);
+                break;
+            }
+            auto const withLight = step.Also.has_value();
+            PushStep(std::move(step));
             Select(nullptr);
-            Say(std::format("deleted {} (Ctrl+Z brings it back)", Called(edit)));
+            auto text = std::format("deleted {}{} (Ctrl+Z brings {} back)", Called(edit), withLight ? " and its light" : "", withLight ? "both" : "it");
+            // A vanilla static actor (ours keep Phase 3's refusal): hidden live, its shadow stays baked in the floor's lightmap and
+            // PhysX keeps the body it made at level start. A dev-only one has no build to wait for.
+            if (actor->bStatic)
+            {
+                text += ShipsOf(actor, world).Ships ? ": its baked shadow stays; its physics body stays until the build"
+                                                     : ": its baked shadow and its physics body stay";
+            }
+            Say(text + kept);
+        }
+
+        /// Writes an undo step's state back to an edit's actor and the edit, which is unsaved again: a light's settings too. A
+        /// light deleted so is not one a drag deleted, unless UndoStep says so.
+        void Restore(Edit& e, StepState const& state)
+        {
+            e.ShownFlags = state.ShownFlags;
+            if (state.Light) e.Light = state.Light;
+            Put(e, state.Transform, !state.Shown);
+            e.DragDeleted = false;
+            e.Saved = false;
+            NoteChanged(IndexOf(e));
         }
 
         /// Undo (or redo) the last step: its state is written back to the actor and the edit, which is unsaved again.
@@ -1090,9 +2614,16 @@ namespace MeleBridge::Editor
             }
             auto& edit = G.Edits[step.Target];
             auto const& state = redo ? step.After : step.Before;
-            edit.ShownFlags = state.ShownFlags;
-            Put(edit, state.Transform, !state.Shown);
-            edit.Saved = false;
+            Restore(edit, state);
+            // Its auto light, when the step still writes it (AlsoOf): a spawn's or a delete's while the link holds, a drag's always.
+            if (auto const also = AlsoOf(step))
+            {
+                auto& light = G.Edits[*also];
+                Restore(light, redo ? step.AlsoAfter : step.AlsoBefore);
+                // Deleted in a drag's state, the drag's follow deleted it (only such a deleted light follows): the next drag of
+                // its prop brings it back once the prop fits, as after that drag.
+                if (step.Kind == StepKind::Move || step.Kind == StepKind::Turn || step.Kind == StepKind::Scale) light.DragDeleted = light.Deleted;
+            }
             Select(state.Shown ? edit.Actor : nullptr);
             TickOnce();
             Say(std::format("{} {}", redo ? "redid" : "undid", label));
@@ -1123,8 +2654,8 @@ namespace MeleBridge::Editor
                     if (component->StaticMesh != nullptr && Real(component->Owner))
                     {
                         // Another level before the persistent map: the mod builds that one, which has a mesh only from an earlier
-                        // build or an editor spawn.
-                        auto const level = LevelOf(component->Owner);
+                        // build or an editor spawn. A fork by its vanilla file, which has the same mesh.
+                        auto const level = Canonical(LevelOf(component->Owner), map);
                         auto const it = shownBy.find(component->StaticMesh);
                         if (it == shownBy.end()) shownBy.emplace(component->StaticMesh, level);
                         else if (_stricmp(it->second.c_str(), map.c_str()) == 0) it->second = level;
@@ -1336,9 +2867,169 @@ namespace MeleBridge::Editor
             return actor;
         }
 
+        /// A PointLightMovable with a tag, through CallSpawnWithoutNoDelete: Light's default is bNoDelete, which Spawn refuses (docs/07
+        /// §11). The editor's lights and the ones a pass spawns again both come from here. Null when the engine refuses.
+        AActor* SpawnLight(APlayerController* pc, std::string const& tag, FVector location)
+        {
+            auto const cls = APointLightMovable::StaticClass();
+            auto const defaults = cls != nullptr ? static_cast<AActor*>(cls->ClassDefaultObject) : nullptr;
+            if (Fn.Spawn == nullptr || defaults == nullptr) return nullptr;
+            AActor_execSpawn_Parms spawn;
+            spawn.SpawnClass = cls;
+            spawn.SpawnTag = SFXName(ToWide(tag).c_str(), 0);
+            spawn.SpawnLocation = location;
+            spawn.bNoCollisionFail = 1;
+            CallSpawnWithoutNoDelete(pc, Fn.Spawn, &spawn, defaults);
+            return spawn.ReturnValue;
+        }
+
+        /// A light of the editor's with these settings, every field written (nothing depends on the class defaults), and its edit: a
+        /// spawn the YAML has nothing of. Its edit's index, or none with why (the caller says it: a spawn's status line carries
+        /// it). Adding an edit moves the others.
+        std::optional<size_t> NewLight(APlayerController* pc, LightBlock const& light, FVector at, std::string& why)
+        {
+            if (Fn.Spawn == nullptr)
+            {
+                why = "Actor.Spawn was not found";
+                return std::nullopt;
+            }
+            auto const tag = UniqueTag(L"light");
+            auto const actor = SpawnLight(pc, tag, at);
+            if (!IsLight(actor))
+            {
+                why = "the engine refused to spawn a PointLightMovable";
+                return std::nullopt;
+            }
+            WriteLight(actor, light, false);
+            UpdateComponents(actor);
+            auto& edit = NewEdit(actor);
+            edit.Spawned = true;
+            edit.Light = light;
+            edit.Base.reset();
+            edit.BaseHidden.reset();
+            edit.BaseLight.reset();
+            G.TrackedStale = true;
+            G.ReswitchAll = true;
+            return IndexOf(edit);
+        }
+
+        /// A prop light for a prop (Auto light, L): AutoPlacement's place and radius, the seed's brightness and colour, falloff 2.
+        /// None, with why, when the prop has no bounds yet, or when it needs a radius over MaxAutoRadius from here (TooBig): then
+        /// it keeps what lights it, its light environment unless a light someone placed covers it.
+        std::optional<size_t> LightFor(APlayerController* pc, AActor* prop, std::string& why)
+        {
+            auto const lights = CoverLights();
+            auto const lighting = LightingOf(prop, lights);
+            if (!lighting)
+            {
+                why = std::format("{} has no bounds yet (its level is not visible)", NameFor(prop));
+                return std::nullopt;
+            }
+            auto const& at = lighting->Auto;
+            if (at.Radius > MaxAutoRadius)
+            {
+                auto const big = TooBig(NameFor(prop), at.Radius);
+                why = lighting->Covered ? std::format("{}; {}", big, RoomLightHint) : std::format("{}. It keeps its light environment: {}", big, RoomLightHint);
+                return std::nullopt;
+            }
+            auto const seed = SeedFor(lighting->Bounds.Centre, lights);
+            LightBlock light;
+            light.Brightness = seed.Brightness;
+            light.Color = seed.Color;
+            light.Radius = at.Radius;
+            light.Falloff = 2;
+            return NewLight(pc, light, at.Location, why);
+        }
+
+        /// A new light's undo step: undone, it is deleted (a spawn deleted before its first save leaves nothing).
+        Step SpawnStep(Edit const& e) { return { IndexOf(e), StepKind::Spawn, { false, e.ShownFlags, e.Now, e.Light }, StateOf(e) }; }
+
+        /// The Lights tab's Prop light and Room light: a light over where the view points, selected for the panel. A prop light
+        /// takes the seed's brightness and colour.
+        void AddLight(APlayerController* pc, UCanvas* canvas, bool room)
+        {
+            if (Fn.DeProject == nullptr || Fn.Trace == nullptr)
+            {
+                Say("no light added: Canvas.DeProject or Actor.Trace was not found");
+                return;
+            }
+            auto const floor = SpawnPoint(pc, canvas);
+            LightBlock light;
+            if (room)
+            {
+                light.Kind = LightKind::Room;
+                light.Radius = RoomLightRadius;
+                light.Brightness = RoomLightBrightness;
+            }
+            else
+            {
+                auto const seed = SeedFor(floor, CoverLights());
+                light.Radius = PropLightRadius;
+                light.Brightness = seed.Brightness;
+                light.Color = seed.Color;
+            }
+            std::string why;
+            auto const index = NewLight(pc, light, Add(floor, { 0, 0, room ? RoomLightHeight : PropLightHeight }), why);
+            if (!index)
+            {
+                Say("no light added: " + why);
+                return;
+            }
+            auto const& edit = G.Edits[*index];
+            PushStep(SpawnStep(edit));
+            Select(edit.Actor);
+            TickOnce();
+            Say(std::format("added {} light {} (radius {:.0f}, brightness {:.2f}): the panel tunes it", room ? "a room" : "a prop", Called(edit), light.Radius,
+                            light.Brightness));
+        }
+
+        /// L: a prop light for the selected prop, whatever it gets already, unless it is too big for one (LightFor). The new light is
+        /// selected, for the panel.
+        void PropLight(APlayerController* pc)
+        {
+            if (!SelectionAlive())
+            {
+                Say("L: select a prop first");
+                return;
+            }
+            auto const prop = G.Selected;
+            if (!SwitchedProp(prop))
+            {
+                Say(std::format("L: prop lights light the editor's spawns and the props of our YAMLs, and {} is neither", NameFor(prop)));
+                return;
+            }
+            std::string why;
+            auto const index = LightFor(pc, prop, why);
+            if (!index)
+            {
+                Say("no light added: " + why);
+                return;
+            }
+            auto const& edit = G.Edits[*index];
+            PushStep(SpawnStep(edit));
+            Select(edit.Actor);
+            TickOnce();
+            Say(std::format("added prop light {} for {} (radius {:.0f}, brightness {:.2f})", Called(edit), NameFor(prop), edit.Light->Radius, edit.Light->Brightness));
+        }
+
+        /// A click on a light's icon, or on its row in the Lights tab: the light the editor lists at that path.
+        void PickLight(std::string const& path)
+        {
+            RefreshTracked();
+            for (auto const& t : G.Lights)
+            {
+                if (!StillThere(t) || !SameText(ToUtf8(PathOf(t.Actor)), path)) continue;
+                Select(t.Actor);
+                G.LastPick = std::format("{} (light)", path);
+                return;
+            }
+            G.LastPick = std::format("{}: not a light the editor lists any more", path);
+        }
+
         /// A prop where the view points, facing the camera. The mesh is one in memory (the In this level list, or a catalog entry
         /// a level has), or a catalog entry's copy loaded from the catalog package; the session names the vanilla mesh and a
-        /// vanilla file either way.
+        /// vanilla file either way. With Auto light on, a spawn that no light covers, or that gets under 0.6 of its target from prop
+        /// lights, gets a prop light of its own, in the spawn's step and linked to it (docs/07 §11), unless it is too big for one.
         void Spawn(APlayerController* pc, UCanvas* canvas, Command const& c)
         {
             if (Fn.Spawn == nullptr || Fn.SetStaticMesh == nullptr || Fn.DeProject == nullptr || Fn.Trace == nullptr)
@@ -1376,30 +3067,65 @@ namespace MeleBridge::Editor
                 auto const file = G.MeshFiles.find(Lower(c.Text));
                 edit.MeshFile = file != G.MeshFiles.end() ? file->second : std::string{};
             }
-            // Undone, the prop is hidden; a spawn deleted before any save leaves nothing in the session.
-            PushStep({ IndexOf(edit), StepKind::Spawn, { false, edit.ShownFlags, edit.Now }, StateOf(edit) });
+            auto const index = IndexOf(edit);
+            G.TrackedStale = true;
+            NoteChanged(index);
+            // Only a fresh spawn: a re-applied one's light comes back from its own entry. A spawn no light covers gets one whatever its
+            // share: it would keep its light environment, brighter than vanilla. A fresh Auto light always covers its prop, so every
+            // spawn ends up switched, except one too big for one prop light: it keeps its light environment (its target is nothing,
+            // so only an uncovered one asks), and the status line says why.
+            std::optional<size_t> light;
+            std::string unlit;
+            if (G.AutoLight)
+            {
+                if (auto const lighting = LightingOf(actor, CoverLights());
+                    lighting && (!lighting->Covered || ShareOf(lighting->Received, lighting->Target) < AutoLightShare))
+                    light = LightFor(pc, actor, unlit);
+            }
+            // Undone, the prop is hidden; a spawn deleted before any save leaves nothing in the session. Its auto light goes with it.
+            auto const& prop = G.Edits[index];
+            Step step{ index, StepKind::Spawn, { false, prop.ShownFlags, prop.Now }, StateOf(prop) };
+            std::string lit;
+            if (light)
+            {
+                auto& made = G.Edits[*light];
+                made.MadeFor = index;
+                auto const madeStep = SpawnStep(made);
+                step.Also = light;
+                step.AlsoBefore = madeStep.Before;
+                step.AlsoAfter = madeStep.After;
+                lit = std::format(", with prop light {} (Auto light)", Called(made));
+            }
+            else if (!unlit.empty())
+            {
+                lit = "; Auto light added none: " + unlit;
+            }
+            PushStep(std::move(step));
             Select(actor);
             // Paused, the new actor has no light yet: it would render black.
             TickOnce();
-            Say(loadMs >= 0 ? std::format("spawned {} as {} (loaded from the catalog in {:.0f} ms)", c.Text, tag, loadMs)
-                            : std::format("spawned {} as {}", c.Text, tag));
+            auto const loaded = loadMs >= 0 ? std::format(" (loaded from the catalog in {:.0f} ms)", loadMs) : std::string{};
+            Say(std::format("spawned {} as {}{}{}", c.Text, tag, loaded, lit));
         }
 
         // ! Save
         // ========================================
 
         /// A session entry, version 2 (docs/07 §10). imported is left out: a saved edit is a new state. What an install may still
-        /// show goes into installed instead, and the base keeps whether the YAML removes the actor when an import said so.
+        /// show goes into installed instead, and the base keeps whether the YAML removes the actor when an import said so. A
+        /// light's entry (§11) has no mesh, and a light block beside its pose and in its base; its rotation and scales are the
+        /// actor's.
         json EntryOf(Edit const& e)
         {
             auto const orNull = [](std::string const& text) { return text.empty() ? json(nullptr) : json(text); };
             json mesh = nullptr;
-            if (e.Spawned) mesh = { { "path", e.MeshPath }, { "file", orNull(e.MeshFile) }, { "load", orNull(e.MeshLoad) } };
+            if (e.Spawned && !e.Light) mesh = { { "path", e.MeshPath }, { "file", orNull(e.MeshFile) }, { "load", orNull(e.MeshLoad) } };
             json base = nullptr;
             if (e.Base)
             {
                 base = PoseJson(*e.Base);
                 if (e.BaseHidden) base["deleted"] = *e.BaseHidden;
+                if (e.Light && e.BaseLight) base["light"] = LightJson(*e.BaseLight);
             }
             json entry{
                 { "tag", e.Tag },
@@ -1415,6 +3141,7 @@ namespace MeleBridge::Editor
                 { "deleted", e.Deleted },
                 { "base", base },
             };
+            if (e.Light) entry["light"] = LightJson(*e.Light);
             if (!e.Installed.empty()) entry["installed"] = e.Installed;
             return entry;
         }
@@ -1427,23 +3154,47 @@ namespace MeleBridge::Editor
 
         /// Before Save writes an edit over the file's entry for it: each field the editor didn't change since the edit was last
         /// saved or read takes the entry's value, which an import may have moved on (a YAML value the merge kept, onConflict=yaml
-        /// included). The actor follows when the edit has one. Returns whether anything changed.
+        /// included): the pose's, each of a light block's, and deleted (docs/07 §11). The actor follows when the edit has one (a
+        /// light's settings, then one reattach). Returns whether anything changed.
         bool TakeFileValues(Edit& e, json const& entry)
         {
-            if (!e.SavedPose) return false;
-            auto const& saved = *e.SavedPose;
+            if (!e.SavedState) return false;
+            auto const& saved = *e.SavedState;
             auto const file = PoseFrom(entry, e.Now);
             auto now = e.Now;
-            if (Same(now.Location, saved.Location)) now.Location = file.Location;
-            if (Same(now.Rotation, saved.Rotation)) now.Rotation = file.Rotation;
-            if (now.DrawScale == saved.DrawScale) now.DrawScale = file.DrawScale;
-            if (Same(now.DrawScale3D, saved.DrawScale3D)) now.DrawScale3D = file.DrawScale3D;
+            if (Same(now.Location, saved.Transform.Location)) now.Location = file.Location;
+            if (Same(now.Rotation, saved.Transform.Rotation)) now.Rotation = file.Rotation;
+            if (now.DrawScale == saved.Transform.DrawScale) now.DrawScale = file.DrawScale;
+            if (Same(now.DrawScale3D, saved.Transform.DrawScale3D)) now.DrawScale3D = file.DrawScale3D;
+            auto light = e.Light;
+            if (light && saved.Light && HasLightBlock(entry))
+            {
+                auto const& was = *saved.Light;
+                auto const there = LightFrom(entry, *light);
+                if (light->Kind == was.Kind) light->Kind = there.Kind;
+                if (light->Radius == was.Radius) light->Radius = there.Radius;
+                if (light->Brightness == was.Brightness) light->Brightness = there.Brightness;
+                if (light->Color == was.Color) light->Color = there.Color;
+                if (light->Falloff == was.Falloff) light->Falloff = there.Falloff;
+                if (light->Enabled == was.Enabled) light->Enabled = there.Enabled;
+            }
+            auto deleted = e.Deleted;
+            if (auto const flag = entry.find("deleted"); deleted == saved.Deleted && flag != entry.end() && flag->is_boolean()) deleted = flag->get<bool>();
             if (Same(now.Location, e.Now.Location) && Same(now.Rotation, e.Now.Rotation) && now.DrawScale == e.Now.DrawScale
-                && Same(now.DrawScale3D, e.Now.DrawScale3D))
+                && Same(now.DrawScale3D, e.Now.DrawScale3D) && light == e.Light && deleted == e.Deleted)
                 return false;
             LEASI_INFO("editor: {} takes the session file's values for what it didn't change since its last save (an import moved them on)", Called(e));
-            if (Bound(e)) Put(e, now, e.Deleted);
-            else e.Now = now;
+            e.Light = light;
+            if (Bound(e))
+            {
+                Put(e, now, deleted);
+                NoteChanged(IndexOf(e));
+            }
+            else
+            {
+                e.Now = now;
+                e.Deleted = deleted;
+            }
             return true;
         }
 
@@ -1500,7 +3251,7 @@ namespace MeleBridge::Editor
                     {
                         for (auto const& a : doc.at("actors"))
                         {
-                            auto const key = KeyOf(a);
+                            auto const key = KeyOf(a, map);
                             if (!actors.contains(key)) order.push_back(key);
                             actors[key] = a;
                         }
@@ -1543,11 +3294,14 @@ namespace MeleBridge::Editor
                             // without it holds what it wrote into the YAML: deleted is removed: true there.
                             if (base->contains("deleted")) e->BaseHidden = Flag(*base, "deleted");
                             else if (entry.contains("imported")) e->BaseHidden = Flag(entry, "deleted");
+                            // A light's: what the YAML's lights: entry holds.
+                            if (e->Light && HasLightBlock(*base)) e->BaseLight = LightFrom(*base, e->BaseLight.value_or(*e->Light));
                         }
                         else
                         {
                             e->Base.reset();
                             e->BaseHidden.reset();
+                            e->BaseLight.reset();
                         }
                     }
                     // What an install may still show, from this import and the ones before: the next import's before is the base.
@@ -1627,7 +3381,7 @@ namespace MeleBridge::Editor
                     for (auto const e : write.Written)
                     {
                         e->EverSaved = true;
-                        e->SavedPose = e->Now;
+                        e->SavedState = EntryState{ e->Now, e->Light, e->Deleted };
                         // A new state now, newer than any build: no longer judged as the entry it was read from.
                         e->Source = nullptr;
                     }
@@ -1739,7 +3493,7 @@ namespace MeleBridge::Editor
                 if (version != 1 && version != SessionVersion) throw BridgeError(std::format("version {}, and this bridge reads versions 1 and 2", version));
                 for (auto const& a : doc.at("actors"))
                 {
-                    auto key = KeyOf(a);
+                    auto key = KeyOf(a, map);
                     if (kept.contains(key)) continue;
                     G.Entries.push_back({ a, std::move(key), "not matched yet" });
                 }
@@ -1762,7 +3516,9 @@ namespace MeleBridge::Editor
             G.LevelsChangedAt = GetTickCount64();
             G.PassWanted = true;
             G.PassFaulted = false;
+            G.ReswitchFaulted = false;
             G.SummaryStale = true;
+            G.TrackedStale = true;
             auto const loaded = [](UObject* level, int index) {
                 return std::any_of(G.Levels.begin(), G.Levels.end(), [&](LevelSeen const& l) { return l.Level == level && l.Index == index; });
             };
@@ -1858,7 +3614,8 @@ namespace MeleBridge::Editor
         /// The loaded actor an entry or a detached edit names (docs/07 §10). A spawn: the one actor with its tag (a built copy). A
         /// level actor: by tag when exactly one loaded actor has it, it is a real tag, and that actor is in the entry's level and
         /// of its class (the same tag in another level is another actor while the entry's level isn't loaded); else by path with
-        /// the same class. Null, with why, when there is none or another edit has it.
+        /// the same class. The entry's level is its vanilla file, or the running map's fork of it (§11), found by the rule: the
+        /// path, then the same path in the fork. Null, with why, when there is none or another edit has it.
         AActor* Match(LoadedActors& loaded, bool spawned, std::string const& tag, std::string const& path, std::string const& className,
                       std::string& why)
         {
@@ -1877,15 +3634,21 @@ namespace MeleBridge::Editor
                 why = count == 0 ? "no loaded actor has its tag" : std::format("{} loaded actors have its tag", count);
                 return nullptr;
             }
+            auto const map = ToUtf8(MapName());
             auto const level = path.substr(0, path.find('.'));
-            if (RealTag(tag, className) && tagged.size() == 1 && SameText(LevelOf(tagged[0]), level)
-                && SameText(ToUtf8(NameOf(tagged[0]->Class)), className))
+            auto const fork = ForkName(map, level);
+            auto const inLevel = [&](AActor* candidate) {
+                auto const in = LevelOf(candidate);
+                return SameText(in, level) || SameText(in, fork);
+            };
+            if (RealTag(tag, className) && tagged.size() == 1 && inLevel(tagged[0]) && SameText(ToUtf8(NameOf(tagged[0]->Class)), className))
             {
                 if (!loaded.Taken.contains(tagged[0])) return tagged[0];
                 why = "the actor with its tag has another edit";
                 return nullptr;
             }
-            auto const actor = loaded.AtPath(path);
+            auto actor = loaded.AtPath(path);
+            if (actor == nullptr) actor = loaded.AtPath(ForkPath(path, map));
             auto const actorClass = actor != nullptr ? ToUtf8(NameOf(actor->Class)) : std::string{};
             if (actor != nullptr && SameText(actorClass, className))
             {
@@ -1893,7 +3656,7 @@ namespace MeleBridge::Editor
                 why = "the actor at its path has another edit";
                 return nullptr;
             }
-            if (!loaded.Levels.contains(Lower(level))) why = std::format("{} is not loaded", level);
+            if (!loaded.Levels.contains(Lower(level)) && !loaded.Levels.contains(Lower(fork))) why = std::format("{} is not loaded", level);
             else if (actor != nullptr) why = std::format("the actor at its path is a {}, not a {}", actorClass, className);
             else why = RealTag(tag, className) ? "no loaded actor at its path, and not exactly one with its tag in its level" : "no loaded actor at its path";
             return nullptr;
@@ -1918,11 +3681,13 @@ namespace MeleBridge::Editor
                 std::string Tag, Path, ClassName;
             };
             auto const tag = NameText(actor->Tag);
-            auto const path = ToUtf8(PathOf(actor));
+            // Canonical: an entry names an actor in a fork by its vanilla path.
+            auto const map = ToUtf8(MapName());
+            auto const path = Canonical(ToUtf8(PathOf(actor)), map);
             // Only one that has its tag or its path can match it: the loaded actors are read only then.
             std::vector<Named> named;
             auto const add = [&](bool spawned, std::string const& t, std::string const& p, std::string const& c) {
-                if ((!t.empty() && SameText(t, tag)) || SameText(p, path)) named.push_back({ spawned, t, p, c });
+                if ((!t.empty() && SameText(t, tag)) || SameText(Canonical(p, map), path)) named.push_back({ spawned, t, p, c });
             };
             for (auto const& entry : G.Entries)
             {
@@ -1950,11 +3715,16 @@ namespace MeleBridge::Editor
 
         /// Rules 1 and 2 of docs/07 §10, for an entry and the actor it matched (null: a spawn no loaded actor has the tag of).
         /// builtHidden: the actor is hidden, and the YAML's state it was judged by says the YAML removes it (the build hid it, not
-        /// the game): an entry that shows it shows it again.
+        /// the game): an entry that shows it shows it again. A light is compared by HasLight, and is never built hidden: every
+        /// light is bHidden by class default (§11).
         Verdict Judge(json const& entry, AActor* actor, std::string& why, bool& builtHidden)
         {
-            auto const has = [&](json const& state) { return actor != nullptr && Has(actor, PoseFrom(state, PoseOf(actor)), Flag(state, "deleted")); };
-            auto const hid = [&](json const& state) { return actor != nullptr && actor->bHidden && state.is_object() && Flag(state, "deleted"); };
+            auto const light = IsLight(actor);
+            auto const has = [&](json const& state) {
+                if (actor == nullptr) return false;
+                return light ? HasLight(actor, state, Flag(state, "deleted")) : Has(actor, PoseFrom(state, PoseOf(actor)), Flag(state, "deleted"));
+            };
+            auto const hid = [&](json const& state) { return actor != nullptr && !light && actor->bHidden && state.is_object() && Flag(state, "deleted"); };
             // The base says whether the YAML removes it (rule 3: an entry saved since an import keeps it).
             auto const base = entry.find("base");
             builtHidden = base != entry.end() && hid(*base);
@@ -1994,8 +3764,9 @@ namespace MeleBridge::Editor
             Edit e;
             e.Map = G.SessionMap;
             e.Tag = Text(entry, "tag");
-            e.Path = Text(entry, "path");
-            e.Level = Text(entry, "level");
+            // Canonical, as NewEdit makes them: an entry that named the fork is saved under the vanilla path.
+            e.Path = Canonical(Text(entry, "path"), e.Map);
+            e.Level = Canonical(Text(entry, "level"), e.Map);
             if (e.Level.empty()) e.Level = e.Path.substr(0, e.Path.find('.'));
             e.ClassName = Text(entry, "class");
             e.Spawned = Flag(entry, "spawned");
@@ -2005,11 +3776,14 @@ namespace MeleBridge::Editor
                 e.MeshFile = Text(*mesh, "file");
                 e.MeshLoad = Text(*mesh, "load");
             }
+            // A light's settings (docs/07 §11); a field the block lacks is a fresh light's.
+            if (HasLightBlock(entry)) e.Light = LightFrom(entry, LightBlock{});
             if (auto const base = entry.find("base"); base != entry.end() && base->is_object())
             {
                 // As Save reads it: the base's deleted, else what an import's entry wrote into the YAML.
                 if (base->contains("deleted")) e.BaseHidden = Flag(*base, "deleted");
                 else if (entry.contains("imported")) e.BaseHidden = Flag(entry, "deleted");
+                if (e.Light && HasLightBlock(*base)) e.BaseLight = LightFrom(*base, *e.Light);
             }
             e.Installed = Candidates(entry);
             e.Source = entry;
@@ -2066,7 +3840,8 @@ namespace MeleBridge::Editor
             return it != G.CatalogLoads.end() ? it->second : std::string{};
         }
 
-        /// Our own spawn, replaced by the built copy: destroyed, or hidden if the engine refuses.
+        /// Our own spawn, replaced by the built copy: destroyed, or hidden if the engine refuses (a light switched off: it is never
+        /// hidden).
         void DestroySpawn(AActor* actor)
         {
             if (Fn.Destroy != nullptr)
@@ -2075,7 +3850,8 @@ namespace MeleBridge::Editor
                 CallProcessEvent(actor, Fn.Destroy, &destroy);
                 if (destroy.ReturnValue) return;
             }
-            WriteFlags(actor, { true, false, false }, Visible(actor));
+            if (IsLight(actor)) WriteLight(actor, LightOf(actor), true);
+            else WriteFlags(actor, { true, false, false }, Visible(actor));
             UpdateComponents(actor);
         }
 
@@ -2083,14 +3859,38 @@ namespace MeleBridge::Editor
         /// them), else the catalog package's copy by mesh.load, else by the catalog entry with that vanilla mesh. Returns how many.
         int Respawn(APlayerController* pc, std::vector<size_t> const& which)
         {
-            if (which.empty()) return 0;
+            // Lights first: a light has no mesh, and comes back through the same helper as the editor's (docs/07 §11).
+            int count = 0;
+            std::vector<size_t> props;
+            for (auto const i : which)
+            {
+                auto& e = G.Edits[i];
+                if (!e.Light)
+                {
+                    props.push_back(i);
+                    continue;
+                }
+                auto const actor = SpawnLight(pc, e.Tag, e.Now.Location);
+                if (!IsLight(actor))
+                {
+                    e.PendingWhy = Fn.Spawn == nullptr ? "spawning is off: Actor.Spawn was not found" : "the engine refused to spawn it again";
+                    continue;
+                }
+                auto const pose = e.Now;
+                Bind(e, actor);
+                e.Rebindable = true;
+                Put(e, pose, false);
+                count++;
+                LEASI_INFO("editor: spawned {} again as {}", e.Tag, ToUtf8(PathOf(actor)));
+            }
+            if (props.empty()) return count;
             if (Fn.Spawn == nullptr || Fn.SetStaticMesh == nullptr)
             {
-                for (auto const i : which) G.Edits[i].PendingWhy = "spawning is off: Actor.Spawn or DynamicSMActor.SetStaticMesh was not found";
-                return 0;
+                for (auto const i : props) G.Edits[i].PendingWhy = "spawning is off: Actor.Spawn or DynamicSMActor.SetStaticMesh was not found";
+                return count;
             }
             std::unordered_set<std::string> wanted;
-            for (auto const i : which)
+            for (auto const i : props)
             {
                 if (!G.Edits[i].MeshPath.empty()) wanted.insert(Lower(G.Edits[i].MeshPath));
                 if (!G.Edits[i].MeshLoad.empty()) wanted.insert(Lower(G.Edits[i].MeshLoad));
@@ -2101,8 +3901,7 @@ namespace MeleBridge::Editor
                 return it != inMemory.end() ? it->second : nullptr;
             };
 
-            int count = 0;
-            for (auto const i : which)
+            for (auto const i : props)
             {
                 auto& e = G.Edits[i];
                 if (e.MeshPath.empty())
@@ -2145,11 +3944,17 @@ namespace MeleBridge::Editor
         }
 
         /// A version 1 entry's base (rule 2): the actor as the YAML built it, before applying. Shown, the build did not remove it;
-        /// hidden, the game may have hidden it: whether the YAML removes it stays unknown.
+        /// hidden, the game may have hidden it: whether the YAML removes it stays unknown. A light: its settings as built, on as
+        /// its bEnabled; the YAML never removes one.
         void TakeBase(Edit& e, AActor* actor)
         {
             e.Base = PoseOf(actor);
-            if (!actor->bHidden) e.BaseHidden = false;
+            if (IsLight(actor))
+            {
+                e.BaseLight = LightOf(actor);
+                e.BaseHidden = false;
+            }
+            else if (!actor->bHidden) e.BaseHidden = false;
         }
 
         /// An edit takes over the loaded actor it waited for: a spawn's built copy (ours, spawned again, is destroyed), or the
@@ -2180,13 +3985,16 @@ namespace MeleBridge::Editor
             if (verdict == Verdict::Drop)
             {
                 LEASI_INFO("editor: session entry {} dropped on {}: {}", KeyOf(e), ToUtf8(PathOf(actor)), why);
-                // What the YAML built; a built copy hidden is one the YAML removes.
-                if (actor->bHidden) TakeBuiltHidden(e);
+                // What the YAML built; a built copy hidden is one the YAML removes. A light: its settings as built, switched off
+                // being light.enabled, never deleted.
+                auto const light = IsLight(actor);
+                if (light) e.Light = e.BaseLight = LightOf(actor);
+                else if (actor->bHidden) TakeBuiltHidden(e);
                 e.Now = PoseOf(actor);
                 e.Base = e.Now;
-                e.BaseHidden = actor->bHidden != 0;
+                e.BaseHidden = !light && actor->bHidden != 0;
                 e.Installed = json::array();
-                e.SavedPose.reset();
+                e.SavedState.reset();
                 dropped.push_back(source);
                 return false;
             }
@@ -2322,7 +4130,9 @@ namespace MeleBridge::Editor
                 auto const deleted = Flag(a, "deleted");
                 auto& e = G.Edits.emplace_back(EditFrom(a));
                 e.Now = pose;
-                e.SavedPose = pose;
+                // A field the light block lacks is the light's own, as a pose field is.
+                if (e.Light && IsLight(actor)) e.Light = LightFrom(a, LightOf(actor));
+                e.SavedState = EntryState{ pose, e.Light, deleted };
                 if (auto const base = a.find("base"); base == a.end())
                 {
                     // Version 1: the base is the actor before applying, which is what the YAML built (a spawn spawned again takes
@@ -2439,9 +4249,14 @@ namespace MeleBridge::Editor
                 }
                 auto const saved = SaveAll();
                 std::erase_if(G.Edits, [&](Edit const& e) { return !saved.Failed.contains(e.Map); });
+                // The kept edits moved: an index into them no longer holds.
+                for (auto& e : G.Edits) e.MadeFor.reset();
                 G.Undo.clear();
                 G.Redo.clear();
                 G.Drag.reset();
+                G.Reswitch.clear();
+                G.DragWarn.reset();
+                G.DragShare = -1;
                 if (!saved.Problems.empty())
                 {
                     std::string text = "the map changed: ";
@@ -2461,13 +4276,22 @@ namespace MeleBridge::Editor
             G.PassFaulted = false;
             G.PassWanted = false;
             G.PassNow = true;
+            // The props and lights of the old world are gone, and a new prop light's seed is this map's (docs/07 §11).
+            G.Lights.clear();
+            G.Props.clear();
+            G.TrackedStale = true;
+            G.MeshChannels.clear();
+            G.LastSeed.reset();
+            G.ReswitchFaulted = false;
+            // A build since the last map may have added a level of ours, or a stream.
+            ReadLevels();
             ReadSession(ToUtf8(MapName()));
         }
 
         void Run(APlayerController* pc, UCanvas* canvas, Command const& c)
         {
             // A drag's step closes before anything else runs: an undo or a delete mid-drag acts on the drag as a whole.
-            auto const drag = c.Type == Command::Kind::Move || c.Type == Command::Kind::Rotate || c.Type == Command::Kind::Scale;
+            auto const drag = c.Type == Command::Kind::Move || c.Type == Command::Kind::Rotate || c.Type == Command::Kind::Scale || c.Type == Command::Kind::Light;
             if (!drag) CloseDrag();
             switch (c.Type)
             {
@@ -2480,13 +4304,22 @@ namespace MeleBridge::Editor
             case Command::Kind::Deselect: Select(nullptr); break;
             case Command::Kind::Speed: G.Speed = std::clamp(G.Speed * std::pow(1.25f, c.X), MinSpeed, MaxSpeed); break;
             case Command::Kind::Spawn: Spawn(pc, canvas, c); break;
-            case Command::Kind::Delete: Delete(); break;
+            case Command::Kind::Delete: Delete(pc->WorldInfo); break;
             case Command::Kind::Save: Save(); break;
             case Command::Kind::RefreshMeshes: RefreshMeshes(); break;
             case Command::Kind::Undo: UndoStep(false); break;
             case Command::Kind::Redo: UndoStep(true); break;
             // Its step closed above. Paused, the prop keeps the light of where it was until the world ticks.
             case Command::Kind::EndDrag: TickOnce(); break;
+            case Command::Kind::PickLight: PickLight(c.Text); break;
+            case Command::Kind::Light: SetLight(c.Light); break;
+            case Command::Kind::AddLight: AddLight(pc, canvas, c.On); break;
+            case Command::Kind::PropLight: PropLight(pc); break;
+            case Command::Kind::AutoLight:
+                G.AutoLight = c.On;
+                Say(c.On ? "Auto light on: a fresh spawn that gets too little from prop lights gets one of its own"
+                         : "Auto light off: L adds a prop light for the selected prop");
+                break;
             }
         }
 
@@ -2520,6 +4353,8 @@ namespace MeleBridge::Editor
             if (pc->PlayerCamera != nullptr) s.Pov = pc->PlayerCamera->CameraCache.POV;
             s.CanvasWidth = static_cast<float>(canvas->SizeX);
             s.CanvasHeight = static_cast<float>(canvas->SizeY);
+            // The icons and the selection's E/T only while the overlay draws them.
+            auto const lights = G.Open ? CoverLights() : std::vector<LightSeen>{};
             if (SelectionAlive())
             {
                 auto const actor = G.Selected;
@@ -2535,7 +4370,24 @@ namespace MeleBridge::Editor
                 s.SelectedClass = ToUtf8(NameOf(actor->Class));
                 s.SelectedTag = NameText(actor->Tag);
                 s.SelectedSpawned = edit != nullptr && edit->Spawned;
-                s.SelectedUndeletable = Undeletable(actor);
+                s.SelectedUndeletable = Refusal(actor, true);
+                s.SelectedUnmovable = Refusal(actor, false);
+                // Only for an actor the editor changes: a refused one has no edit to ship.
+                if (s.SelectedUnmovable.empty()) s.SelectedShips = ShipsOf(actor, pc->WorldInfo).Text;
+                s.SelectedFile = FileOf(actor->Outer);
+                if (ListedLight(actor))
+                {
+                    s.SelectedLight = true;
+                    s.SelectedLightBlock = edit != nullptr && edit->Light ? *edit->Light : LightOf(actor);
+                }
+                else if (auto const lighting = G.Open ? LightingOf(actor, lights) : std::nullopt)
+                {
+                    s.SelectedProp = true;
+                    s.SelectedCovered = lighting->Covered;
+                    s.SelectedReceived = lighting->Received;
+                    s.SelectedTarget = lighting->Target;
+                    s.SelectedAutoRadius = lighting->Auto.Radius;
+                }
                 if (Fn.Project != nullptr)
                 {
                     UCanvas_execProject_Parms project;
@@ -2549,6 +4401,14 @@ namespace MeleBridge::Editor
             {
                 Select(nullptr);
             }
+            for (auto const& l : lights)
+            {
+                // A spawned light the editor deleted is left out: undo brings it back.
+                auto const edit = EditOf(l.Actor);
+                if (edit != nullptr && edit->Deleted) continue;
+                s.Lights.push_back({ ToUtf8(PathOf(l.Actor)), NameText(l.Actor->Tag), l.Location, edit != nullptr && edit->Light ? *edit->Light : l.Light });
+            }
+            s.AutoLight = G.AutoLight;
             s.LastPick = G.LastPick;
             s.Meshes = G.Meshes;
             s.Edits = static_cast<int>(G.Edits.size());
@@ -2565,6 +4425,7 @@ namespace MeleBridge::Editor
                 G.SummaryStale = false;
             }
             s.Session = G.Summary;
+            s.OurLevels = G.Ours.Summary;
             std::scoped_lock lock{ SharedLock };
             Shared = std::move(s);
         }
@@ -2584,6 +4445,17 @@ namespace MeleBridge::Editor
             // A map change or a load: the camera, the selection, the paused world and every edit's actor belonged to the old one.
             if (pc->WorldInfo != G.World || pc->WorldInfo->ObjectInternalInteger != G.WorldIndex) ChangeWorld(pc);
             else if (auto levels = ScanLevels(pc->WorldInfo); levels != G.Levels) LevelsChanged(std::move(levels));
+            // The free cam writes the camera's cache: the view Auto light places toward.
+            if (pc->PlayerCamera != nullptr)
+            {
+                G.ViewLocation = pc->PlayerCamera->CameraCache.POV.Location;
+                G.ViewYaw = pc->PlayerCamera->CameraCache.POV.Rotation.Yaw;
+            }
+            else
+            {
+                G.ViewLocation = pc->Location;
+                G.ViewYaw = pc->Rotation.Yaw;
+            }
 
             // The game pauses this way too (seen while it was unfocused) and unpauses when it is done: the editor keeps its pause.
             if (G.Open && G.PausedWorld != nullptr && G.PausedWorld == pc->WorldInfo)
@@ -2612,6 +4484,10 @@ namespace MeleBridge::Editor
             {
                 G.PassNow = G.PassWanted = false;
                 if (!G.PassFaulted && PassNeeded()) RunPass(pc);
+                // After each pass, and each time the loaded levels settle: every switched prop, for the props and lights that came,
+                // went or were re-applied (docs/07 §11).
+                G.TrackedStale = true;
+                G.ReswitchAll = true;
             }
 
             auto const f8 = Focused() && Down(VK_F8);
@@ -2640,6 +4516,15 @@ namespace MeleBridge::Editor
                     Run(pc, canvas, c);
                     if (!G.Open) break;
                 }
+            }
+            if (!G.ReswitchFaulted && !Guarded(ReswitchEntry, pc))
+            {
+                G.ReswitchFaulted = true;
+                G.ReswitchAll = false;
+                G.Reswitch.clear();
+                G.DragWarn.reset();
+                LEASI_ERROR("editor: access violation in the prop lighting switch; not tried again until the loaded levels change");
+                Say("props are not switched to prop lights: access violation (tried again when the loaded levels change)");
             }
             Publish(pc, canvas);
         }
@@ -2761,8 +4646,9 @@ namespace MeleBridge::Editor
     void Post(Command const& command)
     {
         std::scoped_lock lock{ SharedLock };
-        // Drags send one move, turn or scale per frame: only the latest matters.
-        auto const drag = command.Type == Command::Kind::Move || command.Type == Command::Kind::Rotate || command.Type == Command::Kind::Scale;
+        // Drags send one move, turn, scale or light change per frame: only the latest matters.
+        auto const drag = command.Type == Command::Kind::Move || command.Type == Command::Kind::Rotate || command.Type == Command::Kind::Scale
+                       || command.Type == Command::Kind::Light;
         if (drag && !Commands.empty() && Commands.back().Type == command.Type) Commands.back() = command;
         else if (command.Type == Command::Kind::Spawn)
         {
@@ -2819,7 +4705,10 @@ namespace MeleBridge::Editor
             { "edits", { { "count", s.Edits }, { "unsaved", s.Unsaved }, { "saveProblem", orNull(s.SaveProblem) } } },
             { "undo", { { "undo", orNull(s.UndoLabel) }, { "redo", orNull(s.RedoLabel) } } },
             { "session", nullptr },
+            { "levelsJson", nullptr },
             { "meshesInMemory", s.Meshes != nullptr ? json(s.Meshes->size()) : json(nullptr) },
+            { "autoLight", s.AutoLight },
+            { "lights", json::array() },
             { "catalog", { { "entries", Diag.CatalogEntries.load() >= 0 ? json(Diag.CatalogEntries.load()) : json(nullptr) },
                            { "thumbnails", Diag.Thumbnails.load() } } },
             { "selection", nullptr },
@@ -2843,6 +4732,20 @@ namespace MeleBridge::Editor
                                  { "dropped", session.Dropped }, { "pending", session.Pending }, { "levels", session.Levels },
                                  { "passFrame", session.PassFrame } };
         }
+        if (s.OurLevels != nullptr)
+        {
+            auto const& levels = *s.OurLevels;
+            state["levelsJson"] = { { "file", orNull(levels.File) }, { "problem", orNull(levels.Problem) }, { "dlc", orNull(levels.Dlc) },
+                                    { "levels", levels.Levels }, { "props", levels.Props }, { "lights", levels.Lights } };
+        }
+        auto const lightJson = [](LightBlock const& l) {
+            return json{ { "kind", l.Kind == LightKind::Room ? "room" : "props" }, { "radius", l.Radius }, { "brightness", l.Brightness },
+                         { "color", json::array({ l.Color[0], l.Color[1], l.Color[2] }) }, { "falloff", l.Falloff }, { "enabled", l.Enabled } };
+        };
+        for (auto const& l : s.Lights)
+        {
+            state["lights"].push_back({ { "path", l.Path }, { "tag", l.Tag }, { "location", vector(l.Location) }, { "light", lightJson(l.Light) } });
+        }
         if (s.Selected)
         {
             state["selection"] = { { "path", s.SelectedPath }, { "class", s.SelectedClass }, { "tag", s.SelectedTag },
@@ -2850,7 +4753,13 @@ namespace MeleBridge::Editor
                                    { "rotation", json::array({ s.SelectedRotation.Pitch, s.SelectedRotation.Yaw, s.SelectedRotation.Roll }) },
                                    { "drawScale", s.SelectedDrawScale }, { "drawScale3D", vector(s.SelectedDrawScale3D) },
                                    { "pawn", s.SelectedPawn }, { "static", s.SelectedStatic }, { "spawned", s.SelectedSpawned },
-                                   { "undeletable", s.SelectedUndeletable.empty() ? json(nullptr) : json(s.SelectedUndeletable) } };
+                                   { "undeletable", orNull(s.SelectedUndeletable) }, { "unmovable", orNull(s.SelectedUnmovable) },
+                                   { "ships", orNull(s.SelectedShips) }, { "file", orNull(s.SelectedFile) }, { "light", nullptr },
+                                   { "propLighting", nullptr } };
+            if (s.SelectedLight) state["selection"]["light"] = lightJson(s.SelectedLightBlock);
+            if (s.SelectedProp)
+                state["selection"]["propLighting"] = { { "covered", s.SelectedCovered }, { "received", s.SelectedReceived }, { "target", s.SelectedTarget },
+                                                        { "autoRadius", s.SelectedAutoRadius } };
         }
         if (c.Valid)
         {

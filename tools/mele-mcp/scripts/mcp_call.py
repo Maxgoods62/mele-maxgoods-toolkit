@@ -15,7 +15,8 @@ arguments = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
 
 env = dict(os.environ)
 env.setdefault("MELE_LE_DIR", r"D:\SteamLibrary\steamapps\common\Mass Effect Legendary Edition")
-env["WSLENV"] = "MELE_LE_DIR"
+# WSL hands only the variables WSLENV names to a Windows process: the test overrides (levels.json, backups) when set.
+env["WSLENV"] = ":".join(["MELE_LE_DIR"] + [v for v in ("MELE_LEVELS_JSON", "MELE_BACKUP_DIR") if env.get(v)])
 
 proc = subprocess.Popen([DOTNET, DLL], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL, env=env)

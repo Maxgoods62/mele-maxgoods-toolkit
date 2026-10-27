@@ -1,4 +1,7 @@
 using System.Numerics;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using LegendaryExplorerCore.Kismet;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Packages.CloningImportingAndRelinking;
@@ -22,10 +25,20 @@ public sealed record BuiltUsable(string Name, ExportRow Actor, string Action, IR
 /// stand-in (a copy of the prop template showing the mesh), hidden (removed: the actor hidden without collision) or absent (removed, and no actor has the tag).</param>
 public sealed record BuiltProp(string Name, ExportRow? Actor, string Action, IReadOnlyList<string> Changes);
 
+/// <param name="Action">found (a light of the level has the tag), imported (copied from the template's package) or cloned (from a light of the level:
+/// the template's, or an earlier copy of the template's package's).</param>
+/// <param name="Changes">"light &lt;tag&gt; added" for a new light; for a found one each value this build changed, old → new ("brightness 0.08 → 0.1",
+/// "switched off"); empty when the level already matched the file.</param>
+public sealed record BuiltLight(string Name, ExportRow Actor, string Action, IReadOnlyList<string> Changes);
+
 /// <param name="LevelChanges">What this build changed in the level itself (streamed files, post-process, character lights, start points, squad).</param>
+/// <param name="Lights">The lights of the lights: section; NPC lights are in their NPC's changes.</param>
 /// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
-public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, IReadOnlyList<BuiltUsable> Usables, IReadOnlyList<BuiltProp> Props, int StringCount, IReadOnlyList<string> TlkFiles,
-    string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes, IReadOnlyList<string> BackupPaths);
+/// <param name="Forks">The receipt of each fork of a streamed file (its vanilla entries), written, unchanged or deleted.</param>
+/// <param name="LevelsFile">levels.json, whose key for this level the build wrote; null when it built another package than the file's.</param>
+public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, IReadOnlyList<BuiltUsable> Usables, IReadOnlyList<BuiltProp> Props,
+    IReadOnlyList<BuiltLight> Lights, int StringCount, IReadOnlyList<string> TlkFiles, string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes,
+    IReadOnlyList<string> BackupPaths, IReadOnlyList<BuiltFork> Forks, string? LevelsFile);
 
 /// <summary>
 /// Builds a Game 1 level from a YAML file. The level itself: vanilla sub-levels it shows and their stream volume, its
@@ -33,16 +46,24 @@ public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyL
 /// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
 /// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. Its props: any
 /// actor copied from a template and placed (live_place, live_save), or a mesh shown on a copy of the prop template (editor_import),
-/// turned by a yaw or a full rotation and scaled; a removed one is hidden without collision. A missing level is
-/// created, and the LE1CP Sideloader config that loads it is written.
+/// turned by a yaw or a full rotation and scaled; a removed one is hidden without collision; each lit by prop lights when a light of its
+/// lights section covers it, else by its light environment. Its lights: point lights on the channels of their kind (props only, or the
+/// room too), switched on or off. Vanilla actors of the files it streams:
+/// moved, turned, scaled or hidden in a fork of the file, which the level streams instead (<see cref="ForkBuilder"/>). A missing level is
+/// created, and the LE1CP Sideloader config that loads it is written. Last, its key of levels.json, which tells MeleBridge which levels
+/// are ours.
 /// </summary>
 public static class LevelBuilder
 {
+    /// <summary>Where levels.json goes instead of %LOCALAPPDATA%\MeleBridge\LE1\levels.json (tests).</summary>
+    public const string LevelsFileEnvVar = "MELE_LEVELS_JSON";
+
     private const string LevelPath = "TheWorld.PersistentLevel";
     private const string MainSequence = "TheWorld.PersistentLevel.Main_Sequence";
 
     private const string PropTemplateHint =
-        "Give 'propTemplate' (a BioInert, e.g. { package: BIOA_FRE31_00_LAY.pcc, actor: BioInert_0 }): a copy of it shows the mesh, lit where it is.";
+        "Give 'propTemplate' (a BioInert, e.g. { package: BIOA_FRE31_00_LAY.pcc, actor: BioInert_0 }): a copy of it shows the mesh, lit by its light environment, "
+        + "or by prop lights when a light of the lights section covers it.";
 
     /// <summary>
     /// What a removed prop changes, as live_remove leaves an actor the engine won't destroy: hidden, no collision. Actor.CollisionType
@@ -59,6 +80,31 @@ public static class LevelBuilder
 
     /// <param name="Offset">Forward, right, up from the NPC's location, turned by her yaw.</param>
     private sealed record LightSpec(string Tag, Vector3 Offset, float? Radius, float? Brightness, int Line);
+
+    /// <summary>
+    /// A light of the lights: section (docs/07 §11): a point light on the channels of its kind. props: Gameplay_4 only, so it lights
+    /// props and nothing else; room: walls, vanilla meshes, pawns and props. Switched off (enabled: false), never removed.
+    /// </summary>
+    private sealed class LightEntrySpec
+    {
+        public required string Name;
+        public required int Line;
+        public string? Tag;
+        public string Kind = "props";
+        public Vector3? Location;
+        public float? Radius, Brightness;
+        public byte[] Color = [255, 255, 255];
+        public float Falloff = 2;
+        public bool Enabled = true;
+        public Source? Template;
+    }
+
+    /// <summary>
+    /// What <see cref="ApplyLight"/> gives a light. <see cref="Kind"/> null: an NPC light, which leaves its colour, falloff, shadows,
+    /// channels and level list to its template (Reyes's lights stay on the Dynamic channel); a radius or brightness left out stays the template's too.
+    /// </summary>
+    private sealed record LightSettings(string Tag, Vector3 Location, int Line, float? Radius, float? Brightness, bool Enabled = true, string? Kind = null,
+        byte[]? Color = null, float Falloff = 2);
 
     private sealed class NpcSpec
     {
@@ -123,6 +169,8 @@ public static class LevelBuilder
         public List<UsableSpec> Usables = [];
         public List<PropSpec> Props = [];
         public Source? PropTemplate;
+        public List<ForkBuilder.Entry> Vanilla = [];
+        public List<LightEntrySpec> Lights = [];
         public readonly Dictionary<int, Dictionary<string, string>> Strings = [];
     }
 
@@ -150,14 +198,39 @@ public static class LevelBuilder
             notes.Add($"Created the level {Path.GetFileName(package)}.");
         }
 
+        // Forks before the map (docs/07 §11): the map never names a file not written yet. Every file's fork is made in memory first,
+        // so a refusal in any of them writes none, and the error lists them all. Each streamed file then goes by the name the map
+        // streams it under, and the other name of its pair (the vanilla file, or its fork) is renamed in place.
+        var map = Path.GetFileNameWithoutExtension(package);
+        var levels = spec.Streaming?.Levels ?? [];
+        var prepared = levels.Select(l => (File: l, Entries: spec.Vanilla.Where(v => v.File.Equals(l, StringComparison.OrdinalIgnoreCase)).ToList()))
+            .Where(f => f.Entries.Count > 0)
+            .Select(f => ForkBuilder.Prepare(game, package, f.File, f.Entries))
+            .ToList();
+        if (prepared.SelectMany(p => p.Refusals).ToList() is { Count: > 0 } refusals)
+        {
+            throw new ArgumentException($"vanilla actors the build won't change (nothing written): {string.Join("; ", refusals)}.");
+        }
+        var forks = prepared.Select(p => ForkBuilder.Write(p, notes)).ToList();
+        prepared.Clear();
+        var forked = forks.Select(f => f.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var streams = levels.Select(l => forked.Contains(l) ? ForkBuilder.ForkName(map, l) : l).ToList();
+        var others = levels.Zip(streams).DistinctBy(p => p.Second, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(p => p.Second, p => forked.Contains(p.First) ? p.First : ForkBuilder.ForkName(map, p.First), StringComparer.OrdinalIgnoreCase);
+
         var backups = new List<string>();
         var missing = new List<string>();
         var levelChanges = new List<string>();
-        var ((npcs, usables, props), backup) = PackageWriter.Edit(game, package, pcc =>
+        var ((npcs, usables, props, lights, named), backup) = PackageWriter.Edit(game, package, pcc =>
         {
             var level = pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no {LevelPath}; is it a level?");
             using var cache = new PackageCache();
-            if (spec.Streaming is { } streaming) LevelStreams.SetStreaming(game, pcc, level, streaming, cache, levelChanges);
+            if (spec.Streaming is { } streaming)
+            {
+                LevelStreams.SetStreaming(game, pcc, level, streaming with { Levels = streams }, others, cache, levelChanges);
+                // With 'squad' or not: a wait still naming the other name of a pair would wait for a file the level no longer streams.
+                LevelStreams.RenameWaits(pcc, others, levelChanges);
+            }
             if (spec.PostProcess is { } post) LevelStreams.SetPostProcess(game, pcc, level, post.Package, post.Line, levelChanges);
             foreach (var light in spec.CharacterLights)
             {
@@ -168,13 +241,31 @@ public static class LevelBuilder
             if (spec.Squad is { } squad)
             {
                 var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {squad.Line}: the level has no {MainSequence}.");
-                SquadSpawns.Set(game, pcc, sequence, squad.Package, spec.Streaming?.Levels ?? [], squad.Line, cache, levelChanges);
+                SquadSpawns.Set(game, pcc, sequence, squad.Package, streams, squad.Line, cache, levelChanges);
             }
             var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
             var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList();
-            return (builtNpcs, builtUsables, spec.Props.Select(p => BuildProp(game, pcc, level, spec, p, cache, notes)).ToList());
+            var builtLights = spec.Lights.Select(l => BuildLight(game, pcc, level, spec, l, cache)).ToList();
+            NoteOrphanLights(pcc, level, spec, notes);
+            // Each prop is lit by prop lights or by its light environment, from the lights: entries (docs/07 §11).
+            var looks = new Dictionary<(string?, string), (bool Static, StructProperty? Channels)>();
+            var builtProps = spec.Props.Select(p => BuildProp(game, pcc, level, spec, p, cache, looks, notes)).ToList();
+            var streamed = pcc.Exports.Where(e => e.ClassName == "LevelStreamingKismet").Select(e => e.GetProperty<NameProperty>("PackageName")?.Value.Instanced)
+                .OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return (builtNpcs, builtUsables, builtProps, builtLights, streamed);
         });
         backups.Add(backup);
+
+        // A file with no vanilla entry left streams under its own name again: its fork goes now that the saved map no longer names it.
+        foreach (var vanilla in levels.Where(l => !forked.Contains(l)))
+        {
+            if (named.Contains(ForkBuilder.ForkName(map, vanilla)))
+            {
+                notes.Add($"{ForkBuilder.ForkName(map, vanilla)} is kept: a streaming entry of the level still names it.");
+                continue;
+            }
+            if (ForkBuilder.Delete(game, package, vanilla) is { } gone) forks.Add(gone);
+        }
 
         var tlkFiles = new List<string>();
         if (spec.Strings.Count > 0)
@@ -189,7 +280,50 @@ public static class LevelBuilder
         }
 
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
-        return new LevelBuildResult(package, create, levelChanges, npcs, usables, props, spec.Strings.Count, tlkFiles, config, missing, notes, backups);
+        // Last: it describes the build, and only the YAML's own package is the level the game loads.
+        var levelsFile = packageOverride is null ? WriteLevelsFile(package, spec, levels) : null;
+        return new LevelBuildResult(package, create, levelChanges, npcs, usables, props, lights, spec.Strings.Count, tlkFiles, config, missing, notes, backups, forks, levelsFile);
+    }
+
+    /// <summary>
+    /// Writes this level's key of levels.json (docs/07 §11), which MeleBridge reads on each map change: the vanilla files the level
+    /// streams (by their vanilla names), the tags of its props that are not removed (the props it may switch to prop lights) and of
+    /// its lights: entries (the lights it lists); 'dlc', the DLC folder it lies in. Other keys stay. Unreadable, the file is kept aside
+    /// (.bad-&lt;ticks&gt;) and a new one started. Written beside it, then moved over it.
+    /// </summary>
+    private static string WriteLevelsFile(string package, Spec spec, IReadOnlyList<string> streams)
+    {
+        var custom = Environment.GetEnvironmentVariable(LevelsFileEnvVar);
+        var path = string.IsNullOrWhiteSpace(custom)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MeleBridge", "LE1", "levels.json")
+            : Path.GetFullPath(GamePaths.ToWindowsPath(custom));
+        JsonObject doc;
+        try
+        {
+            doc = File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? throw new JsonException("not a JSON object") : new JsonObject();
+        }
+        catch (JsonException)
+        {
+            File.Move(path, $"{path}.bad-{DateTime.UtcNow.Ticks}");
+            doc = new JsonObject();
+        }
+        doc["version"] = 1;
+        if (ForkBuilder.DlcOf(package) is { } dlc) doc["dlc"] = dlc;
+        if (doc["levels"] is not JsonObject levels) doc["levels"] = levels = new JsonObject();
+        var key = Path.GetFileNameWithoutExtension(package);
+        foreach (var old in levels.Select(l => l.Key).Where(k => k.Equals(key, StringComparison.OrdinalIgnoreCase)).ToList()) levels.Remove(old);
+        levels[key] = new JsonObject
+        {
+            ["streams"] = new JsonArray(streams.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray()),
+            ["props"] = new JsonArray(spec.Props.Where(p => !p.Removed).Select(p => p.Tag).OfType<string>().Select(t => (JsonNode?)JsonValue.Create(t)).ToArray()),
+            // Switched off ones too: the editor lists them, and switches them on again. Not NPC lights: those are edited in the YAML.
+            ["lights"] = new JsonArray(spec.Lights.Select(l => l.Tag).OfType<string>().Select(t => (JsonNode?)JsonValue.Create(t)).ToArray()),
+        };
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + ".build.tmp";
+        File.WriteAllText(temporary, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+        File.Move(temporary, path, overwrite: true);
+        return path;
     }
 
     private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache, List<string> missing, List<string> notes)
@@ -227,7 +361,7 @@ public static class LevelBuilder
         if (behaviorDirty) behavior.WriteProperties(behaviorProps);
 
         SetColors(pcc, pawn, props, npc, changes, notes);
-        foreach (var light in npc.Lights) SetLight(game, pcc, level, spec, npc, light, origin, rotation.Yaw, cache, changes);
+        foreach (var light in npc.Lights) SetLight(game, pcc, level, spec, light, origin, rotation.Yaw, cache, changes);
         var talk = npc.Conversation is { } conversation ? LinkConversation(pcc, pawn, conversation, npc.Line, cache, changes) : null;
         if (npc.Conversation is not null && talk is null)
         {
@@ -278,7 +412,8 @@ public static class LevelBuilder
         return new BuiltUsable(usable.Name, ExportInspector.Row(actor), action, changes);
     }
 
-    private static BuiltProp BuildProp(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, PropSpec prop, PackageCache cache, List<string> notes)
+    private static BuiltProp BuildProp(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, PropSpec prop, PackageCache cache,
+        Dictionary<(string?, string), (bool Static, StructProperty? Channels)> looks, List<string> notes)
     {
         var changes = new List<string>();
         var tag = prop.Tag ?? throw new ArgumentException($"line {prop.Line}: '{prop.Name}' needs a 'tag' (how the build finds it again).");
@@ -339,13 +474,177 @@ public static class LevelBuilder
         var dirty = Changed(changes, "tag", Put(props, new NameProperty(tag, "Tag")));
         dirty |= PutPlace(props, prop.Location, prop.Yaw, changes, prop.Rotation, prop.Scale, prop.Scale3D);
         if (dirty) actor.WriteProperties(props);
+        SwitchLighting(game, pcc, spec, prop, actor, looks, changes, notes);
         return new BuiltProp(prop.Name, ExportInspector.Row(actor), action, changes);
+    }
+
+    // ---- Prop lighting (docs/07 §11) ----
+
+    /// <summary>A light covers a prop when its falloff at the prop's bounds centre is at least this (d ≤ 0.71·R at falloff 2).</summary>
+    internal const double CoveredFalloff = 0.25;
+
+    /// <summary>Gameplay_4 is in no scanned vanilla light: on it, prop lights light our props and nothing else.</summary>
+    private const string PropChannel = "Gameplay_4";
+
+    /// <summary>The channels of each kind of light; a prop lit by prop lights has its mesh on Gameplay_4 alone.</summary>
+    private static readonly Dictionary<string, string[]> KindChannels = new()
+    {
+        ["props"] = [PropChannel],
+        ["room"] = ["BSP", "Static", "Dynamic", "CompositeDynamic", PropChannel],
+    };
+
+    /// <summary>
+    /// A light's falloff at a distance, as UE3's point light: (1 - (d/R)²)^falloff, 0 from the radius on. MeleBridge's covered rule and
+    /// its Auto light use the same.
+    /// </summary>
+    internal static double Attenuation(double distance, double radius, double falloff) =>
+        distance >= radius || radius <= 0 ? 0 : Math.Pow(1 - distance * distance / (radius * radius), falloff);
+
+    /// <summary>
+    /// The switch of docs/07 §11: a prop that a lights: entry covers (enabled, on Gameplay_4 as both kinds are, falloff at its bounds
+    /// centre at least <see cref="CoveredFalloff"/>) is lit by prop lights: its light environment off, its mesh on Gameplay_4 alone,
+    /// written in full (a channel left out of a tagged struct takes its archetype's). Any other prop is lit by its light environment,
+    /// with the channels a new copy of its source has (today's look), and gets a note: its light environment sums the level's lights
+    /// unoccluded. The note names the switched-off entries that would cover it, by the same rule, when there are some. Written only
+    /// when it differs. A prop with no static mesh or light environment (an emitter, a lightmapped actor) is left as it is.
+    /// </summary>
+    private static void SwitchLighting(MEGame game, IMEPackage pcc, Spec spec, PropSpec prop, ExportEntry actor,
+        Dictionary<(string?, string), (bool Static, StructProperty? Channels)> looks, List<string> changes, List<string> notes)
+    {
+        var actorProps = actor.GetProperties();
+        if ((Object(pcc, actorProps, "PlaceableMesh") ?? Object(pcc, actorProps, "StaticMeshComponent")) is not { } mesh || !mesh.IsA("StaticMeshComponent")) return;
+        var meshProps = mesh.GetProperties();
+        var environment = Object(pcc, meshProps, "LightEnvironment") ?? Object(pcc, actorProps, "m_pLightEnvComponent") ?? Object(pcc, actorProps, "LightEnvironment");
+        if (environment is null || !environment.IsA("DynamicLightEnvironmentComponent")) return;
+
+        var centre = BoundsCentre(pcc, actor, mesh);
+        // The rule without its "enabled": a switched-off entry that reaches the prop is named in its note.
+        bool Reaches(LightEntrySpec l) => KindChannels[l.Kind].Contains(PropChannel)
+                                          && Attenuation(Vector3.Distance(l.Location!.Value, centre), l.Radius!.Value, l.Falloff) >= CoveredFalloff;
+        var covered = spec.Lights.Any(l => l.Enabled && Reaches(l));
+        var environmentProps = environment.GetProperties();
+        bool lit, channelled;
+        if (covered)
+        {
+            lit = Put(environmentProps, new BoolProperty(false, "bEnabled"));
+            channelled = PutChannels(meshProps, Channels([PropChannel]));
+        }
+        else
+        {
+            // On: back to what its archetype says, which is on unless an archetype of the level turned it off.
+            lit = environmentProps.GetProp<BoolProperty>("bEnabled")?.Value == false && environmentProps.RemoveNamedProperty("bEnabled");
+            if (environment.Archetype is ExportEntry archetype && Effective(archetype).GetProp<BoolProperty>("bEnabled")?.Value == false)
+            {
+                lit |= Put(environmentProps, new BoolProperty(true, "bEnabled"));
+            }
+            var (known, fresh) = FreshChannels(game, pcc, spec, prop, looks);
+            channelled = known && PutChannels(meshProps, fresh);
+            if (!known && meshProps.GetProp<StructProperty>("LightingChannels") is { } now && SameExactly(now, Channels([PropChannel])))
+            {
+                notes.Add($"{prop.Name} (line {prop.Line}): its mesh is still on the prop lights' channel (Gameplay_4) and the entry has no template or mesh to read its "
+                          + "own channels from: give it one, or set its LightingChannels by hand (export_set).");
+            }
+            var off = spec.Lights.Where(l => !l.Enabled && Reaches(l)).Select(l => $"{l.Name} (line {l.Line})").ToList();
+            notes.Add(off.Count == 0
+                ? $"{prop.Name} (line {prop.Line}): no prop light covers it; lit by its light environment, brighter than vanilla: select it in the editor and press L"
+                : $"{prop.Name} (line {prop.Line}): lit by its light environment, brighter than vanilla: {Listed(off)} would cover it but "
+                  + $"{(off.Count == 1 ? "is" : "are")} switched off (enabled: false): switching {(off.Count == 1 ? "it" : "one")} on (in the editor, or enabled: true) "
+                  + "lights the prop, as does selecting it in the editor and pressing L");
+        }
+        if (lit) environment.WriteProperties(environmentProps);
+        if (channelled) mesh.WriteProperties(meshProps);
+        if (lit || channelled) changes.Add(covered ? "lit by prop lights (light environment off, mesh on Gameplay_4)" : "lit by its light environment (mesh channels as its source's)");
+    }
+
+    /// <summary>Items as a sentence names them: "a", "a and b", "a, b and c".</summary>
+    private static string Listed(IReadOnlyList<string> items) =>
+        items.Count < 2 ? string.Join("", items) : $"{string.Join(", ", items.Take(items.Count - 1))} and {items[^1]}";
+
+    /// <summary>
+    /// The centre of the prop's mesh bounds where it stands: the StaticMesh's Bounds, scaled by DrawScale × DrawScale3D (and the
+    /// component's scale), turned and placed by the actor's pose; its location when the mesh is not in the level.
+    /// </summary>
+    private static Vector3 BoundsCentre(IMEPackage pcc, ExportEntry actor, ExportEntry mesh)
+    {
+        var pose = ForkBuilder.PoseOf(actor);
+        if (Effective(mesh).GetProp<ObjectProperty>("StaticMesh")?.ResolveToEntry(pcc) is not ExportEntry { ClassName: "StaticMesh" } staticMesh) return pose.Location;
+        return ForkBuilder.WorldBox(ObjectBinary.From<StaticMesh>(staticMesh).Bounds, ForkBuilder.TotalScale(mesh, pose), pose).Centre;
+    }
+
+    /// <summary>
+    /// The mesh channels a new build gives the prop's actor: those of the mesh component of what it is copied from (its template, or
+    /// for a mesh or a StaticMeshActor template the prop template), through its archetypes; null when that has none (the class
+    /// default decides). A template that is a prop of this level (live_save names a copy of a built prop by its actor) gives what its
+    /// own entry gives: it may be lit by prop lights, or be switched later in this build. A source on the prop lights' channel alone is
+    /// a covered prop, whose channels are not its look: the prop template's then. Not known when the entry names neither, or only
+    /// such sources. Read once per source and build.
+    /// </summary>
+    private static (bool Known, StructProperty? Channels) FreshChannels(MEGame game, IMEPackage pcc, Spec spec, PropSpec prop,
+        Dictionary<(string?, string), (bool Static, StructProperty? Channels)> looks, int depth = 0)
+    {
+        var propLights = Channels([PropChannel]);
+        for (var from = prop.Mesh is null ? prop.Template : spec.PropTemplate; from is not null;)
+        {
+            if (from.Package is null && depth < spec.Props.Count && PropOf(pcc, spec, from) is { } built && built != prop
+                && FreshChannels(game, pcc, spec, built, looks, depth + 1) is { Known: true } inherited)
+            {
+                return inherited;
+            }
+            if (!looks.TryGetValue((from.Package, from.Actor), out var look))
+            {
+                using var source = from.Package is null ? null : PackageInspector.Open(game, from.Package);
+                var original = ResolveActor(source ?? pcc, from.Actor, from.Line);
+                var props = Effective(original);
+                var mesh = (props.GetProp<ObjectProperty>("PlaceableMesh") ?? props.GetProp<ObjectProperty>("StaticMeshComponent"))?.ResolveToEntry(source ?? pcc) as ExportEntry;
+                look = (original.ClassName == "StaticMeshActor", mesh is null ? null : Effective(mesh).GetProp<StructProperty>("LightingChannels"));
+                looks[(from.Package, from.Actor)] = look;
+            }
+            var covered = look.Channels is { } channels && SameExactly(channels, propLights);
+            if (!covered && (!look.Static || from == spec.PropTemplate)) return (true, look.Channels);
+            if (from == spec.PropTemplate) break;
+            from = spec.PropTemplate;
+        }
+        return (false, null);
+    }
+
+    /// <summary>The props entry whose actor a template of this level is (by its tag), if any.</summary>
+    private static PropSpec? PropOf(IMEPackage pcc, Spec spec, Source from) =>
+        ResolveActor(pcc, from.Actor, from.Line).GetProperty<NameProperty>("Tag")?.Value.Instanced is { } tag
+            ? spec.Props.FirstOrDefault(p => tag.Equals(p.Tag, StringComparison.OrdinalIgnoreCase))
+            : null;
+
+    /// <summary>A LightingChannelContainer in full: these channels and bInitialized on, every other one written off.</summary>
+    private static StructProperty Channels(IEnumerable<string> on)
+    {
+        var channels = GlobalUnrealObjectInfo.getDefaultStructValue(MEGame.LE1, "LightingChannelContainer", true, null)
+                       ?? throw new InvalidOperationException("LEC has no LightingChannelContainer for LE1.");
+        var wanted = on.Append("bInitialized").ToHashSet();
+        var bits = channels.OfType<BoolProperty>().Select(b => (Property)new BoolProperty(wanted.Contains(b.Name.Instanced), b.Name)).ToList();
+        if (wanted.Except(bits.Select(b => b.Name.Instanced)).FirstOrDefault() is { } missing) throw new InvalidOperationException($"LEC's LightingChannelContainer has no {missing}.");
+        return new StructProperty("LightingChannelContainer", [.. bits], "LightingChannels");
+    }
+
+    /// <summary>Sets LightingChannels to exactly these (null: none of its own) when they differ, field for field.</summary>
+    private static bool PutChannels(PropertyCollection props, StructProperty? channels)
+    {
+        var old = props.GetProp<StructProperty>("LightingChannels");
+        if (channels is null) return old is not null && props.RemoveNamedProperty("LightingChannels");
+        if (old is not null && SameExactly(old, channels)) return false;
+        props.AddOrReplaceProp(channels.DeepClone());
+        return true;
+    }
+
+    /// <summary>Two structs with the same fields, each of the same value: a field one leaves out takes its archetype's, so it counts.</summary>
+    private static bool SameExactly(StructProperty a, StructProperty b)
+    {
+        var (x, y) = (a.Properties.Where(p => p is not NoneProperty).ToList(), b.Properties.Where(p => p is not NoneProperty).ToList());
+        return a.StructType == b.StructType && x.Count == y.Count && y.All(p => x.FirstOrDefault(q => q.Name == p.Name) is { } q && Same(q, p));
     }
 
     /// <summary>
     /// Makes a placeable (a copy of the prop template) show a static mesh actor's mesh, materials and scale. A StaticMeshActor
-    /// is lit by light baked where it stands, so a copy elsewhere stays black; the placeable's DynamicLightEnvironment lights it
-    /// where it is, as live_place's stand-in.
+    /// is lit by light baked where it stands, so a copy elsewhere stays black; the placeable is lit by its DynamicLightEnvironment
+    /// where it is, as live_place's stand-in, or by prop lights instead when a light of the lights section covers it (SwitchLighting).
     /// </summary>
     private static void ShowActorMesh(IMEPackage source, ExportEntry original, IMEPackage pcc, ExportEntry placeable, PackageCache cache, List<string> changes)
     {
@@ -445,7 +744,7 @@ public static class LevelBuilder
     }
 
     /// <summary>An export's properties with what it inherits from archetype exports (a prefab's) under them; references not remapped.</summary>
-    private static PropertyCollection Effective(ExportEntry export)
+    internal static PropertyCollection Effective(ExportEntry export)
     {
         var props = export.Archetype is ExportEntry archetype ? Effective(archetype) : new PropertyCollection();
         foreach (var own in export.GetProperties().Where(p => p is not NoneProperty)) props.AddOrReplaceProp(own);
@@ -481,7 +780,7 @@ public static class LevelBuilder
     }
 
     /// <summary>Degrees to Unreal rotation units (65536 = 360°).</summary>
-    private static int Units(float degrees) => (int)Math.Round(degrees * 65536 / 360);
+    internal static int Units(float degrees) => (int)Math.Round(degrees * 65536 / 360);
 
     /// <summary>Main_Sequence: Shepard uses the placeable (BioSeqEvt_ArtPlaceableUsed) → BioSeqAct_AreaTransition to the map and start point.</summary>
     private static void LinkAreaTransition(IMEPackage pcc, ExportEntry usable, string map, string? startPoint, int line, PackageCache cache, List<string> changes)
@@ -516,8 +815,14 @@ public static class LevelBuilder
     }
 
     /// <summary>The template's actor imported with everything it references, or an actor of this level cloned; added to the level's actors.</summary>
-    /// <param name="cloneOnClash">When the level already has an actor of that name (an earlier import), clone it instead of failing.</param>
-    private static ExportEntry AddActor(MEGame game, IMEPackage pcc, ExportEntry level, Source template, PackageCache cache, bool cloneOnClash = false)
+    /// <param name="cloneOnClash">
+    /// When the level already has an actor of that name: clone it when it is a copy of this template (an earlier import, see
+    /// <see cref="IsCopyOf"/>), else import the template under a free name (another file's actor of the same name, or the level's own),
+    /// instead of failing.
+    /// </param>
+    /// <param name="cloned">Called after such a clone with the template's actor (its file still open, flattened) and the clone.</param>
+    private static ExportEntry AddActor(MEGame game, IMEPackage pcc, ExportEntry level, Source template, PackageCache cache, bool cloneOnClash = false,
+        Action<ExportEntry, ExportEntry>? cloned = null)
     {
         ExportEntry added;
         if (template.Package is null)
@@ -530,14 +835,22 @@ public static class LevelBuilder
             var actor = ResolveActor(source, template.Actor, template.Line);
             Flatten(actor);
             var clash = pcc.FindEntry($"{LevelPath}.{actor.ObjectName.Instanced}");
-            if (clash is ExportEntry earlier && cloneOnClash)
+            if (clash is ExportEntry earlier && cloneOnClash && IsCopyOf(earlier, actor))
             {
                 added = EntryCloner.CloneTree(earlier);
                 // The earlier copy may be hidden (removed: true); the new one shows as the source does.
                 var props = added.GetProperties();
                 if (PutShown(props, actor.GetProperties().Where(p => ShownFlags.Contains(p.Name.Name)).ToList())) added.WriteProperties(props);
+                cloned?.Invoke(actor, added);
                 pcc.AddToLevelActorsIfNotThere(added);
                 return added;
+            }
+            if (clash is ExportEntry && cloneOnClash)
+            {
+                // A clone would carry the other actor's class and values: the import gets a name no export has (only in memory, in the
+                // template's file), so it copies instead of linking.
+                actor.ObjectName = pcc.GetNextIndexedName(actor.ObjectName.Name);
+                clash = null;
             }
             if (clash is not null)
             {
@@ -549,6 +862,19 @@ public static class LevelBuilder
         }
         pcc.AddToLevelActorsIfNotThere(added);
         return added;
+    }
+
+    /// <summary>
+    /// An actor of the level is a copy, imported or cloned, of a template's actor when it has its class and the same subobjects, each by
+    /// its path under the actor and its class. A copy keeps the names the template's components have in their own file
+    /// (PointLightComponent_2438), which another file's actor of the same name, or the level's own, rarely has: LE1CP's
+    /// SpotLightToggleable_1 of BIOA_NOR10_03_DSG has SpotLightComponent_3, BIOA_NOR10_01_DSG's SpotLightComponent_2.
+    /// </summary>
+    private static bool IsCopyOf(ExportEntry actor, ExportEntry template)
+    {
+        static List<string> Tree(ExportEntry root) =>
+            Subobjects(root).Select(e => $"{e.InstancedFullPath[(root.InstancedFullPath.Length + 1)..]} {e.ClassName}").Order(StringComparer.Ordinal).ToList();
+        return actor.ClassName == template.ClassName && Tree(actor).SequenceEqual(Tree(template));
     }
 
     /// <summary>Own actor type (name shown in game): a copy of the pawn's current one, renamed, with its own strref.</summary>
@@ -621,50 +947,209 @@ public static class LevelBuilder
     }
 
     /// <summary>A fill light kept at <see cref="LightSpec.Offset"/> from the NPC, lighting only dynamic objects (see docs/06 §A.8–A.9).</summary>
-    private static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, LightSpec light, Vector3 origin, int yaw,
-                                 PackageCache cache, List<string> changes)
+    private static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, LightSpec light, Vector3 origin, int yaw, PackageCache cache, List<string> changes)
     {
-        var actor = FindActor(pcc, level, light.Tag, e => e.IsA("Light"));
-        var isNew = actor is null;
-        if (actor is null)
-        {
-            // Copy a light of this level, else the file's light template.
-            var sibling = pcc.Exports.FirstOrDefault(e => e.Parent == level && e.IsA("Light"));
-            var source = sibling is not null ? new Source(null, sibling.InstancedFullPath, light.Line)
-                         : spec.LightTemplate ?? throw new ArgumentException($"line {light.Line}: the level has no light to copy; give a top-level 'lightTemplate'.");
-            actor = AddActor(game, pcc, level, source, cache);
-        }
-
         var angle = yaw * Math.PI * 2 / 65536;
         var (cos, sin) = (Math.Cos(angle), Math.Sin(angle));
         var at = new Vector3(
             (float)(origin.X + light.Offset.X * cos - light.Offset.Y * sin),
             (float)(origin.Y + light.Offset.X * sin + light.Offset.Y * cos),
             (float)(origin.Z + light.Offset.Z));
+        var (_, action, changed) = ApplyLight(game, pcc, level, new LightSettings(light.Tag, at, light.Line, light.Radius, light.Brightness), spec.LightTemplate, cache);
+        // Among the NPC's own changes: each light on one line.
+        if (action != "found") changes.Add($"light {light.Tag} added");
+        else if (changed.Count > 0) changes.Add($"light {light.Tag}: {string.Join(", ", changed)}");
+    }
+
+    /// <summary>A light of the lights: section, found by its tag, else copied from its template.</summary>
+    private static BuiltLight BuildLight(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, LightEntrySpec light, PackageCache cache)
+    {
+        var settings = new LightSettings(light.Tag!, light.Location!.Value, light.Line, light.Radius, light.Brightness, light.Enabled, light.Kind, light.Color, light.Falloff);
+        var (actor, action, changed) = ApplyLight(game, pcc, level, settings, light.Template ?? spec.LightTemplate, cache);
+        return new BuiltLight(light.Name, ExportInspector.Row(actor), action, action == "found" ? changed : [$"light {light.Tag} added"]);
+    }
+
+    /// <summary>
+    /// A light found by its tag, else copied from its template: <paramref name="template"/> (the entry's, else the file's lightTemplate),
+    /// else LE1CP's fill light for Chakwas. Not a light of the level picked by export order: in the freighter that was the copied
+    /// character lights' collection, which has no LightComponent. A second copy of one template clones the first (an import would
+    /// link to it); the first may be a lights: entry's, so a new NPC light then takes back from the template what it leaves to it
+    /// (<see cref="TakeTemplateLight"/>). A light of the level that only has the template's name (another file's template of that
+    /// name, or the level's own) is not cloned: the template is imported under a free name (<see cref="AddActor"/>). Always
+    /// written: its tag and place, the component's bEnabled, bOnlyAffectSameAndSpecifiedLevels false (the level filter never
+    /// matches a pawn in a Sideloader level, docs/06 §A.9), the radius and brightness given, CachedParentToWorld's WPlane, new
+    /// GUIDs for a new copy, imported or cloned (lightmaps, shadow maps and a primitive's IrrelevantLights know a light by its
+    /// LightGuid, so no two lights share one). A lights: entry (<see cref="LightSettings.Kind"/>) also gets the actor's bEnabled,
+    /// its colour, falloff, no shadows, dynamic light, its kind's channels in full and no OtherLevelsToAffect (the template's level
+    /// list, which the filter left off ignores); an NPC light keeps its template's (Reyes's: Dynamic only).
+    /// </summary>
+    /// <returns>The light, found, imported or cloned, and what the build changed on a found one, each value old → new.</returns>
+    private static (ExportEntry Actor, string Action, List<string> Changed) ApplyLight(MEGame game, IMEPackage pcc, ExportEntry level, LightSettings light, Source? template,
+        PackageCache cache)
+    {
+        var actor = FindActor(pcc, level, light.Tag, e => e.IsA("Light"));
+        var isNew = actor is null;
+        var action = "found";
+        if (actor is null)
+        {
+            var from = template ?? new Source(DefaultLightTemplate.Package, DefaultLightTemplate.Actor, light.Line);
+            var clone = false;
+            actor = AddActor(game, pcc, level, from, cache, cloneOnClash: true, (original, copy) =>
+            {
+                clone = true;
+                if (light.Kind is null) TakeTemplateLight(pcc, original, copy);
+            });
+            if (!actor.IsA("Light")) throw new ArgumentException($"line {from.Line}: the light template {from.Actor} is a {actor.ClassName}, not a light.");
+            action = from.Package is null || clone ? "cloned" : "imported";
+        }
+        var full = light.Kind is not null;
+        var changed = new List<string>();
+
         var props = actor.GetProperties();
-        var moved = Put(props, CommonStructs.Vector3Prop(at, "Location"));
-        if (Put(props, new NameProperty(light.Tag, "Tag")) | moved) actor.WriteProperties(props);
+        var was = props.GetProp<StructProperty>("Location") is { } l ? CommonStructs.GetVector3(l) : Vector3.Zero;
+        var moved = Changed(changed, $"location {ForkBuilder.Moved(was, light.Location)}", Put(props, CommonStructs.Vector3Prop(light.Location, "Location")));
+        var dirty = Changed(changed, $"tag {props.GetProp<NameProperty>("Tag")?.Value.Instanced} → {light.Tag}", Put(props, new NameProperty(light.Tag, "Tag"))) | moved;
+        // On or off: one receipt line for the actor's flag (a lights: entry's) and the component's.
+        var switched = full && Put(props, new BoolProperty(light.Enabled, "bEnabled"));
+        if (dirty || switched) actor.WriteProperties(props);
 
         var component = Object(pcc, props, "LightComponent") ?? throw new ArgumentException($"line {light.Line}: {actor.InstancedFullPath} has no LightComponent.");
         var c = component.GetProperties();
-        var dirty = Put(c, new BoolProperty(true, "bEnabled"));
-        // The level filter never matches a pawn in a Sideloader level (§A.9): keep it off, and the radius small.
-        dirty |= Put(c, new BoolProperty(false, "bOnlyAffectSameAndSpecifiedLevels"));
-        if (light.Radius is { } radius) dirty |= Put(c, new FloatProperty(radius, "Radius"));
-        if (light.Brightness is { } brightness) dirty |= Put(c, new FloatProperty(brightness, "Brightness"));
+        var edited = Put(c, new BoolProperty(light.Enabled, "bEnabled"));
+        Changed(changed, light.Enabled ? "switched on" : "switched off", switched | edited);
+        edited |= PutFlag(c, "bOnlyAffectSameAndSpecifiedLevels", false, changed);
+        if (light.Radius is { } radius) edited |= PutNumber(c, "Radius", radius, "radius", changed);
+        if (light.Brightness is { } brightness) edited |= PutNumber(c, "Brightness", brightness, "brightness", changed);
         if (c.GetProp<StructProperty>("CachedParentToWorld")?.GetProp<StructProperty>("WPlane") is { } plane)
         {
-            dirty |= Put(plane.Properties, new FloatProperty(at.X, "X")) | Put(plane.Properties, new FloatProperty(at.Y, "Y")) | Put(plane.Properties, new FloatProperty(at.Z, "Z"));
+            var followed = Put(plane.Properties, new FloatProperty(light.Location.X, "X")) | Put(plane.Properties, new FloatProperty(light.Location.Y, "Y"))
+                           | Put(plane.Properties, new FloatProperty(light.Location.Z, "Z"));
+            // It follows the location: a line of its own only when it was off the light's place.
+            if (followed && !moved) changed.Add("CachedParentToWorld moved to the light");
+            edited |= followed;
+        }
+        else if (full)
+        {
+            // A template without one: the identity, moved to the light (the planes named as the game's own files name them).
+            static StructProperty Plane(string name, float w, float x, float y, float z) =>
+                new("Plane", [new FloatProperty(w, "W"), new FloatProperty(x, "X"), new FloatProperty(y, "Y"), new FloatProperty(z, "Z")], name, true);
+            var at = light.Location;
+            edited |= Changed(changed, "CachedParentToWorld added", Put(c, new StructProperty("Matrix",
+                [Plane("XPlane", 0, 1, 0, 0), Plane("YPlane", 0, 0, 1, 0), Plane("ZPlane", 0, 0, 0, 1), Plane("WPlane", 1, at.X, at.Y, at.Z)], "CachedParentToWorld", true)));
+        }
+        if (full)
+        {
+            var rgb = light.Color ?? [255, 255, 255];
+            // Alpha 255: a spawned light's is 0.
+            var colour = CommonStructs.ColorProp(System.Drawing.Color.FromArgb(255, rgb[0], rgb[1], rgb[2]), "LightColor");
+            edited |= Changed(changed, $"colour {Colour(c.GetProp<StructProperty>("LightColor"))} → {Colour(colour)}", Put(c, colour));
+            edited |= PutNumber(c, "FalloffExponent", light.Falloff, "falloff", changed);
+            edited |= PutFlag(c, "CastShadows", false, changed);
+            edited |= PutFlag(c, "bForceDynamicLight", true, changed);
+            edited |= Changed(changed, KindChange(c.GetProp<StructProperty>("LightingChannels"), light.Kind!), PutChannels(c, Channels(KindChannels[light.Kind!])));
+            if (c.GetProp<ArrayPropertyBase>("OtherLevelsToAffect") is { } others)
+            {
+                var levels = others.Properties.Select(p => p switch { NameProperty n => n.Value.Instanced, StrProperty t => t.Value, _ => p.ToString() });
+                edited |= Changed(changed, $"OtherLevelsToAffect [{string.Join(", ", levels)}] cleared", c.RemoveNamedProperty("OtherLevelsToAffect"));
+            }
         }
         if (isNew)
         {
             c.AddOrReplaceProp(CommonStructs.GuidProp(Guid.NewGuid(), "LightGuid"));
             c.AddOrReplaceProp(CommonStructs.GuidProp(Guid.NewGuid(), "LightmapGuid"));
         }
-        if (dirty || isNew) component.WriteProperties(c);
+        if (edited || isNew) component.WriteProperties(c);
+        return (actor, action, isNew ? [] : changed);
+    }
 
-        if (isNew) changes.Add($"light {light.Tag} added");
-        else if (dirty || moved) changes.Add($"light {light.Tag}");
+    /// <summary>Sets a float when it differs, with its receipt line: "&lt;what&gt; old → new" (old "default" when it had none of its own).</summary>
+    private static bool PutNumber(PropertyCollection props, string name, float value, string what, List<string> changes) =>
+        Changed(changes, $"{what} {(props.GetProp<FloatProperty>(name)?.Value is { } old ? ForkBuilder.Number(old) : "default")} → {ForkBuilder.Number(value)}",
+            Put(props, new FloatProperty(value, name)));
+
+    /// <summary>Sets a flag when it differs, with its receipt line: "&lt;name&gt; old → new" (old "default" when it had none of its own).</summary>
+    private static bool PutFlag(PropertyCollection props, string name, bool value, List<string> changes) =>
+        Changed(changes, $"{name} {(props.GetProp<BoolProperty>(name)?.Value is { } old ? Flag(old) : "default")} → {Flag(value)}", Put(props, new BoolProperty(value, name)));
+
+    private static string Flag(bool value) => value ? "true" : "false";
+
+    /// <summary>A Color as a receipt shows it: (r, g, b), with its alpha when that is not 255; "default" when it has none of its own.</summary>
+    private static string Colour(StructProperty? color)
+    {
+        if (color is null) return "default";
+        int Channel(string name) => color.GetProp<ByteProperty>(name)?.Value ?? 0;
+        return Channel("A") == 255 ? $"({Channel("R")}, {Channel("G")}, {Channel("B")})" : $"({Channel("R")}, {Channel("G")}, {Channel("B")}, alpha {Channel("A")})";
+    }
+
+    /// <summary>"kind props → room" when the old channels are a kind's in full, else the kind with the channels it replaced.</summary>
+    private static string KindChange(StructProperty? old, string kind)
+    {
+        if (old is not null && KindChannels.Keys.FirstOrDefault(k => SameExactly(old, Channels(KindChannels[k]))) is { } was) return $"kind {was} → {kind}";
+        var on = old?.Properties.OfType<BoolProperty>().Where(b => b.Value && b.Name.Instanced != "bInitialized").Select(b => b.Name.Instanced).ToList();
+        return $"kind {kind} (channels were {(on is null ? "the template's" : on.Count == 0 ? "none" : string.Join(", ", on))})";
+    }
+
+    /// <summary>LE1CP's fill light for Chakwas in the medbay: a point light any level can copy (what level.yaml names as its lightTemplate).</summary>
+    private static readonly Source DefaultLightTemplate = new("BIOA_NOR10_07_DSG.pcc", "PointLightToggleable_7", 0);
+
+    /// <summary>
+    /// The component's values a lights: entry writes and an NPC light leaves to its template: its colour, falloff, shadows, dynamic light
+    /// and channels, the radius and brightness it may leave out, and the cached transform (whose WPlane the light then moves).
+    /// </summary>
+    private static readonly string[] TemplateLightFields =
+        ["LightColor", "FalloffExponent", "CastShadows", "bForceDynamicLight", "LightingChannels", "Radius", "Brightness", "CachedParentToWorld"];
+
+    /// <summary>
+    /// A new NPC light cloned from an earlier copy of its template, which may be a lights: entry's (on Gameplay_4 alone, its colour,
+    /// maybe off): the actor's bEnabled and the component's <see cref="TemplateLightFields"/> back to the template's own (flattened)
+    /// values, none where it has none, as an import of the template would have them; and the template's OtherLevelsToAffect when the
+    /// copy has none.
+    /// </summary>
+    private static void TakeTemplateLight(IMEPackage pcc, ExportEntry template, ExportEntry copy)
+    {
+        static bool Take(PropertyCollection to, PropertyCollection from, string name)
+        {
+            if (from.GetProp<Property>(name) is not { } value) return to.RemoveNamedProperty(name);
+            // A struct field for field: Put compares only the fields the template's lists, so the clone's Gameplay_4 could stay.
+            if (value is not StructProperty whole || to.GetProp<StructProperty>(name) is not { } old || SameExactly(old, whole)) return Put(to, value);
+            to.AddOrReplaceProp(whole);
+            return true;
+        }
+
+        var templateProps = template.GetProperties();
+        var props = copy.GetProperties();
+        if (Take(props, templateProps, "bEnabled")) copy.WriteProperties(props);
+        if (Object(template.FileRef, templateProps, "LightComponent") is not { } original || Object(pcc, props, "LightComponent") is not { } component) return;
+        var originalProps = original.GetProperties();
+        var c = component.GetProperties();
+        var dirty = TemplateLightFields.Aggregate(false, (any, name) => Take(c, originalProps, name) | any);
+        // The level list only when the copy has none (a lights: entry's clears it): an NPC light's own list, as Reyes's, stays.
+        if (c.GetProp<ArrayPropertyBase>("OtherLevelsToAffect") is null && originalProps.GetProp<ArrayPropertyBase>("OtherLevelsToAffect") is { } levels)
+        {
+            c.AddOrReplaceProp(levels);
+            dirty = true;
+        }
+        if (dirty) component.WriteProperties(c);
+    }
+
+    /// <summary>
+    /// A note for each light of the level on the prop lights' channel whose tag no lights: entry names (its entry deleted by hand): the
+    /// build never deletes a light, so it stays as built, and MeleBridge no longer lists it.
+    /// </summary>
+    private static void NoteOrphanLights(IMEPackage pcc, ExportEntry level, Spec spec, List<string> notes)
+    {
+        var named = spec.Lights.Select(l => l.Tag).Concat(spec.Npcs.SelectMany(n => n.Lights.Select(l => l.Tag))).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var light in pcc.Exports.Where(e => e.Parent == level && e.IsA("Light")))
+        {
+            var props = light.GetProperties();
+            if (props.GetProp<NameProperty>("Tag")?.Value.Instanced is not { } tag || named.Contains(tag)) continue;
+            // By its instanced name: Gameplay_4 is the name Gameplay, number 5, which a lookup by the string never matches.
+            if (Object(pcc, props, "LightComponent")?.GetProperty<StructProperty>("LightingChannels")?.Properties.OfType<BoolProperty>()
+                    .FirstOrDefault(b => b.Name.Instanced == PropChannel)?.Value != true) continue;
+            var on = Object(pcc, props, "LightComponent")?.GetProperty<BoolProperty>("bEnabled")?.Value != false;
+            notes.Add($"{light.ObjectName.Instanced} (tag {tag}) is a light of the lights section no entry names any more: it stays as built ({(on ? "on" : "off")}), "
+                      + "and MeleBridge no longer lists it. To switch it off, give it an entry again with enabled: false.");
+        }
     }
 
     /// <summary>
@@ -817,6 +1302,7 @@ public static class LevelBuilder
         (FloatProperty x, FloatProperty y) => x.Value == y.Value,
         (IntProperty x, IntProperty y) => x.Value == y.Value,
         (BoolProperty x, BoolProperty y) => x.Value == y.Value,
+        (ByteProperty x, ByteProperty y) => x.Value == y.Value,
         (NameProperty x, NameProperty y) => x.Value == y.Value,
         (StringRefProperty x, StringRefProperty y) => x.Value == y.Value,
         (ObjectProperty x, ObjectProperty y) => x.Value == y.Value,
@@ -867,7 +1353,7 @@ public static class LevelBuilder
     {
         var spec = new Spec();
         foreach (var (key, value) in Entries(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "streaming", "postProcess",
-                     "characterLights", "startPointTemplate", "startPoints", "squad", "npcs", "usables", "propTemplate", "props"))
+                     "characterLights", "startPointTemplate", "startPoints", "squad", "npcs", "usables", "propTemplate", "props", "vanilla", "lights"))
         {
             switch (key)
             {
@@ -903,13 +1389,84 @@ public static class LevelBuilder
                     if (value is not YamlMappingNode props) throw Fail(value, "'props' maps names to actors.");
                     spec.Props = props.Children.Select(c => PropOf(Scalar(c.Key), c.Value)).ToList();
                     break;
+                case "vanilla":
+                    // Its last entry deleted (as its comment says to give an actor its vanilla values back): no entry, no fork.
+                    if (Null(value)) break;
+                    if (value is not YamlMappingNode vanilla) throw Fail(value, "'vanilla' maps <file>.<actor name> to what changes: {location, rotation or yaw, scale, scale3d, removed}.");
+                    spec.Vanilla = vanilla.Children.Select(c => VanillaOf(c.Key, c.Value)).ToList();
+                    break;
+                case "lights":
+                    if (Null(value)) break;
+                    if (value is not YamlMappingNode lights) throw Fail(value, "'lights' maps names to lights: {tag, kind, location, radius, brightness, color, falloff, enabled}.");
+                    spec.Lights = lights.Children.Select(c => LightEntryOf(Scalar(c.Key), c.Value)).ToList();
+                    break;
             }
         }
-        // The build finds each actor again by its tag.
-        var twice = spec.Npcs.Select(n => n.Tag).Concat(spec.Usables.Select(u => u.Tag)).Concat(spec.Props.Select(p => p.Tag)).OfType<string>()
-            .GroupBy(t => t, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
-        if (twice is not null) throw new ArgumentException($"Two entries have tag '{twice.Key}'.");
+        // The build finds each actor again by its tag, and MeleBridge each light: an NPC light's included.
+        var tags = spec.Npcs.Select(n => (Tag: n.Tag, n.Line, What: $"npcs.{n.Name}"))
+            .Concat(spec.Npcs.SelectMany(n => n.Lights.Select(l => (Tag: (string?)l.Tag, l.Line, What: $"npcs.{n.Name}.lights (an NPC light)"))))
+            .Concat(spec.Usables.Select(u => (Tag: u.Tag, u.Line, What: $"usables.{u.Name}")))
+            .Concat(spec.Props.Select(p => (Tag: p.Tag, p.Line, What: $"props.{p.Name}")))
+            .Concat(spec.Lights.Select(l => (Tag: l.Tag, l.Line, What: $"lights.{l.Name}")));
+        var twice = tags.Where(t => t.Tag is not null).GroupBy(t => t.Tag!, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (twice is not null)
+        {
+            var (first, second) = (twice.MinBy(t => t.Line), twice.OrderBy(t => t.Line).Skip(1).First());
+            var npcLight = first.What.EndsWith("(an NPC light)") || second.What.EndsWith("(an NPC light)");
+            throw new ArgumentException($"line {second.Line}: {second.What} has tag '{twice.Key}', as {first.What} at line {first.Line}: tags are unique across npcs (their lights "
+                                        + "too), usables, props and lights." + (npcLight ? " NPC lights are edited in their npcs entry: give the other entry its own tag." : ""));
+        }
+        // A vanilla actor ships in a fork, which the map streams instead of the file: only a file it streams can be forked.
+        foreach (var entry in spec.Vanilla.Where(v => spec.Streaming?.Levels.Contains(v.File, StringComparer.OrdinalIgnoreCase) != true))
+        {
+            throw new ArgumentException($"line {entry.Line}: {entry.File} is not in streaming.levels: a vanilla actor ships in a fork of a file the map streams.");
+        }
+        var again = spec.Vanilla.GroupBy(v => v.Key, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (again is not null) throw new ArgumentException($"line {again.Last().Line}: 'vanilla' has {again.Key} twice.");
         return spec;
+    }
+
+    /// <summary>BIOA_FRE31_00_LAY.StaticMeshActor_69: {location: [x, y, z], rotation: [pitch, yaw, roll] or yaw, scale, scale3d, removed}, as props take them.</summary>
+    private static ForkBuilder.Entry VanillaOf(YamlNode key, YamlNode body)
+    {
+        var name = Scalar(key);
+        var dot = name.IndexOf('.');
+        if (dot <= 0 || dot == name.Length - 1 || name.IndexOf('.', dot + 1) >= 0)
+        {
+            throw Fail(key, $"'{name}': a vanilla key is <file>.<actor name>, e.g. BIOA_FRE31_00_LAY.StaticMeshActor_69.");
+        }
+        if (body is not YamlMappingNode m) throw Fail(body, $"vanilla '{name}' must be a mapping, e.g. {{ location: [x, y, z] }} or {{ removed: true }}.");
+        Vector3? location = null, scale3d = null;
+        float? yaw = null, scale = null;
+        float[]? rotation = null;
+        var removed = false;
+        YamlNode? turned = null;
+        foreach (var (k, value) in Entries(m, "location", "rotation", "yaw", "scale", "scale3d", "removed"))
+        {
+            switch (k)
+            {
+                case "location":
+                    var xyz = Numbers(value, 3, 3);
+                    location = new Vector3(xyz[0], xyz[1], xyz[2]);
+                    break;
+                case "rotation":
+                    rotation = Numbers(value, 3, 3);
+                    turned = value;
+                    break;
+                case "yaw": yaw = Number(value); break;
+                case "scale": scale = Number(value); break;
+                case "scale3d":
+                    var s = Numbers(value, 3, 3);
+                    scale3d = new Vector3(s[0], s[1], s[2]);
+                    break;
+                case "removed": removed = Bool(value); break;
+            }
+        }
+        if (yaw is not null && turned is not null)
+        {
+            throw Fail(turned, $"vanilla '{name}' has 'yaw' and 'rotation': give one ('rotation' is [pitch, yaw, roll] in degrees, 'yaw' keeps the file's pitch and roll).");
+        }
+        return new ForkBuilder.Entry(name[..dot], name[(dot + 1)..], (int)key.Start.Line, location, yaw, rotation, scale, scale3d, removed);
     }
 
     private static NpcSpec NpcOf(string name, YamlNode body, Dictionary<int, Dictionary<string, string>> strings)
@@ -1154,5 +1711,45 @@ public static class LevelBuilder
             }
         }
         return new LightSpec(tag ?? throw Fail(value, "the light needs a 'tag'."), offset, radius, brightness, (int)m.Start.Line);
+    }
+
+    /// <summary>
+    /// {tag, kind: props | room, location: [x, y, z], radius, brightness, color: [r, g, b], falloff, enabled, template}: kind props, colour
+    /// white, falloff 2 and enabled true when left out; the template is the file's lightTemplate, else LE1CP's fill light.
+    /// </summary>
+    private static LightEntrySpec LightEntryOf(string name, YamlNode body)
+    {
+        if (body is not YamlMappingNode m) throw Fail(body, $"light '{name}' must be a mapping: {{tag, kind, location, radius, brightness}}.");
+        if (m.Children.Keys.FirstOrDefault(k => k is YamlScalarNode { Value: "removed" }) is { } removed)
+        {
+            throw Fail(removed, $"light '{name}': a light is switched off (enabled: false), never removed.");
+        }
+        var light = new LightEntrySpec { Name = name, Line = (int)body.Start.Line };
+        foreach (var (key, value) in Entries(m, "tag", "kind", "location", "radius", "brightness", "color", "falloff", "enabled", "template"))
+        {
+            switch (key)
+            {
+                case "tag": light.Tag = Scalar(value); break;
+                case "kind":
+                    light.Kind = Scalar(value) is "props" or "room" ? Scalar(value) : throw Fail(value, "'kind' is props (lights props only: the Gameplay_4 channel) or room (walls, vanilla meshes, pawns and props).");
+                    break;
+                case "location":
+                    var xyz = Numbers(value, 3, 3);
+                    light.Location = new Vector3(xyz[0], xyz[1], xyz[2]);
+                    break;
+                case "radius": light.Radius = Number(value) is > 0 and var r ? r : throw Fail(value, "'radius' must be over 0."); break;
+                case "brightness": light.Brightness = Number(value) is >= 0 and var b ? b : throw Fail(value, "'brightness' can't be negative."); break;
+                case "color":
+                    var rgb = Numbers(value, 3, 3);
+                    light.Color = rgb.All(c => c is >= 0 and <= 255 && c == MathF.Round(c)) ? rgb.Select(c => (byte)c).ToArray() : throw Fail(value, "'color' is [r, g, b], whole numbers from 0 to 255.");
+                    break;
+                case "falloff": light.Falloff = Number(value) is > 0 and var f ? f : throw Fail(value, "'falloff' must be over 0 (2 by default)."); break;
+                case "enabled": light.Enabled = Bool(value); break;
+                case "template": light.Template = SourceOf(value); break;
+            }
+        }
+        if (light.Tag is null) throw Fail(body, $"light '{name}' needs a 'tag' (how the build and the editor find it again).");
+        if (light.Location is null || light.Radius is null || light.Brightness is null) throw Fail(body, $"light '{name}' needs 'location', 'radius' and 'brightness'.");
+        return light;
     }
 }

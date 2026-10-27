@@ -91,6 +91,10 @@ internal static class YamlFiles
 
     internal static string Scalar(YamlNode value) => value is YamlScalarNode { Value: { } s } ? s : throw Fail(value, "expected a single value.");
 
+    /// <summary>A key given no value: 'vanilla:' alone (its last entry deleted by hand), '~' or 'null'.</summary>
+    internal static bool Null(YamlNode value) =>
+        value is YamlScalarNode { Style: ScalarStyle.Plain or ScalarStyle.Any, Value: null or "" or "~" or "null" or "Null" or "NULL" };
+
     internal static IEnumerable<YamlNode> Sequence(YamlNode value) => value is YamlSequenceNode s ? s.Children : throw Fail(value, "expected a list.");
 
     internal static int Int(YamlNode value) =>

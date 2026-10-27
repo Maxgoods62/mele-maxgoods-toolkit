@@ -22,7 +22,8 @@
 
 // The editor's render-thread half: Dear ImGui and ImGuizmo drawn into the game's back buffer from a hooked
 // IDXGISwapChain::Present. It never touches game objects: it draws from the game thread's snapshot and posts commands back.
-// It also reads the prop catalog mele-mcp builds (catalog.json and its thumbnail PNGs) for the Props window's grid.
+// It also reads the prop catalog mele-mcp builds (catalog.json and its thumbnail PNGs) for the Props window's grid, and draws
+// the lights the editor lists (icons, the selected one's radius, its panel).
 namespace MeleBridge::Editor
 {
     namespace
@@ -85,6 +86,20 @@ namespace MeleBridge::Editor
         /// When the game thread's last status line arrived, to show it for a few seconds.
         unsigned long long StatusSeen = 0;
         LARGE_INTEGER StatusSince{};
+        /// The Lights tab is open this frame: a click near a light's icon selects that light, as with Alt held.
+        bool LightsTabOpen = false;
+        /// The light panel's settings while a control is held, and for two game frames after the last change: the game thread
+        /// applies a change a frame or two later, and the snapshot would pull the control back meanwhile.
+        LightBlock PanelLight;
+        std::string PanelPath;
+        bool PanelEditing = false;
+        unsigned long long PanelFrame = 0;
+
+        /// Light icons are this big; a click this close to one selects its light.
+        constexpr float IconRadius = 7;
+        constexpr float IconPickPixels = 12;
+        /// The panel's ranges, as the game thread holds a Light command to them.
+        constexpr float MinRadius = 16, MaxRadius = 4096, MaxBrightness = 10, MinFalloff = 1, MaxFalloff = 8;
 
         template <typename T>
         T* Wait(std::atomic<T*> const& orig)
@@ -313,11 +328,20 @@ namespace MeleBridge::Editor
             return s.SelectedDrawScale <= 0 || s.SelectedDrawScale3D.X <= 0 || s.SelectedDrawScale3D.Y <= 0 || s.SelectedDrawScale3D.Z <= 0;
         }
 
+        /// Why the editor won't change the selection with any tool (a vanilla door, a room shell: docs/07 §11), or empty. Not a
+        /// reason to keep a tool from being chosen: the next selection may take it.
+        std::string ActorRefusal(Snapshot const& s, Tool tool)
+        {
+            if (!s.Selected || s.SelectedUnmovable.empty()) return {};
+            return std::format("not {}: {}", tool == Tool::Move ? "moved" : tool == Tool::Turn ? "turned" : "scaled", s.SelectedUnmovable);
+        }
+
         /// Why a tool can't take the selection, or empty.
         std::string ToolRefusal(Snapshot const& s, Tool tool)
         {
             if (!s.Selected || tool == Tool::Move) return {};
             auto const verb = tool == Tool::Turn ? "turned" : "scaled";
+            if (s.SelectedLight) return std::format("not {}: a light only moves (its radius is in the panel)", verb);
             if (tool == Tool::Scale && s.SelectedPawn) return "not scaled: npcs keep a yaw and no scale";
             if (Mirrored(s))
                 return std::format("not {}: {} is mirrored (DrawScale {:g}, DrawScale3D {:g} {:g} {:g}); move it, or fix its scale in the YAML",
@@ -359,6 +383,14 @@ namespace MeleBridge::Editor
                 if (ImGui::Checkbox("Free cam", &freeCam)) Post({ .Type = Command::Kind::FreeCam, .On = freeCam });
                 ImGui::SameLine();
                 ImGui::Checkbox("Props", &ShowProps);
+                ImGui::SameLine();
+                auto autoLight = s.AutoLight;
+                if (ImGui::Checkbox("Auto light", &autoLight)) Post({ .Type = Command::Kind::AutoLight, .On = autoLight });
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A fresh spawn that gets under 60%% of its target from prop lights gets a prop light of its own: one Ctrl+Z "
+                                      "removes both, and it follows the prop until you save or move or set the light. L adds one for the "
+                                      "selected prop either way. Neither adds one for a prop that needs a radius over %.0f.",
+                                      MaxAutoRadius);
                 ImGui::SameLine();
                 ImGui::TextDisabled("|");
                 ImGui::SameLine();
@@ -420,6 +452,7 @@ namespace MeleBridge::Editor
                 else
                     ImGui::TextDisabled("Left click: select   T/R/G: move, turn, scale   Ctrl: snap from where the drag started (10 units, 15 "
                                         "degrees, scale by 0.1)   Del: delete   Ctrl+Z/Y: undo/redo");
+                ImGui::TextDisabled("L: a prop light for the selected prop   Alt+click (or the Lights tab open): a light's icon");
                 if (!s.SaveProblem.empty()) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Last save: %s", s.SaveProblem.c_str());
 
                 // The last word, the game thread's or the overlay's own, for a few seconds.
@@ -443,6 +476,71 @@ namespace MeleBridge::Editor
             ImGui::End();
         }
 
+        /// The selected light's panel (docs/07 §11): every change sends all of its settings, held to the panel's ranges. A drag
+        /// on a control is one undo step: EndPanel closes it once no control is held.
+        void DrawLightPanel(Snapshot const& s)
+        {
+            if (PanelPath != s.SelectedPath || (!PanelEditing && s.Frame > PanelFrame + 1))
+            {
+                PanelLight = s.SelectedLightBlock;
+                PanelPath = s.SelectedPath;
+            }
+            auto light = PanelLight;
+            auto changed = false;
+            auto const clamped = ImGuiSliderFlags_AlwaysClamp;
+            // The controls are the selected light's own: a selection that changes while one is held (an undo, a pass) ends its drag
+            // instead of carrying it to the next light.
+            ImGui::PushID(s.SelectedPath.c_str());
+            ImGui::SeparatorText(light.Kind == LightKind::Room ? "Room light" : "Prop light");
+            if (ImGui::RadioButton("Prop light", light.Kind == LightKind::Props))
+            {
+                light.Kind = LightKind::Props;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gameplay_4 only: lights our props, never walls, pawns or vanilla meshes.");
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Room light", light.Kind == LightKind::Room))
+            {
+                light.Kind = LightKind::Room;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Walls, vanilla meshes, pawns and props alike: a match made with a prop light survives it.");
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Enabled", &light.Enabled);
+            ImGui::SetNextItemWidth(240);
+            changed |= ImGui::SliderFloat("Radius", &light.Radius, MinRadius, MaxRadius, "%.0f", ImGuiSliderFlags_Logarithmic | clamped);
+            ImGui::SetNextItemWidth(240);
+            changed |= ImGui::SliderFloat("Brightness", &light.Brightness, 0, MaxBrightness, "%.3f", ImGuiSliderFlags_Logarithmic | clamped);
+            ImGui::SetNextItemWidth(240);
+            float colour[3] = { static_cast<float>(light.Color[0]) / 255.f, static_cast<float>(light.Color[1]) / 255.f, static_cast<float>(light.Color[2]) / 255.f };
+            if (ImGui::ColorEdit3("Colour", colour, ImGuiColorEditFlags_Uint8 | ImGuiColorEditFlags_DisplayRGB))
+            {
+                for (size_t i = 0; i < 3; i++) light.Color[i] = std::clamp(static_cast<int>(std::lround(colour[i] * 255.f)), 0, 255);
+                changed = true;
+            }
+            ImGui::SetNextItemWidth(240);
+            changed |= ImGui::SliderFloat("Falloff", &light.Falloff, MinFalloff, MaxFalloff, "%.2f", clamped);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("FalloffExponent: 2 is a point light's usual. A prop is covered where (1 - (d/R)^2)^falloff >= 0.25.");
+            ImGui::PopID();
+            if (changed && !(light == PanelLight))
+            {
+                PanelLight = light;
+                PanelEditing = true;
+                PanelFrame = s.Frame;
+                Post({ .Type = Command::Kind::Light, .Light = light });
+            }
+        }
+
+        /// The panel's drag ends when no control is held any more (a checkbox or a radio button: the frame it changed): its undo
+        /// step closes, and the paused world ticks once.
+        void EndPanel(Snapshot const& s)
+        {
+            if (!PanelEditing || ImGui::IsAnyItemActive()) return;
+            Post({ .Type = Command::Kind::EndDrag });
+            PanelEditing = false;
+            PanelFrame = s.Frame;
+        }
+
         void DrawSelection(Snapshot const& s, float width)
         {
             if (!s.Selected) return;
@@ -453,12 +551,53 @@ namespace MeleBridge::Editor
                 ImGui::TextUnformatted(s.SelectedPath.c_str());
                 ImGui::Text("Class: %s%s%s", s.SelectedClass.c_str(), s.SelectedStatic ? " (static)" : "", s.SelectedSpawned ? " (spawned)" : "");
                 ImGui::Text("Tag: %s", s.SelectedTag.c_str());
+                // A vanilla actor: whether its edits ship (docs/07 §11). An actor the editor won't move: why.
+                if (!s.SelectedShips.empty())
+                {
+                    auto const ships = s.SelectedShips.starts_with("ships: ") && !s.SelectedShips.starts_with("ships: unknown");
+                    ImGui::TextColored(ships ? ImVec4(0.5f, 1, 0.6f, 1) : ImVec4(1, 0.6f, 0.3f, 1), "%s", s.SelectedShips.c_str());
+                }
+                if (!s.SelectedUnmovable.empty()) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Not edited: %s", s.SelectedUnmovable.c_str());
                 auto const degrees = [](int units) { return static_cast<float>(static_cast<short>(units & 0xFFFF)) * 360.f / 65536.f; };
                 ImGui::Text("X %.1f   Y %.1f   Z %.1f", s.SelectedLocation.X, s.SelectedLocation.Y, s.SelectedLocation.Z);
-                ImGui::Text("Pitch %.1f   Yaw %.1f   Roll %.1f", degrees(s.SelectedRotation.Pitch), degrees(s.SelectedRotation.Yaw),
-                            degrees(s.SelectedRotation.Roll));
-                ImGui::Text("DrawScale %g   DrawScale3D %g %g %g", s.SelectedDrawScale, s.SelectedDrawScale3D.X, s.SelectedDrawScale3D.Y,
-                            s.SelectedDrawScale3D.Z);
+                // A light only moves: its rotation and scales are the actor's, and count for nothing.
+                if (!s.SelectedLight)
+                {
+                    ImGui::Text("Pitch %.1f   Yaw %.1f   Roll %.1f", degrees(s.SelectedRotation.Pitch), degrees(s.SelectedRotation.Yaw),
+                                degrees(s.SelectedRotation.Roll));
+                    ImGui::Text("DrawScale %g   DrawScale3D %g %g %g", s.SelectedDrawScale, s.SelectedDrawScale3D.X, s.SelectedDrawScale3D.Y,
+                                s.SelectedDrawScale3D.Z);
+                }
+                // A prop the editor switches (docs/07 §11): what prop lights give it (E) against what a fresh Auto light would (T).
+                if (s.SelectedProp)
+                {
+                    // Too big for one prop light: L would refuse it, so nothing here may offer L (the game thread makes its target
+                    // nothing).
+                    auto const tooBig = s.SelectedAutoRadius > MaxAutoRadius;
+                    if (tooBig)
+                    {
+                        ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "too big for one prop light: it needs radius %.0f from here, over %.0f (L adds none)",
+                                           s.SelectedAutoRadius, MaxAutoRadius);
+                        // Covered, a light already lights it (its Auto light kept on a side that fits, one placed by hand).
+                        if (!s.SelectedCovered) ImGui::TextDisabled("a room light (Lights tab) lights it with the walls around it");
+                    }
+                    // No target: a fresh prop light would give nothing here, so no share says anything.
+                    else if (s.SelectedTarget <= 0)
+                    {
+                        ImGui::TextDisabled("prop light: no target");
+                    }
+                    else
+                    {
+                        auto const share = s.SelectedReceived / s.SelectedTarget;
+                        auto const low = share < 0.6f;
+                        ImGui::TextColored(low ? ImVec4(1, 0.6f, 0.3f, 1) : ImVec4(0.5f, 1, 0.6f, 1), "prop light %.0f%% of target%s", share * 100,
+                                           low ? ": L adds one" : "");
+                    }
+                    if (!s.SelectedCovered)
+                        ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "no prop light covers it: lit by its light environment, brighter than vanilla%s",
+                                           tooBig ? "" : " (L)");
+                }
+                if (s.SelectedLight) DrawLightPanel(s);
                 if (ImGui::Button("Deselect")) Post({ .Type = Command::Kind::Deselect });
             }
             ImGui::End();
@@ -987,9 +1126,42 @@ namespace MeleBridge::Editor
             ImGui::EndChild();
         }
 
-        /// Props: the catalog as a grid of thumbnails, and the meshes in memory as a list.
+        ImU32 ColourOf(LightBlock const& light, int alpha = 255) { return IM_COL32(light.Color[0], light.Color[1], light.Color[2], alpha); }
+
+        /// The Lights tab (docs/07 §11): Prop light and Room light add one over where the view points; the list (the editor's lights
+        /// and the YAMLs' lights: entries, deleted ones left out) selects one. While it is open, a click near an icon does too.
+        void DrawLights(Snapshot const& s)
+        {
+            if (ImGui::Button("Prop light")) Post({ .Type = Command::Kind::AddLight, .On = false });
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("A point light on Gameplay_4 only: it lights our props, never walls, pawns or vanilla meshes. Brightness and "
+                                  "colour from the last prop light you tuned on this map.");
+            ImGui::SameLine();
+            if (ImGui::Button("Room light")) Post({ .Type = Command::Kind::AddLight, .On = true });
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lights walls, vanilla meshes, pawns and props alike.");
+            ImGui::TextDisabled("%d lights. Click one here, or near its icon in the world, to select it.", static_cast<int>(s.Lights.size()));
+            if (ImGui::BeginChild("##lights"))
+            {
+                for (size_t i = 0; i < s.Lights.size(); i++)
+                {
+                    auto const& l = s.Lights[i];
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::ColorButton("##colour", ImGui::ColorConvertU32ToFloat4(ColourOf(l.Light)), ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker,
+                                       { ImGui::GetTextLineHeight(), ImGui::GetTextLineHeight() });
+                    ImGui::SameLine();
+                    auto const row = std::format("{}   {}   radius {:.0f}   brightness {:.3g}{}", l.Tag, l.Light.Kind == LightKind::Room ? "room" : "props",
+                                                 l.Light.Radius, l.Light.Brightness, l.Light.Enabled ? "" : "   (off)");
+                    if (ImGui::Selectable(row.c_str(), s.Selected && s.SelectedPath == l.Path)) Post({ .Type = Command::Kind::PickLight, .Text = l.Path });
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+        }
+
+        /// Props: the catalog as a grid of thumbnails, and the meshes in memory as a list. Lights: the editor's lights.
         void DrawProps(Snapshot const& s, float height)
         {
+            LightsTabOpen = false;
             if (!ShowProps) return;
             // Asked once per list: a map change drops the list, and the new map's is asked for.
             if (s.Meshes != nullptr) MeshesAsked = false;
@@ -1014,6 +1186,12 @@ namespace MeleBridge::Editor
                     if (ImGui::BeginTabItem("In this level"))
                     {
                         DrawLevelMeshes(s);
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Lights"))
+                    {
+                        LightsTabOpen = true;
+                        DrawLights(s);
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();
@@ -1062,10 +1240,91 @@ namespace MeleBridge::Editor
                         ImGui::PopTextWrapPos();
                     }
                 }
+                if (s.OurLevels != nullptr)
+                {
+                    // Which levels are ours (docs/07 §11): read at each map change.
+                    auto const& levels = *s.OurLevels;
+                    if (!levels.Problem.empty())
+                    {
+                        ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "%s", levels.Problem.c_str());
+                    }
+                    else
+                    {
+                        std::string names;
+                        for (auto const& level : levels.Levels) names += (names.empty() ? "" : ", ") + level;
+                        if (names.empty()) names = "no levels";
+                        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 40);
+                        ImGui::TextUnformatted(std::format("levels.json: {} ({})", names, levels.Dlc.empty() ? "no dlc folder" : levels.Dlc).c_str());
+                        ImGui::PopTextWrapPos();
+                    }
+                }
                 ImGui::Checkbox("ImGui demo window", &ShowDemo);
             }
             ImGui::End();
             if (ShowDemo) ImGui::ShowDemoWindow(&ShowDemo);
+        }
+
+        /// A light's radius as a circle about it in each world plane, through the gizmo's projection.
+        void DrawRings(LightIcon const& l, float const* view, float const* projection, float width, float height)
+        {
+            constexpr int Segments = 64;
+            auto const draw = ImGui::GetBackgroundDrawList();
+            auto const colour = ColourOf(l.Light, 200);
+            for (int plane = 0; plane < 3; plane++)
+            {
+                ImVec2 last{};
+                auto hadLast = false;
+                for (int i = 0; i <= Segments; i++)
+                {
+                    auto const angle = 6.2831853f * static_cast<float>(i) / Segments;
+                    auto const a = std::cos(angle) * l.Light.Radius, b = std::sin(angle) * l.Light.Radius;
+                    auto point = l.Location;
+                    if (plane == 0) point = { point.X + a, point.Y + b, point.Z };
+                    else if (plane == 1) point = { point.X + a, point.Y, point.Z + b };
+                    else point = { point.X, point.Y + a, point.Z + b };
+                    float x = 0, y = 0;
+                    auto const shown = ProjectPoint(view, projection, point, width, height, x, y);
+                    if (shown && hadLast) draw->AddLine(last, { x, y }, colour, 1.5f);
+                    hadLast = shown;
+                    last = { x, y };
+                }
+            }
+        }
+
+        /// Every listed light as an icon in its colour, hollow when off, a room light with a second ring; the selected one also
+        /// shows its radius.
+        void DrawLightIcons(Snapshot const& s, float const* view, float const* projection, float width, float height)
+        {
+            auto const draw = ImGui::GetBackgroundDrawList();
+            for (auto const& l : s.Lights)
+            {
+                if (s.Selected && s.SelectedPath == l.Path) DrawRings(l, view, projection, width, height);
+                float x = 0, y = 0;
+                if (!ProjectPoint(view, projection, l.Location, width, height, x, y)) continue;
+                // A dark rim: a white light's icon on a bright wall.
+                draw->AddCircle({ x, y }, IconRadius + 1.5f, IM_COL32(0, 0, 0, 200), 0, 3);
+                if (l.Light.Enabled) draw->AddCircleFilled({ x, y }, IconRadius, ColourOf(l.Light));
+                else draw->AddCircle({ x, y }, IconRadius - 1, ColourOf(l.Light), 0, 2);
+                if (l.Light.Kind == LightKind::Room) draw->AddCircle({ x, y }, IconRadius + 4, ColourOf(l.Light, 200), 0, 1.5f);
+            }
+        }
+
+        /// The light whose icon is nearest a point, within 12 px; empty for none.
+        std::string LightAt(Snapshot const& s, float const* view, float const* projection, float width, float height, ImVec2 at)
+        {
+            std::string nearest;
+            auto best = IconPickPixels;
+            for (auto const& l : s.Lights)
+            {
+                float x = 0, y = 0;
+                if (!ProjectPoint(view, projection, l.Location, width, height, x, y)) continue;
+                if (auto const distance = std::hypot(x - at.x, y - at.y); distance <= best)
+                {
+                    best = distance;
+                    nearest = l.Path;
+                }
+            }
+            return nearest;
         }
 
         /// DrawScale3D after a scale drag: the dragged axis (all three for the centre handle) is its row's length over DrawScale,
@@ -1094,19 +1353,23 @@ namespace MeleBridge::Editor
                 RefusedFor.clear();
                 return;
             }
+            // A light only moves (docs/07 §11): the move gizmo, whatever tool T, R or G chose for props.
+            auto const tool = s.SelectedLight ? Tool::Move : Current;
             if (Dragging && DraggedPath != s.SelectedPath) ResetGizmo();
-            if (Current != LastTool)
+            if (tool != LastTool)
             {
                 ResetGizmo();
-                LastTool = Current;
+                LastTool = tool;
             }
 
-            // R and G are off on a selection they can't take (a pawn's scale, a mirrored actor): said once, no gizmo.
-            auto const why = ToolRefusal(s, Current);
+            // No gizmo on a selection the editor won't change (a vanilla door), nor for R and G on one they can't take (a pawn's
+            // scale, a mirrored actor): said once.
+            auto why = ActorRefusal(s, tool);
+            if (why.empty()) why = ToolRefusal(s, tool);
             if (!why.empty())
             {
                 ResetGizmo();
-                auto const key = std::format("{}\n{}", s.SelectedPath, static_cast<int>(Current));
+                auto const key = std::format("{}\n{}", s.SelectedPath, static_cast<int>(tool));
                 if (RefusedFor != key)
                 {
                     RefusedFor = key;
@@ -1125,18 +1388,18 @@ namespace MeleBridge::Editor
                 ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
                 ImGuizmo::SetRect(0, 0, width, height);
                 // A pawn turns about the vertical only (the level YAML keeps a yaw for npcs); anything else on three local rings.
-                auto const pawnTurn = Current == Tool::Turn && s.SelectedPawn;
-                auto const operation = Current == Tool::Move ? ImGuizmo::TRANSLATE
-                                       : Current == Tool::Scale ? ImGuizmo::SCALE
+                auto const pawnTurn = tool == Tool::Turn && s.SelectedPawn;
+                auto const operation = tool == Tool::Move ? ImGuizmo::TRANSLATE
+                                       : tool == Tool::Scale ? ImGuizmo::SCALE
                                        : pawnTurn ? ImGuizmo::ROTATE_Z
                                                   : ImGuizmo::ROTATE_X | ImGuizmo::ROTATE_Y | ImGuizmo::ROTATE_Z;
-                auto const mode = Current == Tool::Move || pawnTurn ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+                auto const mode = tool == Tool::Move || pawnTurn ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
                 // Ctrl snaps the move to 10 units and the turn to 15 degrees, from where the drag started. A scale is rounded below
                 // instead: ImGuizmo's snap would round the ratio to the scale at the start.
                 auto const ctrl = ImGui::GetIO().KeyCtrl;
-                float const snap[3] = { Current == Tool::Turn ? 15.f : 10.f, 10.f, 10.f };
+                float const snap[3] = { tool == Tool::Turn ? 15.f : 10.f, 10.f, 10.f };
                 float delta[16]{};
-                auto const changed = ImGuizmo::Manipulate(view, projection, operation, mode, model, delta, ctrl && Current != Tool::Scale ? snap : nullptr);
+                auto const changed = ImGuizmo::Manipulate(view, projection, operation, mode, model, delta, ctrl && tool != Tool::Scale ? snap : nullptr);
                 auto const holding = ImGuizmo::IsUsing();
                 if (holding && !Dragging)
                 {
@@ -1152,7 +1415,7 @@ namespace MeleBridge::Editor
                 // every frame of the drag: for a translation, Manipulate returns whether this frame's step differs from the last
                 // one, so a Ctrl-snapped drag at a steady pace (one 10-unit step a frame) would send its first step only, and a
                 // release on such a frame would leave the actor short of the gizmo.
-                auto const moving = Current == Tool::Move;
+                auto const moving = tool == Tool::Move;
                 if (Dragging && (holding || changed || moving))
                 {
                     std::memcpy(DragModel, model, sizeof model);
@@ -1170,11 +1433,11 @@ namespace MeleBridge::Editor
                         auto const yaw = static_cast<int>(std::lround(DragYaw * 65536.f / 360.f));
                         Post({ .Type = Command::Kind::Rotate, .Rotation = { DragRotation.Pitch, yaw, DragRotation.Roll } });
                     }
-                    else if (changed && Current == Tool::Turn)
+                    else if (changed && tool == Tool::Turn)
                     {
                         Post({ .Type = Command::Kind::Rotate, .Rotation = RotatorOf(DragModel) });
                     }
-                    else if (changed && Current == Tool::Scale)
+                    else if (changed && tool == Tool::Scale)
                     {
                         auto const scale = ScaleOf(DragModel, ctrl);
                         Post({ .Type = Command::Kind::Scale, .X = scale.X, .Y = scale.Y, .Z = scale.Z });
@@ -1221,8 +1484,9 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// Clicks and the wheel that no window or arrow took.
-        void HandleWorldInput(Snapshot const& s, float width, float height)
+        /// Clicks and the wheel that no window or arrow took. While the Lights tab is open or Alt is held, a click near a light's
+        /// icon selects that light; any other click traces, so a light never takes a click meant for a prop (docs/07 §11).
+        void HandleWorldInput(Snapshot const& s, float const* view, float const* projection, float width, float height)
         {
             auto const& io = ImGui::GetIO();
             auto const free = !io.WantCaptureMouse && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing();
@@ -1258,8 +1522,9 @@ namespace MeleBridge::Editor
             // Keys, unless a text field has them (the Props search).
             if (!io.WantTextInput && !Looking.load())
             {
-                // Not mid-drag: the drag's step is still open, and the gizmo would change under the mouse.
-                auto const idle = !ImGuizmo::IsUsingAny();
+                // Not mid-drag, on the gizmo or on a panel control: the drag's step is still open (another command would close it
+                // half way), and the gizmo or the control would change under the mouse.
+                auto const idle = !ImGuizmo::IsUsingAny() && !PanelEditing && !ImGui::IsAnyItemActive();
                 if (idle && ImGui::IsKeyPressed(ImGuiKey_T, false)) Choose(s, Tool::Move);
                 if (idle && ImGui::IsKeyPressed(ImGuiKey_R, false)) Choose(s, Tool::Turn);
                 if (idle && ImGui::IsKeyPressed(ImGuiKey_G, false)) Choose(s, Tool::Scale);
@@ -1267,11 +1532,15 @@ namespace MeleBridge::Editor
                 if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) Post({ .Type = Command::Kind::Save });
                 if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) Post({ .Type = io.KeyShift ? Command::Kind::Redo : Command::Kind::Undo });
                 if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) Post({ .Type = Command::Kind::Redo });
+                // The game thread says why when the selection is not a prop it switches.
+                if (idle && !io.KeyCtrl && s.Selected && ImGui::IsKeyPressed(ImGuiKey_L, false)) Post({ .Type = Command::Kind::PropLight });
             }
 
             if (free && !Looking.load() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && s.CanvasWidth > 0)
             {
-                Post({ .Type = Command::Kind::Pick, .X = io.MousePos.x * s.CanvasWidth / width, .Y = io.MousePos.y * s.CanvasHeight / height });
+                auto const light = LightsTabOpen || io.KeyAlt ? LightAt(s, view, projection, width, height, io.MousePos) : std::string{};
+                if (!light.empty()) Post({ .Type = Command::Kind::PickLight, .Text = light });
+                else Post({ .Type = Command::Kind::Pick, .X = io.MousePos.x * s.CanvasWidth / width, .Y = io.MousePos.y * s.CanvasHeight / height });
             }
             if (s.FreeCam && free && io.MouseWheel != 0) Post({ .Type = Command::Kind::Speed, .X = io.MouseWheel });
         }
@@ -1380,6 +1649,8 @@ namespace MeleBridge::Editor
                     ResetGizmo();
                     RefusedFor.clear();
                     ReleaseThumbnails();
+                    PanelEditing = false;
+                    PanelPath.clear();
                 }
                 return;
             }
@@ -1416,10 +1687,12 @@ namespace MeleBridge::Editor
 
             DrawToolbar(s, width);
             DrawSelection(s, width);
+            EndPanel(s);
             DrawProps(s, height);
             DrawDiagnostics(s, width, height);
+            DrawLightIcons(s, view, projection, width, height);
             DrawGizmo(s, view, projection, width, height);
-            HandleWorldInput(s, width, height);
+            HandleWorldInput(s, view, projection, width, height);
 
             ImGui::Render();
             Render(chain);

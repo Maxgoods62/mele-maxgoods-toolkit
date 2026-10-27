@@ -10,7 +10,8 @@ using static MeleMcp.Core.YamlFiles;
 namespace MeleMcp.Core;
 
 /// <param name="Key">The actor's tag, or its object path when it has none.</param>
-/// <param name="Action">updated, added, removed, unchanged, conflict (refused: nothing applied), skipped or failed.</param>
+/// <param name="Action">updated, added, removed, unchanged, conflict (refused: nothing applied), refused (a vanilla actor the build may not
+/// change), skipped or failed.</param>
 /// <param name="Entry">The YAML entry, as section.name.</param>
 /// <param name="Changes">What changed in the YAML.</param>
 /// <param name="Reason">Why it was left unchanged, refused, skipped or failed; which of the YAML's values were kept over the editor's.</param>
@@ -30,16 +31,34 @@ public sealed record EditorImportResult(string File, string Session, bool Writte
 /// Merges what the in-game editor saved (MeleBridge's session file, one per map; docs/07 §3.7, §10) into a level YAML file, keyed by
 /// tag, so a rebuild keeps it: moved, turned or scaled actors get their location, rotation and scale, field by field against the
 /// state the YAML held when the editor first changed them (a value changed in the YAML since is kept, both changed is a conflict);
-/// meshes spawned in the editor get a props entry, deleted props 'removed: true' (the build hides their actor). Vanilla actors are
-/// skipped: moving or deleting them ships with forked files (docs/07 §4, phase 4).
+/// meshes spawned in the editor get a props entry, deleted props 'removed: true' (the build hides their actor). Vanilla actors of the
+/// files the level streams get a vanilla entry, keyed by file and actor name, which the build ships in a fork of the file (docs/07 §11);
+/// those of other levels stay dev-only.
 /// </summary>
 public static class EditorImport
 {
     private const string PropsComment = "Meshes placed with the in-game editor (F8, Save, then editor_import).";
 
+    /// <summary>Above a lights section the import adds.</summary>
+    private const string LightsComment =
+        "Lights placed with the in-game editor (F8, Save, then editor_import). kind props: lights only props (the Gameplay_4\n"
+        + "channel); room: walls, vanilla meshes, pawns and props. A light is switched off (enabled: false), never removed.";
+
+    /// <summary>Above a vanilla section the import adds; {0} is a fork's name.</summary>
+    private const string VanillaComment =
+        "Vanilla actors the map's streamed files change: shipped in a fork, a renamed copy of the file (named after the map and\n"
+        + "the file, here {0}) that the map streams instead. A field left out keeps the file's value: delete a field,\n"
+        + "or the whole entry, to give the actor its vanilla value back.";
+
     /// <summary>Locations this close after rounding to 2 decimals are one; scales within <see cref="ScaleNear"/>.</summary>
     private const double Near = 0.01;
     private const double ScaleNear = 0.001;
+
+    /// <summary>Light radii this close are one; brightness and falloff within <see cref="LightNear"/> (MeleBridge compares them so too).</summary>
+    private const double RadiusNear = 0.01;
+    private const double LightNear = 0.001;
+
+    private static readonly double[] White = [255, 255, 255];
 
     private static readonly double[] Unscaled = [1, 1, 1];
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
@@ -54,21 +73,48 @@ public static class EditorImport
     /// <param name="Scale3D">DrawScale3D.</param>
     /// <param name="Deleted">In a base: whether the YAML's entry has removed: true (editor_import writes it, MeleBridge's Save keeps it; null
     /// in a base without it, which merges 'removed' two-way). In imported.before: whether the installed level hides the actor.</param>
-    private sealed record Transform(double[]? Location, double[]? Rotation, double? Scale, double[]? Scale3D, bool? Deleted = null);
+    /// <param name="Light">A light's block (docs/07 §11); null for any other actor.</param>
+    private sealed record Transform(double[]? Location, double[]? Rotation, double? Scale, double[]? Scale3D, bool? Deleted = null, LightBlock? Light = null);
+
+    /// <summary>
+    /// A light's state in a session entry (docs/07 §11): kind by name (props or room), radius, brightness, colour [r, g, b] (0-255),
+    /// falloff exponent, and whether it is on. A spawned light the editor deleted keeps its 'enabled' and is 'deleted'; it shows
+    /// enabled and not deleted.
+    /// </summary>
+    private sealed record LightBlock(string? Kind, double? Radius, double? Brightness, double[]? Color, double? Falloff, bool? Enabled);
+
+    /// <summary>A light block with every field, as the import compares and writes it.</summary>
+    private sealed record LightState(string Kind, double Radius, double Brightness, double[] Color, double Falloff, bool Enabled)
+    {
+        public static LightState? Of(LightBlock? block) =>
+            block is { Kind: "props" or "room", Radius: { } radius, Brightness: { } brightness, Color: { Length: 3 } color, Falloff: { } falloff, Enabled: { } enabled }
+                ? new LightState(block.Kind, radius, brightness, color, falloff, enabled)
+                : null;
+
+        public JsonObject Json() => new()
+        {
+            ["kind"] = Kind, ["radius"] = Radius, ["brightness"] = Brightness, ["color"] = Ints(Color), ["falloff"] = Falloff, ["enabled"] = Enabled,
+        };
+    }
 
     /// <summary>One actor's latest state (version 1: location, rotation and deleted only).</summary>
     /// <param name="Rotation">Pitch, yaw, roll in Unreal units (65536 = 360°).</param>
     /// <param name="Base">What the YAML holds for the actor, for the three-way merge: its state before the editor first changed it, or
     /// what an import wrote. Null in version 1 and for a spawn never imported.</param>
     /// <param name="Imported">Present once an import applied the entry: MeleBridge re-applies it until the install shows it, then drops it.</param>
+    /// <param name="Installed">What an install may still show, kept by MeleBridge's Save from earlier imports (written by MeleBridge only).</param>
+    /// <param name="Light">A light's block (docs/07 §11): a light the editor spawned or a light of a lights section; null for any other actor.</param>
     private sealed record SessionActor(string? Tag, string? Path, string? Level, bool Spawned, SessionMesh? Mesh, double[]? Location, double[]? Rotation,
-        double? Scale, double[]? Scale3D, bool Deleted, Transform? Base, JsonElement? Imported);
+        double? Scale, double[]? Scale3D, bool Deleted, Transform? Base, JsonElement? Imported, string? Class = null, JsonElement? Installed = null, LightBlock? Light = null);
 
     /// <param name="File">The package the game loaded the mesh from (a name without .pcc), when the editor knows it.</param>
     private sealed record SessionMesh(string? Path, string? File);
 
     /// <summary>What an entry gives its actor (rotation and yaw in degrees); a value it leaves out is null.</summary>
     private sealed record YamlPlace(double[]? Location, double? Yaw, double[]? Rotation, double? Scale, double[]? Scale3D, bool Removed);
+
+    /// <summary>What a lights entry gives its light; a value it leaves out is null (the build's: kind props, colour white, falloff 2, on).</summary>
+    private sealed record YamlLight(double[]? Location, string? Kind, double? Radius, double? Brightness, double[]? Color, double? Falloff, bool? Enabled);
 
     /// <summary>One value of a transform: the editor's, the YAML's (the base's when the entry has none) and the base's; as the YAML writes it.</summary>
     private sealed record Field(string Name, double[] Editor, double[]? Yaml, double[]? Base, Func<double[], double[], bool> Same, Func<double[], string> Write);
@@ -107,18 +153,22 @@ public static class EditorImport
         var sessionFile = sessionPath is null ? FindSession(level, root, notes) : Path.GetFullPath(GamePaths.ToWindowsPath(sessionPath));
         var dropFile = DroppedFile(sessionFile);
 
-        // A spawned mesh's file as the YAML names it: the level by its own path (by name, the game finds the installed copy), others by name.
+        // A spawned mesh's file as the YAML names it: the level by its own path (by name, the game finds the installed copy), others by
+        // name, a fork of this map by its vanilla file's (docs/07 §11: the fork is a build output, not a source).
         var own = Path.Combine(Path.GetDirectoryName(file)!, GamePaths.ToWindowsPath(package));
         own = File.Exists(own) ? Path.GetFullPath(own) : GamePaths.ToWindowsPath(package);
-        string FileOf(string name) => Path.GetFileNameWithoutExtension(name).Equals(level, StringComparison.OrdinalIgnoreCase) ? own : Pcc(name);
+        string FileOf(string name) => ForkBuilder.Canonical(level, Path.GetFileNameWithoutExtension(name)) is var vanilla && vanilla.Equals(level, StringComparison.OrdinalIgnoreCase)
+            ? own
+            : Pcc(vanilla);
         // Where it may come from when the session does not say: the files the level streams, then the level itself, last because
         // it only has the mesh from an earlier build (a level built again from nothing would not).
-        var streamed = Value(root, "streaming") is YamlMappingNode streaming && Value(streaming, "levels") is YamlSequenceNode levels
-            ? levels.Children.Select(l => FileOf(Scalar(l)))
+        var streams = Value(root, "streaming") is YamlMappingNode streaming && Value(streaming, "levels") is YamlSequenceNode levels
+            ? levels.Children.Select(l => Path.GetFileNameWithoutExtension(Scalar(l))).ToList()
             : [];
-        var fallbacks = streamed.Append(own).ToList();
+        var fallbacks = streams.Select(FileOf).Append(own).ToList();
 
         using var files = new Files(game);
+        var vanillaFiles = new VanillaFiles(game, Path.IsPathRooted(own) ? ForkBuilder.DlcOf(own) : null, files);
         // MeleBridge may save, or a re-apply pass drop entries, while this runs (the game may be running). The YAML written and the
         // entries marked must come from one session, or the next import sees three different values (a false conflict): when the
         // session changed before it is marked, the merge is done again from the file as it was (replacing this import's own write),
@@ -164,7 +214,8 @@ public static class EditorImport
             var spawnedHere = takeSpawned ?? ownMap;
             if (!ownMap)
             {
-                said.Add($"The session is of map {session.Map} and the file builds {level}: actors are imported when one of its entries has their tag"
+                said.Add($"The session is of map {session.Map} and the file builds {level}: actors are imported when one of its entries has their tag (vanilla "
+                         + $"actors are not: the YAML of {session.Map} ships them, else they stay dev-only)"
                          + (spawnedHere ? ", and meshes spawned in the editor become props entries of this file (takeSpawned)." : "; meshes spawned in the editor are not (takeSpawned=true adds them here)."));
             }
 
@@ -172,11 +223,24 @@ public static class EditorImport
             var results = new ImportedActor?[actors.Count];
             // In the YAML now (marked imported), or never to be (dropped): written into the session after the YAML.
             var updates = new List<SessionUpdate>();
+            var vanillaKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var npcLights = YamlEdits.NpcLightTags(Root(text));
             for (var i = 0; i < actors.Count; i++)
             {
                 var actor = actors[i];
-                var tag = actor.Tag is null or "" or "None" ? null : actor.Tag;
+                // A level actor tagged as its class (every vanilla mesh is 'StaticMeshActor') has no tag of its own.
+                var tag = actor.Tag is null or "" or "None" || !actor.Spawned && actor.Tag.Equals(actor.Class, StringComparison.OrdinalIgnoreCase) ? null : actor.Tag;
                 var key = tag ?? actor.Path ?? $"actors[{i}]";
+                if (tag is not null && npcLights.TryGetValue(tag, out var npcLight))
+                {
+                    // MeleBridge lists no NPC light; an entry of one (an older bridge) would be applied on every load, over the YAML's.
+                    results[i] = new ImportedActor(key, "skipped", npcLight, [], keepSession
+                        ? $"an NPC light ({npcLight}): NPC lights are edited in the YAML. Its session entry would be dropped (keepSession: left as it is)."
+                        : $"an NPC light ({npcLight}): NPC lights are edited in the YAML. Its session entry is dropped, so the editor stops applying it, and kept in "
+                          + $"{Path.GetFileName(dropFile)}.");
+                    updates.Add(new SessionUpdate(i, null, null, [], $"an NPC light's tag ({npcLight}): NPC lights are edited in the YAML"));
+                    continue;
+                }
                 if (actor.Path is null || actor.Location is not { Length: 3 } || actor.Rotation is not { Length: 3 })
                 {
                     results[i] = new ImportedActor(key, "failed", null, [], "needs 'path', 'location' [x, y, z] and 'rotation' [pitch, yaw, roll].");
@@ -191,6 +255,19 @@ public static class EditorImport
                 if (found is { } f)
                 {
                     var entry = $"{f.Section}.{Scalar(f.Entry.Key)}";
+                    if ((f.Section == "lights") != (actor.Light is not null))
+                    {
+                        results[i] = new ImportedActor(key, "skipped", entry, [], actor.Light is null
+                            ? $"{entry} is a light, and the session entry has no light block (saved by a MeleBridge older than lights?): edit {entry} in the YAML by hand."
+                            : $"a light, and {entry} is not a lights entry: the tag is taken (give the light another one in the editor, or the entry another one).");
+                        continue;
+                    }
+                    if (f.Section == "lights")
+                    {
+                        (results[i], var lit) = MergeLight(ref text, entry, r => YamlEdits.Tagged(r, tag!)!.Value.Entry.Value, key, actor, i, policy);
+                        if (lit is not null) updates.Add(lit);
+                        continue;
+                    }
                     var place = Place(f.Entry.Value);
                     if (actor.Deleted)
                     {
@@ -219,7 +296,7 @@ public static class EditorImport
                         continue;
                     }
                     if (!actor.Spawned && !ours) said.Add($"{key}: matched {entry} by tag, but it is {actor.Path}, an actor of {actorLevel}, not {level}. Check it is the actor the entry builds.");
-                    (results[i], var update) = Merge(ref text, f.Section, entry, tag!, key, place, actor, i, policy, said);
+                    (results[i], var update) = Merge(ref text, f.Section, entry, r => YamlEdits.Tagged(r, tag!)!.Value.Entry.Value, key, place, actor, i, policy, said);
                     if (update is not null) updates.Add(update);
                 }
                 else if (imported)
@@ -244,7 +321,8 @@ public static class EditorImport
                     else
                     {
                         results[i] = new ImportedActor(key, "skipped", null, [], actor.Deleted
-                            ? $"{elsewhere}. Deleted in the editor: its session entry stays, so importing the file that has it marks it removed: true."
+                            ? $"{elsewhere}. Deleted in the editor: its session entry stays, so importing the file that has it "
+                              + (actor.Light is null ? "marks it removed: true." : "switches it off (enabled: false).")
                             : $"{elsewhere}. Not added again; its session entry stays ({(onlyTaker ? "the editor changed it since the import" : "another level file may have it")}).");
                     }
                 }
@@ -258,6 +336,22 @@ public static class EditorImport
                 {
                     results[i] = new ImportedActor(key, "skipped", null, [], $"spawned on map {session.Map}, and this file builds {level}: the file of that map takes it, or this one with takeSpawned=true.");
                 }
+                else if (actor.Spawned && actor.Light is not null)
+                {
+                    results[i] = AddLight(ref text, actor, tag, key);
+                    if (results[i]!.Action == "added")
+                    {
+                        updates.Add(new SessionUpdate(i, LightBase(LightOf(YamlEdits.Tagged(Reread(text, $"lights.{tag}"), tag!)!.Value.Entry.Value), actor), null, []));
+                    }
+                }
+                else if (actor.Light is not null)
+                {
+                    // A light the editor did not spawn: a built light of a lights section, whose entry is gone.
+                    results[i] = new ImportedActor(key, "skipped", null, [], ours
+                        ? $"{actor.Path} is a light of {level} that no lights entry has{(tag is null ? "" : $" (tag '{tag}')")}: its entry was removed by hand? A light is switched off "
+                          + "(enabled: false), never removed: add the entry back to edit it."
+                        : $"{actor.Path} is a light of {actorLevel}, not of a lights section of {level}: lights of other files are not imported (MeleBridge re-applies it).");
+                }
                 else if (actor.Spawned)
                 {
                     var loaded = actor.Mesh?.File is { } loadedFrom && FileOf(loadedFrom) is var from && from != own ? [from] : Array.Empty<string>();
@@ -267,13 +361,25 @@ public static class EditorImport
                         updates.Add(new SessionUpdate(i, BaseOf(Place(YamlEdits.Tagged(Reread(text, $"props.{tag}"), tag!)!.Value.Entry.Value), actor, newEntry: true), null, []));
                     }
                 }
+                else if (!ours && !actor.Spawned && !ownMap)
+                {
+                    // Edited on another map: shipped by that map's own fork (its YAML), if any. Here it would ship in this map's instead.
+                    results[i] = new ImportedActor(key, "skipped", null, [], $"{actor.Path} is an actor of {actorLevel} edited on map {session.Map}, and this file builds "
+                                                                              + $"{level}: the YAML of {session.Map} ships it, else it stays dev-only there (MeleBridge re-applies it).");
+                }
+                else if (!ours && !actor.Spawned
+                         && MergeVanilla(ref text, actor, i, key, level, streams, vanillaFiles, vanillaKeys, policy, keepSession, dropFile, said) is { } vanilla)
+                {
+                    results[i] = vanilla.Result;
+                    if (vanilla.Update is not null) updates.Add(vanilla.Update);
+                }
                 else
                 {
                     results[i] = new ImportedActor(key, "skipped", null, [], ours
                         ? $"{actor.Path} (an actor of {level}) has no npcs, usables or props entry{(tag is null ? "" : $" with tag '{tag}'")}: the YAML does not place it that way. Edit it in the YAML by hand."
-                        : tag is not null && !ownMap
-                            ? $"{actor.Path}, an actor of {actorLevel}: no entry of this file has tag '{tag}'. Another level file of the map has it, or it is vanilla (phase 4, docs/07 §4)."
-                            : $"a vanilla actor ({actor.Path}, in {actorLevel}): moving or deleting vanilla actors ships in phase 4 (docs/07 §4).");
+                        : $"dev-only: {actor.Path} is an actor of {actorLevel}, which {level} does not stream (streaming.levels), so no fork of it ships: the editor "
+                          + "re-applies it from the session."
+                          + (tag is not null && !ownMap ? $" If it is an actor of another level file of the map, that file has its entry (none here has tag '{tag}')." : ""));
                 }
             }
             return new Merged(text, sessionText, results.Select(r => r!).ToList(), updates, said);
@@ -281,28 +387,35 @@ public static class EditorImport
     }
 
     /// <summary>
-    /// Merges an actor's place into the entry with its tag, field by field (docs/07 §10): the editor's value when the YAML still has
-    /// the base's, the YAML's when the editor still has it (the session entry takes it too, so importing again keeps it), and on a
-    /// conflict what <paramref name="policy"/> says: refuse leaves the actor out. Without a base (version 1, or a spawn never
-    /// imported), the editor's value wins. 'removed' merges the same way against the base's 'deleted'. Props take a full rotation
-    /// and scale; npcs and usables a location and a yaw (the session entry takes back a pitch, roll or scale they don't keep).
+    /// Merges an actor's place into its entry (found in a text by <paramref name="locate"/>), field by field (docs/07 §10): the editor's
+    /// value when the YAML still has the base's, the YAML's when the editor still has it (the session entry takes it too, so importing
+    /// again keeps it), and on a conflict what <paramref name="policy"/> says: refuse leaves the actor out. Without a base (version 1, or
+    /// a spawn never imported), the editor's value wins. 'removed' merges the same way against the base's 'deleted'. Props and vanilla
+    /// entries take a full rotation and scale; npcs and usables a location and a yaw (the session entry takes back a pitch, roll or
+    /// scale they don't keep). A value a props entry leaves out is the base's; a vanilla entry's is the file's (<paramref name="file"/>),
+    /// whose pitch and roll a 'yaw' keeps. A vanilla entry shown again loses 'removed' (the file's value), and the whole entry when
+    /// that was all it had.
     /// </summary>
-    private static (ImportedActor Result, SessionUpdate? Update) Merge(ref string text, string section, string entry, string tag, string key, YamlPlace place,
-        SessionActor actor, int index, string policy, List<string> notes)
+    private static (ImportedActor Result, SessionUpdate? Update) Merge(ref string text, string section, string entry, Func<YamlMappingNode, YamlNode> locate, string key,
+        YamlPlace place, SessionActor actor, int index, string policy, List<string> notes, Transform? file = null)
     {
-        var prop = section == "props";
+        var prop = section is "props" or "vanilla";
         var b = actor.Base;
         var editor = actor.Rotation!;
         var baseRotation = Of(b?.Rotation, 3);
-        var (keptPitch, keptRoll) = baseRotation is { } br ? (br[0], br[2]) : (0d, 0d);
-        var fields = new List<Field> { new("location", actor.Location!, place.Location ?? Of(b?.Location, 3), Of(b?.Location, 3), SameLocation, WriteLocation) };
+        var keep = Of(file?.Rotation, 3);
+        var (keptPitch, keptRoll) = (keep ?? baseRotation) is { } br ? (br[0], br[2]) : (0d, 0d);
+        var fields = new List<Field> { new("location", actor.Location!, place.Location ?? Of(file?.Location, 3) ?? Of(b?.Location, 3), Of(b?.Location, 3), SameLocation, WriteLocation) };
         var (tilted, scaled) = (false, false);
         if (prop)
         {
-            fields.Add(new("rotation", editor, Turned(place, actor, newEntry: false) ?? baseRotation, baseRotation, Rotations.Same, YamlEdits.Rotation));
-            // A value the YAML leaves out is the base's; with no base, the build's default.
-            if (actor.Scale is { } scale) fields.Add(new("scale", [scale], Of(place.Scale) ?? Of(b?.Scale) ?? [1], Of(b?.Scale), SameScale, s => YamlEdits.Scale(s[0])));
-            if (actor.Scale3D is { Length: 3 } scale3d) fields.Add(new("scale3d", scale3d, place.Scale3D ?? Of(b?.Scale3D, 3) ?? Unscaled, Of(b?.Scale3D, 3), SameScale, YamlEdits.Scale3D));
+            fields.Add(new("rotation", editor, Turned(place, actor, newEntry: false, keep) ?? keep ?? baseRotation, baseRotation, Rotations.Same, YamlEdits.Rotation));
+            // A value the YAML leaves out is the file's, else the base's; with neither, the build's default.
+            if (actor.Scale is { } scale) fields.Add(new("scale", [scale], Of(place.Scale) ?? Of(file?.Scale) ?? Of(b?.Scale) ?? [1], Of(b?.Scale), SameScale, s => YamlEdits.Scale(s[0])));
+            if (actor.Scale3D is { Length: 3 } scale3d)
+            {
+                fields.Add(new("scale3d", scale3d, place.Scale3D ?? Of(file?.Scale3D, 3) ?? Of(b?.Scale3D, 3) ?? Unscaled, Of(b?.Scale3D, 3), SameScale, YamlEdits.Scale3D));
+            }
         }
         else
         {
@@ -332,16 +445,37 @@ public static class EditorImport
         var kept = taken.Where(t => t.Side == Side.Yaml).Select(t => t.Field).ToList();
 
         var keys = writes.Where(w => w.Name != "rotation").Select(w => (w.Name, w.Write(w.Editor))).ToList();
-        // There again in the editor (an undone delete): the build shows it again. Unless the YAML removed it since the base.
+        // There again in the editor (an undone delete): the build shows it again. Unless the YAML removed it since the base. A
+        // vanilla entry shows it by leaving 'removed' out (the file's value): 'removed: false' would keep a fork of nothing alive.
         var stillRemoved = place.Removed && RemovedAfter(editor: false, yaml: true, b?.Deleted);
-        if (place.Removed && !stillRemoved) keys.Add(("removed", "false"));
-        var (edited, changes) = YamlEdits.SetKeys(text, YamlEdits.Tagged(Root(text), tag)!.Value.Entry.Value, keys, ["location", "yaw", "rotation", "scale"]);
+        var shown = place.Removed && !stillRemoved;
+        if (shown && section != "vanilla") keys.Add(("removed", "false"));
+        var (edited, changes) = YamlEdits.SetKeys(text, locate(Root(text)), keys, ["location", "yaw", "rotation", "scale"]);
         if (writes.Any(w => w.Name == "rotation"))
         {
-            (edited, var turned) = YamlEdits.SetRotation(edited, YamlEdits.Tagged(Reread(edited, entry), tag)!.Value.Entry.Value, editor, keptPitch, keptRoll);
+            (edited, var turned) = YamlEdits.SetRotation(edited, locate(Reread(edited, entry)), editor, keptPitch, keptRoll);
             changes.AddRange(turned);
         }
-        var now = Place(YamlEdits.Tagged(Reread(edited, entry), tag)!.Value.Entry.Value);
+        YamlPlace now;
+        var root = Reread(edited, entry);
+        if (shown && section == "vanilla" && locate(root) is YamlMappingNode { Children.Count: 1 } only)
+        {
+            // Nothing else left to change: the entry goes, and the actor follows the file again (with no entry left, the file
+            // streams again and its fork goes).
+            edited = YamlEdits.RemoveEntry(edited, root, section, only);
+            Reread(edited, entry);
+            changes.Add($"{entry}: removed: true (the entry removed: nothing left to change, the actor takes the file's values)");
+            now = new YamlPlace(null, null, null, null, null, false);
+        }
+        else
+        {
+            if (shown && section == "vanilla")
+            {
+                (edited, var unflagged) = YamlEdits.RemoveKeys(edited, locate(root), ["removed"]);
+                changes.AddRange(unflagged);
+            }
+            now = Place(locate(Reread(edited, entry)));
+        }
         text = edited;
 
         // The YAML's values the merge kept become the editor's too: imported again, the editor then has the base's.
@@ -369,7 +503,7 @@ public static class EditorImport
                 if (actor.Scale3D is { Length: 3 }) state.Add(("scale3d", Doubles(Of(b.Scale3D, 3) ?? Unscaled)));
             }
         }
-        var update = new SessionUpdate(index, BaseOf(now, actor, newEntry: false), Shown(place, actor), state);
+        var update = new SessionUpdate(index, BaseOf(now, actor, newEntry: false, file), Shown(place, actor, file), state);
 
         var why = new List<string>();
         if (conflicts.Count > 0) why.Add($"the editor and the YAML both changed {string.Join(", ", conflicts.Select(c => c.Field))}: took the {(policy == "yaml" ? "YAML" : "editor")}'s (onConflict={policy})");
@@ -377,47 +511,381 @@ public static class EditorImport
         if (keptHere.Count > 0) why.Add($"kept the YAML's {string.Join(", ", keptHere)}, changed there since the session's base");
         var reason = why.Count > 0 ? string.Join("; ", why) + "." : changes.Count > 0 ? null : "already where the editor left it.";
         return (new ImportedActor(key, changes.Count > 0 ? "updated" : "unchanged", entry, changes, reason, conflicts.Count > 0 ? conflicts : null), update);
+    }
 
-        Side Pick(Field field) =>
-            field.Yaml is null ? Side.Editor
-            : field.Same(field.Editor, field.Yaml) ? Side.Same
-            : field.Base is null || field.Same(field.Yaml, field.Base) ? Side.Editor
-            : field.Same(field.Editor, field.Base) ? Side.Yaml
-            : Side.Conflict;
+    /// <summary>Which side a field takes: the editor's when the YAML still has the base's (or there is no base), the YAML's when the editor still has it.</summary>
+    private static Side Pick(Field field) =>
+        field.Yaml is null ? Side.Editor
+        : field.Same(field.Editor, field.Yaml) ? Side.Same
+        : field.Base is null || field.Same(field.Yaml, field.Base) ? Side.Editor
+        : field.Same(field.Editor, field.Base) ? Side.Yaml
+        : Side.Conflict;
+
+    /// <summary>
+    /// A vanilla actor's edit (docs/07 §11), merged into vanilla.&lt;file&gt;.&lt;actor&gt;, which the build ships in a fork of the file. The
+    /// file is the actor's level when the YAML streams it, else the vanilla file its level stands for as a fork of this map; null when
+    /// it is neither (dev-only). Merged field by field as a props entry, a value the entry leaves out being the file's (through its
+    /// archetypes). A new entry gets the fields the editor changed from the file's (deleted: removed: true), and a comment on its key
+    /// line naming the mesh and those vanilla values; against the session's base too when that is not the file's (an entry deleted by
+    /// hand since). Refused: what the build would refuse (a delete included), and a room shell. A marked entry whose line is gone was
+    /// removed by hand and is never added back: dropped from the session when unchanged since, else skipped. Not one marked where the
+    /// file has it: it never had a line.
+    /// </summary>
+    private static (ImportedActor Result, SessionUpdate? Update)? MergeVanilla(ref string text, SessionActor actor, int index, string key, string map,
+        IReadOnlyList<string> streams, VanillaFiles vanilla, HashSet<string> seen, string policy, bool keepSession, string dropFile, List<string> notes)
+    {
+        var level = actor.Level ?? actor.Path!.Split('.')[0];
+        var file = streams.FirstOrDefault(s => s.Equals(level, StringComparison.OrdinalIgnoreCase))
+                   ?? streams.FirstOrDefault(s => s.Equals(ForkBuilder.Canonical(map, level), StringComparison.OrdinalIgnoreCase));
+        if (file is null) return null;
+        var parts = actor.Path!.Split('.');
+        if (parts.Length != 4 || parts[1] != "TheWorld" || parts[2] != "PersistentLevel")
+        {
+            return (new ImportedActor(key, "failed", null, [], $"{actor.Path} is not a level actor's path (<file>.TheWorld.PersistentLevel.<actor>)."), null);
+        }
+        var name = $"{file}.{parts[3]}";
+        var entry = $"vanilla.{name}";
+        // A session saved before forks were keyed by their vanilla path may have the actor twice: by the fork's path and by the file's.
+        if (!seen.Add(name)) return (new ImportedActor(key, "skipped", entry, [], $"an earlier session entry is the same actor ({name}): that one was merged."), null);
+
+        ExportEntry export;
+        IReadOnlyDictionary<int, string> held;
+        try
+        {
+            (export, held) = vanilla.Actor(file, parts[3]);
+        }
+        catch (Exception e) when (e is FileNotFoundException or ArgumentException)
+        {
+            return (new ImportedActor(key, "failed", entry, [], e.Message), null);
+        }
+        var pose = ForkBuilder.PoseOf(export);
+        var refused = ForkBuilder.Refusal(export, held, actor.Deleted)
+                      ?? (ForkBuilder.Extent(export.FileRef, export, pose) is var extent and > ForkBuilder.MaxPropExtent
+                          ? $"a room shell (half-extent {extent:0}): moving or hiding it opens the room"
+                          : null);
+        if (refused is not null) return (new ImportedActor(key, "refused", entry, [], $"{refused}. Its session entry stays (the editor re-applies it); nothing ships it."), null);
+
+        Transform ofFile = new([pose.Location.X, pose.Location.Y, pose.Location.Z], [pose.Rotation.Pitch, pose.Rotation.Yaw, pose.Rotation.Roll], pose.Scale,
+            [pose.Scale3D.X, pose.Scale3D.Y, pose.Scale3D.Z], false);
+        YamlNode Locate(YamlMappingNode root) => ((YamlMappingNode)Value(root, "vanilla")!).Children.First(c => Scalar(c.Key).Equals(name, StringComparison.OrdinalIgnoreCase)).Value;
+        var found = Value(Root(text), "vanilla") is YamlMappingNode section
+            ? section.Children.FirstOrDefault(c => Scalar(c.Key).Equals(name, StringComparison.OrdinalIgnoreCase))
+            : default;
+        if (found.Key is not null)
+        {
+            var place = Place(found.Value);
+            if (!actor.Deleted) return Merge(ref text, "vanilla", entry, Locate, key, place, actor, index, policy, notes, ofFile);
+            if (place.Removed)
+            {
+                return (new ImportedActor(key, "unchanged", entry, [], "already removed: true."), new SessionUpdate(index, BaseOf(place, actor, false, ofFile), Shown(place, actor, ofFile), []));
+            }
+            if (!RemovedAfter(editor: true, yaml: false, actor.Base?.Deleted))
+            {
+                return (new ImportedActor(key, "unchanged", entry, [], "kept the YAML's removed: false, changed there since the session's base: the session entry shows the actor again."),
+                    new SessionUpdate(index, BaseOf(place, actor, false, ofFile), Shown(place, actor, ofFile), [("deleted", JsonValue.Create(false))]));
+            }
+            (text, var flagged) = YamlEdits.SetKeys(text, found.Value, [("removed", "true")]);
+            return (new ImportedActor(key, "removed", entry, flagged, null),
+                new SessionUpdate(index, BaseOf(Place(Locate(Reread(text, entry))), actor, false, ofFile), Shown(place, actor, ofFile), []));
+        }
+
+        // Marked where the file has it (an import found nothing to write), the YAML had no entry then either: none is gone.
+        var atFile = actor.Base is { Deleted: not true } at && Of(at.Location, 3) is { } placed && SameLocation(placed, ofFile.Location!)
+                     && Of(at.Rotation, 3) is { } turned && Rotations.Same(turned, ofFile.Rotation!) && SameScale([at.Scale ?? 1], [pose.Scale])
+                     && SameScale(Of(at.Scale3D, 3) ?? Unscaled, ofFile.Scale3D!);
+        if (!atFile && (actor.Imported is { ValueKind: JsonValueKind.Object } || actor.Installed is { ValueKind: JsonValueKind.Array } installed && installed.GetArrayLength() > 0))
+        {
+            // Imported, and its line is gone since: removed by hand (or the file reverted alone). Added again, it would come back on every import.
+            const string gone = "imported before, and this file has no vanilla entry for it now: removed by hand, or the file reverted alone";
+            if (AsBase(actor) && actor.Deleted == (actor.Base?.Deleted ?? false))
+            {
+                return (new ImportedActor(key, "skipped", entry, [], keepSession
+                        ? $"{gone}. Unchanged since the import: its session entry would be dropped, so the editor stops applying it (keepSession: left as it is)."
+                        : $"{gone}. Unchanged since the import: its session entry is dropped, so the editor stops applying it, and kept in {Path.GetFileName(dropFile)}."),
+                    new SessionUpdate(index, null, null, [], "a vanilla entry imported, then removed from the file (by hand, or the file reverted alone), unchanged in the editor since"));
+            }
+            return (new ImportedActor(key, "skipped", entry, [], $"{gone}. Not added again: the editor changed it since the import, so its session entry stays. Add the entry back "
+                                                                 + "by hand to ship it, or undo the edit in the editor."), null);
+        }
+
+        // New: the fields the editor changed from the file's, so a field left out keeps following the file. Merged three-way like an
+        // entry when the session's base is not the file's (the YAML had an entry when the editor first changed the actor, deleted by
+        // hand since to give it its vanilla values back): the YAML's side is then the file's, so only what the editor changed since its
+        // base is written, and a field the YAML gave up stays the file's (in the session entry too).
+        var b = atFile ? null : actor.Base;
+        var keys = new List<(string Key, string Value)>();
+        var was = new List<string>();
+        var state = new List<(string Field, JsonNode Value)>();
+        var why = new List<string>();
+        var conflicts = new List<FieldConflict>();
+        if (actor.Deleted)
+        {
+            if (RemovedAfter(editor: true, yaml: false, b?.Deleted)) keys.Add(("removed", "true"));
+            else
+            {
+                state.Add(("deleted", JsonValue.Create(false)));
+                why.Add("kept the YAML's shown actor: its entry with removed: true, which the session's base had, is gone since (deleted by hand): the session entry shows it again");
+            }
+        }
+        else
+        {
+            var fields = new List<Field>
+            {
+                new("location", actor.Location!, ofFile.Location, Of(b?.Location, 3), SameLocation, WriteLocation),
+                new("rotation", actor.Rotation!, ofFile.Rotation, Of(b?.Rotation, 3), Rotations.Same, YamlEdits.Rotation),
+            };
+            if (actor.Scale is { } scale) fields.Add(new("scale", [scale], [pose.Scale], Of(b?.Scale), SameScale, s => YamlEdits.Scale(s[0])));
+            if (actor.Scale3D is { Length: 3 } scale3d) fields.Add(new("scale3d", scale3d, ofFile.Scale3D, Of(b?.Scale3D, 3), SameScale, YamlEdits.Scale3D));
+            var sides = fields.Select(f => (Field: f, Side: Pick(f))).ToList();
+            conflicts = sides.Where(s => s.Side == Side.Conflict)
+                .Select(s => new FieldConflict(s.Field.Name, s.Field.Write(s.Field.Base!), s.Field.Write(s.Field.Yaml!), s.Field.Write(s.Field.Editor), policy == "refuse" ? null : policy))
+                .ToList();
+            if (conflicts.Count > 0 && policy == "refuse")
+            {
+                return (new ImportedActor(key, "conflict", entry, [], $"the editor changed {string.Join(", ", conflicts.Select(c => c.Field))} since the session's base, and the YAML "
+                                                                      + "has no entry for it since (the file's values): nothing applied (onConflict=editor or yaml picks a side).", conflicts), null);
+            }
+            foreach (var (field, side) in sides.Select(s => (s.Field, Side: s.Side != Side.Conflict ? s.Side : policy == "editor" ? Side.Editor : Side.Yaml)))
+            {
+                if (side == Side.Yaml)
+                {
+                    state.Add(field.Name switch
+                    {
+                        "rotation" => ("rotation", Ints(field.Yaml!)),
+                        "scale" => ("scale", JsonValue.Create(field.Yaml![0])),
+                        _ => (field.Name, (JsonNode)Doubles(field.Yaml!)),
+                    });
+                    continue;
+                }
+                if (side != Side.Editor) continue;
+                switch (field.Name)
+                {
+                    case "location":
+                        keys.Add(("location", WriteLocation(actor.Location!)));
+                        was.Add($"location {ForkBuilder.Location(pose.Location)}");
+                        break;
+                    case "rotation":
+                        // 'yaw' keeps the file's pitch and roll.
+                        keys.Add(Rotations.YawWith(actor.Rotation!, ofFile.Rotation![0], ofFile.Rotation[2]) is { } yaw ? ("yaw", YamlEdits.Degrees((float)yaw)) : ("rotation", YamlEdits.Rotation(actor.Rotation!)));
+                        was.Add($"rotation {ForkBuilder.Rotation(pose.Rotation)}");
+                        break;
+                    case "scale":
+                        keys.Add(("scale", YamlEdits.Scale(actor.Scale!.Value)));
+                        was.Add($"scale {ForkBuilder.Number(pose.Scale)}");
+                        break;
+                    case "scale3d":
+                        keys.Add(("scale3d", YamlEdits.Scale3D(actor.Scale3D!)));
+                        was.Add($"scale3d {ForkBuilder.Scale3D(pose.Scale3D)}");
+                        break;
+                }
+            }
+            if (conflicts.Count > 0) why.Add($"the editor changed {string.Join(", ", conflicts.Select(c => c.Field))} since the session's base, and the YAML has no entry for it since: took the {(policy == "yaml" ? "file" : "editor")}'s (onConflict={policy})");
+            var keptHere = state.Select(s => s.Field).Where(f => conflicts.All(c => c.Field != f)).ToList();
+            if (keptHere.Count > 0) why.Add($"kept the file's {string.Join(", ", keptHere)}: the YAML's entry for it, which had the session's base, is gone since (deleted by hand)");
+        }
+        var reason = why.Count > 0 ? string.Join("; ", why) + "." : null;
+        // What the installed level shows until the next install: the file's own, or the session's base when it had an entry then
+        // (Mark keeps that one as 'before').
+        if (keys.Count == 0)
+        {
+            return (new ImportedActor(key, "unchanged", null, [], reason ?? "where the file has it: nothing to write.", conflicts.Count > 0 ? conflicts : null),
+                new SessionUpdate(index, ofFile, ofFile, state));
+        }
+        var mesh = ForkBuilder.MeshOf(export)?.ObjectName.Instanced ?? export.ClassName;
+        try
+        {
+            var edited = YamlEdits.AddEntry(text, Root(text), "vanilla", YamlEdits.Quote(name), keys,
+                string.Format(CultureInfo.InvariantCulture, VanillaComment, ForkBuilder.ForkName(map, file)), was.Count > 0 ? $"{mesh}; vanilla {string.Join(", ", was)}" : mesh);
+            var now = Place(Locate(Reread(edited, entry)));
+            text = edited;
+            return (new ImportedActor(key, "added", entry, keys.Select(k => $"{k.Key}: {k.Value}").ToList(), reason, conflicts.Count > 0 ? conflicts : null),
+                new SessionUpdate(index, BaseOf(now, actor, true, ofFile), ofFile, state));
+        }
+        catch (ArgumentException e)
+        {
+            return (new ImportedActor(key, "failed", entry, [], e.Message), null);
+        }
+    }
+
+    /// <summary>
+    /// A light's edit (docs/07 §11), merged into its lights entry field by field as props are (<see cref="Merge"/>): its location and each
+    /// light field, with MeleBridge's tolerances (location 0.01, radius 0.01, brightness and falloff 0.001; kind, colour and enabled
+    /// exact). A value the entry leaves out is the build's (kind props, colour white, falloff 2, on); a radius or brightness, the base's.
+    /// A spawned light the editor deleted is off: 'enabled: false' in the YAML and the base; its session block keeps its own 'enabled'
+    /// with 'deleted' (the YAML switching it on since shows it again). The YAML's values the merge keeps go into the session entry, its
+    /// block included. Its rotation and scale are the actor's: not merged.
+    /// </summary>
+    private static (ImportedActor Result, SessionUpdate? Update) MergeLight(ref string text, string entry, Func<YamlMappingNode, YamlNode> locate, string key,
+        SessionActor actor, int index, string policy)
+    {
+        if (LightState.Of(actor.Light) is not { } editor)
+        {
+            return (new ImportedActor(key, "failed", entry, [], "the session entry's light block needs kind (props or room), radius, brightness, color [r, g, b], falloff and enabled."), null);
+        }
+        var before = LightOf(locate(Root(text)));
+        var b = actor.Base;
+        var at = b?.Light;
+        static double[] Flag(bool on) => [on ? 1 : 0];
+        static double[] Kind(string kind) => [kind == "room" ? 1 : 0];
+        var fields = new List<Field>
+        {
+            new("location", actor.Location!, before.Location ?? Of(b?.Location, 3), Of(b?.Location, 3), SameLocation, WriteLocation),
+            new("kind", Kind(editor.Kind), Kind(before.Kind ?? "props"), at?.Kind is { } k ? Kind(k) : null, SameExactly, v => v[0] == 1 ? "room" : "props"),
+            new("radius", [editor.Radius], Of(before.Radius) ?? Of(at?.Radius), Of(at?.Radius), SameRadius, v => YamlEdits.Radius(v[0])),
+            new("brightness", [editor.Brightness], Of(before.Brightness) ?? Of(at?.Brightness), Of(at?.Brightness), SameLight, v => YamlEdits.Fraction(v[0])),
+            new("color", editor.Color, before.Color ?? White, Of(at?.Color, 3), SameColor, YamlEdits.Color),
+            new("falloff", [editor.Falloff], [before.Falloff ?? 2], Of(at?.Falloff), SameLight, v => YamlEdits.Fraction(v[0])),
+            // What the light shows: a deleted one is off.
+            new("enabled", Flag(editor.Enabled && !actor.Deleted), Flag(before.Enabled ?? true), at?.Enabled is { } on ? Flag(on) : null, SameExactly, v => v[0] == 1 ? "true" : "false"),
+        };
+        var sides = fields.Select(field => (Field: field, Side: Pick(field))).ToList();
+        var conflicts = sides.Where(s => s.Side == Side.Conflict)
+            .Select(s => new FieldConflict(s.Field.Name, s.Field.Write(s.Field.Base!), s.Field.Write(s.Field.Yaml!), s.Field.Write(s.Field.Editor), policy == "refuse" ? null : policy))
+            .ToList();
+        if (conflicts.Count > 0 && policy == "refuse")
+        {
+            return (new ImportedActor(key, "conflict", entry, [], $"the editor and the YAML both changed {string.Join(", ", conflicts.Select(c => c.Field))} since the session's base: "
+                                                                  + "nothing applied (onConflict=editor or yaml picks a side).", conflicts), null);
+        }
+        var taken = sides.Select(s => (s.Field, Side: s.Side != Side.Conflict ? s.Side : policy == "editor" ? Side.Editor : Side.Yaml)).ToList();
+        var writes = taken.Where(t => t.Side == Side.Editor).Select(t => (t.Field.Name, t.Field.Write(t.Field.Editor))).ToList();
+        var kept = taken.Where(t => t.Side == Side.Yaml).Select(t => t.Field).ToList();
+        var (edited, changes) = YamlEdits.SetKeys(text, locate(Root(text)), writes, ["tag", "kind", "location", "radius", "brightness", "color", "falloff"]);
+        var now = LightOf(locate(Reread(edited, entry)));
+        text = edited;
+
+        // The YAML's values the merge kept become the editor's too: imported again, the editor then has the base's.
+        var state = new List<(string Field, JsonNode Value)>();
+        if (kept.FirstOrDefault(k => k.Name == "location") is { } location) state.Add(("location", Doubles(location.Yaml!)));
+        var block = editor.Json();
+        foreach (var field in kept.Where(k => k.Name != "location"))
+        {
+            block[field.Name] = field.Name switch
+            {
+                "kind" => field.Yaml![0] == 1 ? "room" : "props",
+                "color" => Ints(field.Yaml!),
+                "enabled" => field.Yaml![0] == 1,
+                _ => field.Yaml![0],
+            };
+        }
+        // Deleted and off in the YAML, its block keeps the editor's enabled: 'deleted' already shows it off, and a delete undone in the
+        // game then shows it as it was. Switched on in the YAML since: shown again.
+        if (actor.Deleted && (now.Enabled ?? true))
+        {
+            block["enabled"] = true;
+            state.Add(("deleted", JsonValue.Create(false)));
+        }
+        if (block.ToJsonString() != editor.Json().ToJsonString()) state.Add(("light", block));
+        var update = new SessionUpdate(index, LightBase(now, actor), LightShown(before, actor), state);
+
+        var why = new List<string>();
+        if (conflicts.Count > 0) why.Add($"the editor and the YAML both changed {string.Join(", ", conflicts.Select(c => c.Field))}: took the {(policy == "yaml" ? "YAML" : "editor")}'s (onConflict={policy})");
+        var keptHere = kept.Where(k => conflicts.All(c => c.Field != k.Name)).Select(k => k.Name).ToList();
+        if (keptHere.Count > 0) why.Add($"kept the YAML's {string.Join(", ", keptHere)}, changed there since the session's base");
+        var reason = why.Count > 0 ? string.Join("; ", why) + "." : changes.Count > 0 ? null : "already as the editor left it.";
+        return (new ImportedActor(key, changes.Count > 0 ? "updated" : "unchanged", entry, changes, reason, conflicts.Count > 0 ? conflicts : null), update);
+    }
+
+    /// <summary>
+    /// What a lights entry holds now, as the session's base: its location (else the old base's), its light block with the build's
+    /// defaults for what it leaves out, deleted false (a light is switched off, never removed); the rotation and scale the actor's.
+    /// </summary>
+    private static Transform LightBase(YamlLight now, SessionActor actor) => new(
+        now.Location ?? Of(actor.Base?.Location, 3) ?? actor.Location,
+        (Of(actor.Base?.Rotation, 3) ?? actor.Rotation)!.Select(u => Math.Round(u)).ToArray(),
+        actor.Base?.Scale ?? actor.Scale ?? 1,
+        Of(actor.Base?.Scale3D, 3) ?? Of(actor.Scale3D, 3) ?? Unscaled,
+        false,
+        BlockOf(now, actor.Base?.Light ?? actor.Light));
+
+    /// <summary>What a level built from a lights entry shows, for 'imported.before' when the session entry has no base.</summary>
+    private static Transform LightShown(YamlLight place, SessionActor actor) =>
+        new(place.Location, actor.Rotation!.Select(u => Math.Round(u)).ToArray(), actor.Scale ?? 1, Of(actor.Scale3D, 3) ?? Unscaled, false, BlockOf(place, null));
+
+    /// <summary>A lights entry's values as a session block: the build's defaults for what it leaves out; a radius or brightness, <paramref name="otherwise"/>'s.</summary>
+    private static LightBlock BlockOf(YamlLight place, LightBlock? otherwise) =>
+        new(place.Kind ?? "props", place.Radius ?? otherwise?.Radius, place.Brightness ?? otherwise?.Brightness, place.Color ?? White, place.Falloff ?? 2, place.Enabled ?? true);
+
+    /// <summary>A lights entry for a light spawned in the editor, named by its tag: every field, colour and falloff included, 'enabled' only when off.</summary>
+    private static ImportedActor AddLight(ref string text, SessionActor actor, string? tag, string key)
+    {
+        if (tag is null) return new ImportedActor(key, "failed", null, [], "spawned without a tag: the YAML entry would have nothing to find it by.");
+        if (LightState.Of(actor.Light) is not { } light)
+        {
+            return new ImportedActor(key, "failed", null, [], "the session entry's light block needs kind (props or room), radius, brightness, color [r, g, b], falloff and enabled.");
+        }
+        var keys = new List<(string Key, string Value)>
+        {
+            ("tag", YamlEdits.Quote(tag)),
+            ("kind", light.Kind),
+            ("location", WriteLocation(actor.Location!)),
+            ("radius", YamlEdits.Radius(light.Radius)),
+            ("brightness", YamlEdits.Fraction(light.Brightness)),
+            ("color", YamlEdits.Color(light.Color)),
+            ("falloff", YamlEdits.Fraction(light.Falloff)),
+        };
+        if (!light.Enabled) keys.Add(("enabled", "false"));
+        try
+        {
+            var edited = YamlEdits.AddEntry(text, Root(text), "lights", YamlEdits.Quote(tag), keys, LightsComment);
+            Reread(edited, $"lights.{tag}");
+            text = edited;
+            return new ImportedActor(key, "added", $"lights.{tag}", keys.Select(k => $"{k.Key}: {k.Value}").ToList(), null);
+        }
+        catch (ArgumentException e)
+        {
+            return new ImportedActor(key, "failed", $"lights.{tag}", [], e.Message);
+        }
+    }
+
+    /// <summary>What a lights entry gives its light, as level_build reads it; a value it leaves out is null.</summary>
+    private static YamlLight LightOf(YamlNode entry)
+    {
+        if (entry is not YamlMappingNode body) throw Fail(entry, "the entry must be a mapping.");
+        double[]? Three(string key) => Value(body, key) is { } v
+            ? Sequence(v).Select(Number).ToArray() is { Length: 3 } xyz ? xyz : throw Fail(v, $"'{key}' needs 3 numbers.")
+            : null;
+        double? One(string key) => Value(body, key) is { } v ? Number(v) : null;
+        bool? enabled = Value(body, "enabled") is { } e ? bool.TryParse(Scalar(e), out var on) ? on : throw Fail(e, "'enabled' is true or false.") : null;
+        return new YamlLight(Three("location"), Value(body, "kind") is { } kind ? Scalar(kind) : null, One("radius"), One("brightness"), Three("color"), One("falloff"), enabled);
     }
 
     /// <summary>
     /// The rotation an entry gives its actor, in Unreal units: its 'rotation', or its 'yaw' over the pitch and roll the build keeps
-    /// (the base's; 0 for a new stand-in, which starts unturned; a version 1 editor's own, since it never changed them); null with neither.
+    /// (<paramref name="keep"/>'s for a vanilla entry, the file's; else the base's; 0 for a new stand-in, which starts unturned; a
+    /// version 1 editor's own, since it never changed them); null with neither.
     /// </summary>
-    private static double[]? Turned(YamlPlace place, SessionActor actor, bool newEntry)
+    private static double[]? Turned(YamlPlace place, SessionActor actor, bool newEntry, double[]? keep = null)
     {
         if (place.Rotation is { } rotation) return rotation.Select(Rotations.Units).ToArray();
         if (place.Yaw is not { } yaw) return null;
-        var (pitch, roll) = newEntry || actor.Spawned && Of(actor.Base?.Rotation, 3) is null ? (0d, 0d)
+        var (pitch, roll) = keep is { Length: 3 } k ? (k[0], k[2])
+            : newEntry || actor.Spawned && Of(actor.Base?.Rotation, 3) is null ? (0d, 0d)
             : Of(actor.Base?.Rotation, 3) is { } b ? (b[0], b[2])
             : (actor.Rotation![0], actor.Rotation[2]);
         return [pitch, Rotations.Units(yaw), roll];
     }
 
     /// <summary>
-    /// What the YAML holds for the actor now, as the session's base: a value the entry leaves out is the old base's, else the editor's
-    /// (scale: the default); deleted is its removed, for the next import's merge of it.
+    /// What the YAML holds for the actor now, as the session's base: a value the entry leaves out is the file's for a vanilla entry
+    /// (<paramref name="file"/>), else the old base's, else the editor's (scale: the default); deleted is its removed, for the next
+    /// import's merge of it.
     /// </summary>
-    private static Transform BaseOf(YamlPlace now, SessionActor actor, bool newEntry) => new(
-        now.Location ?? Of(actor.Base?.Location, 3) ?? actor.Location,
-        (Turned(now, actor, newEntry) ?? Of(actor.Base?.Rotation, 3) ?? actor.Rotation)!.Select(u => Math.Round(u)).ToArray(),
-        now.Scale ?? actor.Base?.Scale ?? 1,
-        now.Scale3D ?? Of(actor.Base?.Scale3D, 3) ?? Unscaled,
+    private static Transform BaseOf(YamlPlace now, SessionActor actor, bool newEntry, Transform? file = null) => new(
+        now.Location ?? Of(file?.Location, 3) ?? Of(actor.Base?.Location, 3) ?? actor.Location,
+        (Turned(now, actor, newEntry, Of(file?.Rotation, 3)) ?? Of(file?.Rotation, 3) ?? Of(actor.Base?.Rotation, 3) ?? actor.Rotation)!.Select(u => Math.Round(u)).ToArray(),
+        now.Scale ?? file?.Scale ?? actor.Base?.Scale ?? 1,
+        now.Scale3D ?? Of(file?.Scale3D, 3) ?? Of(actor.Base?.Scale3D, 3) ?? Unscaled,
         now.Removed);
 
     /// <summary>
     /// What a level built from an entry shows (rotation in Unreal units; deleted: removed), for 'imported.before' when the session
     /// entry has no base. A value the entry leaves out is left out: the build keeps the actor's own, and MeleBridge then compares
-    /// the actor's own (a stand-in of a template StaticMeshActor has that actor's scale, not 1).
+    /// the actor's own (a stand-in of a template StaticMeshActor has that actor's scale, not 1). A vanilla entry's 'yaw' keeps the
+    /// file's pitch and roll.
     /// </summary>
-    private static Transform Shown(YamlPlace place, SessionActor actor) =>
-        new(place.Location, Turned(place, actor, newEntry: false)?.Select(u => Math.Round(u)).ToArray(), place.Scale, place.Scale3D, place.Removed);
+    private static Transform Shown(YamlPlace place, SessionActor actor, Transform? file = null) =>
+        new(place.Location, Turned(place, actor, newEntry: false, Of(file?.Rotation, 3))?.Select(u => Math.Round(u)).ToArray(), place.Scale, place.Scale3D, place.Removed);
 
     /// <summary>
     /// Whether the entry is removed after the merge, as the other fields merge: the editor's (deleted) when the YAML still has the
@@ -426,10 +894,16 @@ public static class EditorImport
     /// </summary>
     private static bool RemovedAfter(bool editor, bool yaml, bool? atBase) => editor == yaml || atBase is not { } was || yaml == was ? editor : yaml;
 
-    /// <summary>Whether a session entry still has its base's state: nothing changed in the editor since the import that wrote the base.</summary>
+    /// <summary>
+    /// Whether a session entry still has its base's state: nothing changed in the editor since the import that wrote the base. A light's
+    /// block too, as it shows (a deleted light is off).
+    /// </summary>
     private static bool AsBase(SessionActor actor) =>
         actor.Base is { } b && Of(b.Location, 3) is { } location && SameLocation(actor.Location!, location) && Of(b.Rotation, 3) is { } rotation
-        && Rotations.Same(actor.Rotation!, rotation) && SameScale([actor.Scale ?? 1], [b.Scale ?? 1]) && SameScale(Of(actor.Scale3D, 3) ?? Unscaled, Of(b.Scale3D, 3) ?? Unscaled);
+        && Rotations.Same(actor.Rotation!, rotation) && SameScale([actor.Scale ?? 1], [b.Scale ?? 1]) && SameScale(Of(actor.Scale3D, 3) ?? Unscaled, Of(b.Scale3D, 3) ?? Unscaled)
+        && (actor.Light is null || LightState.Of(actor.Light) is { } light && LightState.Of(b.Light) is { } was && light.Kind == was.Kind && SameRadius([light.Radius], [was.Radius])
+            && SameLight([light.Brightness], [was.Brightness]) && SameColor(light.Color, was.Color) && SameLight([light.Falloff], [was.Falloff])
+            && (light.Enabled && !actor.Deleted) == was.Enabled);
 
     /// <summary>
     /// The YAML after an edit of <paramref name="entry"/>. An edit that leaves it unreadable is this tool's fault, said as such: the
@@ -526,6 +1000,16 @@ public static class EditorImport
     private static bool SameLocation(double[] a, double[] b) => a.Length == b.Length && a.Zip(b).All(p => Math.Abs(Math.Round(p.First, 2) - Math.Round(p.Second, 2)) <= Near + 1e-6);
 
     private static bool SameScale(double[] a, double[] b) => a.Length == b.Length && a.Zip(b).All(p => Math.Abs(p.First - p.Second) <= ScaleNear + 1e-9);
+
+    private static bool SameRadius(double[] a, double[] b) => a.Length == b.Length && a.Zip(b).All(p => Math.Abs(p.First - p.Second) <= RadiusNear + 1e-9);
+
+    /// <summary>Brightness and falloff.</summary>
+    private static bool SameLight(double[] a, double[] b) => a.Length == b.Length && a.Zip(b).All(p => Math.Abs(p.First - p.Second) <= LightNear + 1e-9);
+
+    /// <summary>Colours as whole numbers 0-255.</summary>
+    private static bool SameColor(double[] a, double[] b) => a.Length == b.Length && a.Zip(b).All(p => Math.Round(p.First) == Math.Round(p.Second));
+
+    private static bool SameExactly(double[] a, double[] b) => a.SequenceEqual(b);
 
     private static string WriteLocation(double[] l) => YamlEdits.Location((float)Math.Round(l[0], 2), (float)Math.Round(l[1], 2), (float)Math.Round(l[2], 2));
 
@@ -632,10 +1116,10 @@ public static class EditorImport
         foreach (var index in updates.Where(u => u.Base is null).Select(u => u.Index).OrderDescending()) list.RemoveAt(index);
         if (dropped.Count > 0)
         {
-            notes.Add($"Dropped {dropped.Count} session entr{(dropped.Count == 1 ? "y" : "ies")} of meshes spawned in the editor that no YAML builds (deleted before any import, "
-                      + $"or imported and no longer in the YAML file: removed by hand, or the file reverted alone), kept in {dropFile}. To add one again, copy its 'entry' into "
-                      + "the session's 'actors' with \"base\": null and without 'imported' (game closed), then import again: it becomes a new props entry. To undo an "
-                      + "import, restore the session file together with the YAML (or try options with keepSession=true).");
+            notes.Add($"Dropped {dropped.Count} session entr{(dropped.Count == 1 ? "y" : "ies")} that no YAML builds (a mesh spawned in the editor and deleted before any "
+                      + $"import, or an entry imported and no longer in the YAML file: removed by hand, or the file reverted alone), kept in {dropFile}. To add one again, copy "
+                      + "its 'entry' into the session's 'actors' with \"base\": null and without 'imported' or 'installed' (game closed), then import again: it becomes a new "
+                      + "props or vanilla entry. To undo an import, restore the session file together with the YAML (or try options with keepSession=true).");
         }
         // Marked entries have a base: a version 2 file.
         if (marked > 0) doc["version"] = 2;
@@ -675,8 +1159,8 @@ public static class EditorImport
             doc = new JsonObject();
         }
         doc["about"] = "Session entries editor_import dropped from the in-game editor's session, with when, from which session, importing which YAML file, and why. "
-                       + "To add a spawn again, copy its 'entry' into the session's 'actors' with \"base\": null and without 'imported' (game closed), then import again: "
-                       + "it becomes a new props entry.";
+                       + "To add one again, copy its 'entry' into the session's 'actors' with \"base\": null and without 'imported' or 'installed' (game closed), then "
+                       + "import again: a spawn becomes a new props entry, a vanilla actor a new vanilla entry.";
         if (doc["dropped"] is not JsonArray list) doc["dropped"] = list = new JsonArray();
         var at = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
         foreach (var (why, entry) in entries)
@@ -697,6 +1181,16 @@ public static class EditorImport
         if (transform.Scale is { } scale) pose["scale"] = scale;
         if (transform.Scale3D is { } scale3d) pose["scale3d"] = Doubles(scale3d);
         if (transform.Deleted is { } deleted) pose["deleted"] = deleted;
+        if (transform.Light is { } light)
+        {
+            var block = new JsonObject { ["kind"] = light.Kind };
+            if (light.Radius is { } radius) block["radius"] = radius;
+            if (light.Brightness is { } brightness) block["brightness"] = brightness;
+            if (light.Color is { } color) block["color"] = Ints(color);
+            if (light.Falloff is { } falloff) block["falloff"] = falloff;
+            if (light.Enabled is { } enabled) block["enabled"] = enabled;
+            pose["light"] = block;
+        }
         return pose;
     }
 
@@ -745,6 +1239,24 @@ public static class EditorImport
         public void Dispose()
         {
             foreach (var pcc in open.Values) pcc?.Dispose();
+        }
+    }
+
+    /// <summary>The vanilla files forks start from (<see cref="ForkBuilder.VanillaSource"/>), each read once per import with the exports its Kismet holds.</summary>
+    private sealed class VanillaFiles(MEGame game, string? ownDlc, Files files)
+    {
+        private readonly Dictionary<string, (IMEPackage Pcc, IReadOnlyDictionary<int, string> Held)> open = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The file's actor of that name; throws when the file or the actor is missing.</summary>
+        public (ExportEntry Actor, IReadOnlyDictionary<int, string> Held) Actor(string file, string name)
+        {
+            if (!open.TryGetValue(file, out var vanilla))
+            {
+                var source = ForkBuilder.VanillaSource(game, file, ownDlc);
+                var pcc = files.Get(source) ?? throw new FileNotFoundException($"{source} could not be read.");
+                open[file] = vanilla = (pcc, ForkBuilder.KismetHeld(pcc));
+            }
+            return (vanilla.Pcc.FindExport($"TheWorld.PersistentLevel.{name}") ?? throw new ArgumentException($"{file} has no actor {name}."), vanilla.Held);
         }
     }
 }

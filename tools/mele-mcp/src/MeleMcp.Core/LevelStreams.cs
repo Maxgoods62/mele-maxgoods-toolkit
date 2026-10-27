@@ -17,22 +17,41 @@ internal static class LevelStreams
     private const string LevelPath = "TheWorld.PersistentLevel";
 
     /// <param name="Volume">The vanilla BioTriggerStream to copy, e.g. the cabin's on the Normandy.</param>
-    /// <param name="Levels">Files shown inside the volume, by name without extension, e.g. BIOA_NOR10_09_LAY.</param>
+    /// <param name="Levels">Files shown inside the volume, by name without extension, e.g. BIOA_NOR10_09_LAY, or its fork CLD00_NOR10_09_LAY.</param>
     internal sealed record Spec(string Package, string Volume, List<string> Levels, int Line);
 
     /// <param name="Yaw">Degrees: 0 faces +X, 90 faces +Y.</param>
     internal sealed record StartPoint(string Tag, Vector3 Location, float? Yaw, int Line);
 
-    internal static void SetStreaming(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, PackageCache cache, List<string> changes)
+    /// <param name="others">For a file the level may have streamed under another name, that name: a vanilla file's fork, or a fork's
+    /// vanilla file (docs/07 §11). Its streaming entry is renamed in place, since entries are only ever added: a second one would
+    /// stay in StreamingLevels and stream both.</param>
+    internal static void SetStreaming(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, IReadOnlyDictionary<string, string> others, PackageCache cache, List<string> changes)
     {
         var world = pcc.FindExport("TheWorld") ?? throw new ArgumentException($"line {spec.Line}: the level has no TheWorld.");
         var worldInfo = WorldInfo(pcc, level);
         var listed = worldInfo.GetProperty<ArrayProperty<ObjectProperty>>("StreamingLevels") ?? new ArrayProperty<ObjectProperty>("StreamingLevels");
         var listDirty = false;
+        ExportEntry? Streaming(string name) => pcc.Exports.FirstOrDefault(e => e.Parent == world && e.ClassName == "LevelStreamingKismet"
+                                                                              && e.GetProperty<NameProperty>("PackageName")?.Value.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase) == true);
         foreach (var name in spec.Levels)
         {
-            var streaming = pcc.Exports.FirstOrDefault(e => e.Parent == world && e.ClassName == "LevelStreamingKismet"
-                                                           && e.GetProperty<NameProperty>("PackageName")?.Value.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase) == true);
+            var streaming = Streaming(name);
+            if (others.TryGetValue(name, out var otherName) && Streaming(otherName) is { } other)
+            {
+                if (streaming is null)
+                {
+                    other.WriteProperty(new NameProperty(name, "PackageName"));
+                    changes.Add($"streams {name} instead of {otherName}");
+                    streaming = other;
+                }
+                else if (listed.Where(o => o.Value == other.UIndex).ToList() is { Count: > 0 } stale)
+                {
+                    foreach (var entry in stale) listed.Remove(entry);
+                    listDirty = true;
+                    changes.Add($"no longer streams {otherName} (streams {name})");
+                }
+            }
             if (streaming is null)
             {
                 streaming = pcc.CreateExport("LevelStreamingKismet", "LevelStreamingKismet", world, cache: cache);
@@ -79,6 +98,26 @@ internal static class LevelStreams
         infoProps.AddOrReplaceProp(new BoolProperty(true, "bPathsRebuilt"));
         infoProps.AddOrReplaceProp(new BoolProperty(true, "bHasPathNodes"));
         if (Write(worldInfo, infoProps)) changes.Add("has a path network (bPathsRebuilt, bHasPathNodes)");
+    }
+
+    /// <summary>
+    /// Renames, in every SeqAct_WaitForLevelsVisible of the level, a name it no longer streams under (the other name of a pair:
+    /// <paramref name="others"/>, as <see cref="SetStreaming"/> takes it) to the one it streams now. A wait looks its levels up by
+    /// name: one the level no longer streams never shows, and the wait (the squad's, docs/07 §11) never finishes. The squad's gets
+    /// its names from SquadSpawns too, but only while the YAML has 'squad'.
+    /// </summary>
+    internal static void RenameWaits(IMEPackage pcc, IReadOnlyDictionary<string, string> others, List<string> changes)
+    {
+        var streamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (now, other) in others) streamed.TryAdd(other, now);
+        foreach (var wait in pcc.Exports.Where(e => e.ClassName == "SeqAct_WaitForLevelsVisible"))
+        {
+            if (wait.GetProperty<ArrayProperty<NameProperty>>("LevelNames") is not { Count: > 0 } names
+                || !names.Any(n => streamed.ContainsKey(n.Value.Instanced))) continue;
+            var renamed = names.Select(n => streamed.TryGetValue(n.Value.Instanced, out var now) ? new NameProperty(now) : n).ToList();
+            wait.WriteProperty(new ArrayProperty<NameProperty>(renamed, "LevelNames"));
+            changes.Add($"Kismet: {wait.ObjectName.Instanced} waits for {string.Join(", ", renamed.Select(n => n.Value.Instanced))}");
+        }
     }
 
     /// <summary>

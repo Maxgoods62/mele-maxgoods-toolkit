@@ -563,6 +563,24 @@ namespace MeleBridge
         }
     }
 
+    void CallSpawnWithoutNoDelete(UObject* object, UFunction* function, void* parms, AActor* classDefault)
+    {
+        // AActor.bNoDelete: 0x270, mask 0x4 (Engine_classes.hpp). A bit-field write changes that bit alone. The failure to cover
+        // is an access violation caught by the caller's __except: under /EHsc that unwind skips C++ destructors, so a scope
+        // guard could miss it, and a default left without bNoDelete would make every light of the class loaded later
+        // deletable. No C++ object may live in this frame.
+        auto const saved = classDefault->bNoDelete;
+        classDefault->bNoDelete = 0;
+        __try
+        {
+            CallProcessEvent(object, function, parms);
+        }
+        __finally
+        {
+            classDefault->bNoDelete = saved;
+        }
+    }
+
     json CallFunction(UObject* object, std::wstring const& name, json const& args)
     {
         auto const function = FindFunction(object->Class, name);

@@ -10,8 +10,8 @@ internal static class YamlEdits
 {
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-    /// <summary>The sections whose entries are actors the build finds again by tag.</summary>
-    private static readonly string[] ActorSections = ["npcs", "usables", "props"];
+    /// <summary>The sections whose entries are actors the build finds again by tag (lights: docs/07 §11).</summary>
+    private static readonly string[] ActorSections = ["npcs", "usables", "props", "lights"];
 
     internal static string Location(float x, float y, float z) => $"[{string.Join(", ", new[] { x, y, z }.Select(f => f.ToString("R", Inv)))}]";
 
@@ -21,6 +21,15 @@ internal static class YamlEdits
     internal static string Scale(double scale) => scale.ToString("0.####", Inv);
 
     internal static string Scale3D(double[] scale) => $"[{string.Join(", ", scale.Select(Scale))}]";
+
+    /// <summary>A light's radius: 2 decimals (editor_import takes radii within 0.01 as one).</summary>
+    internal static string Radius(double radius) => radius.ToString("0.##", Inv);
+
+    /// <summary>A light's brightness or falloff: 4 decimals (taken as one within 0.001).</summary>
+    internal static string Fraction(double value) => value.ToString("0.####", Inv);
+
+    /// <summary>A light's colour, [r, g, b] in whole numbers 0-255.</summary>
+    internal static string Color(double[] rgb) => $"[{string.Join(", ", rgb.Select(c => ((int)Math.Round(c)).ToString(Inv)))}]";
 
     /// <summary>[pitch, yaw, roll] in degrees in (-180, 180], from Unreal units.</summary>
     internal static string Rotation(double[] units) => $"[{string.Join(", ", units.Select(u => Degrees((float)Rotations.Angle(Rotations.Degrees(u)))))}]";
@@ -33,7 +42,7 @@ internal static class YamlEdits
     internal static string Quote(string value) =>
         value.Length > 0 && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-') ? value : $"'{value.Replace("'", "''")}'";
 
-    /// <summary>The npcs, usables or props entry with this tag, as the build finds its actor; null when none has it.</summary>
+    /// <summary>The npcs, usables, props or lights entry with this tag, as the build finds its actor; null when none has it.</summary>
     internal static (string Section, KeyValuePair<YamlNode, YamlNode> Entry)? Tagged(YamlMappingNode root, string tag)
     {
         var found = ActorSections.SelectMany(s => root.Children.FirstOrDefault(c => Scalar(c.Key) == s).Value is YamlMappingNode m
@@ -46,12 +55,28 @@ internal static class YamlEdits
         return found.Count == 0 ? null : found[0];
     }
 
-    /// <summary>The tags of the actor entries (npcs, usables, props).</summary>
+    /// <summary>The tags of the actor entries (npcs, usables, props, lights).</summary>
     internal static HashSet<string> Tags(YamlMappingNode root) =>
         ActorSections.SelectMany(s => root.Children.FirstOrDefault(c => Scalar(c.Key) == s).Value is YamlMappingNode m ? m.Children.Values : [])
             .OfType<YamlMappingNode>()
             .SelectMany(body => body.Children.Where(c => Scalar(c.Key) == "tag").Select(c => Scalar(c.Value)))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The tags of the NPCs' lights (npcs.&lt;name&gt;.lights[].tag), each with where it is: npcs.reyes.lights.</summary>
+    internal static Dictionary<string, string> NpcLightTags(YamlMappingNode root)
+    {
+        var tags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (root.Children.FirstOrDefault(c => Scalar(c.Key) == "npcs").Value is not YamlMappingNode npcs) return tags;
+        foreach (var (name, body) in npcs.Children)
+        {
+            if (body is not YamlMappingNode npc || npc.Children.FirstOrDefault(c => Scalar(c.Key) == "lights").Value is not YamlSequenceNode lights) continue;
+            foreach (var light in lights.Children.OfType<YamlMappingNode>())
+            {
+                if (light.Children.FirstOrDefault(c => Scalar(c.Key) == "tag").Value is YamlScalarNode { Value: { } tag }) tags.TryAdd(tag, $"npcs.{Scalar(name)}.lights");
+            }
+        }
+        return tags;
+    }
 
     /// <summary>An entry of a top-level mapping such as npcs; with no name, its only entry.</summary>
     internal static KeyValuePair<YamlNode, YamlNode> Entry(YamlMappingNode root, string section, string? name)
@@ -159,17 +184,37 @@ internal static class YamlEdits
 
     /// <summary>
     /// Adds an entry at the end of a top-level block mapping, after its last value's line (comments before the next section
-    /// stay with that section). A missing section is added at the end of the file, under its comment.
+    /// stay with that section), with <paramref name="keyComment"/> after its name when given. A missing section is added at the end of
+    /// the file, under its comment (one comment line per line of it); one with no entry left ('vanilla:' alone, '~', '{}') gets it
+    /// under its header.
     /// </summary>
-    internal static string AddEntry(string text, YamlMappingNode root, string section, string name, IReadOnlyList<(string Key, string Value)> keys, string sectionComment)
+    internal static string AddEntry(string text, YamlMappingNode root, string section, string name, IReadOnlyList<(string Key, string Value)> keys, string sectionComment,
+        string? keyComment = null)
     {
         var newline = NewLine(text);
+        var nameLine = keyComment is null ? $"{name}:" : $"{name}:   # {keyComment}";
+        var lines = string.Concat(keys.Select(k => $"    {k.Key}: {k.Value}{newline}"));
         var existing = root.Children.FirstOrDefault(c => Scalar(c.Key) == section);
         if (existing.Key is null)
         {
-            var lines = string.Concat(keys.Select(k => $"    {k.Key}: {k.Value}{newline}"));
             var separator = text.EndsWith(newline + newline) ? "" : text.EndsWith('\n') ? newline : newline + newline;
-            return $"{text}{separator}# {sectionComment}{newline}{section}:{newline}  {name}:{newline}{lines}";
+            var comment = string.Concat(sectionComment.Split('\n').Select(l => $"# {l.TrimEnd('\r')}{newline}"));
+            return $"{text}{separator}{comment}{section}:{newline}  {nameLine}{newline}{lines}";
+        }
+        if (Null(existing.Value) || existing.Value is YamlMappingNode { Style: YamlDotNet.Core.Events.MappingStyle.Flow, Children.Count: 0 })
+        {
+            // Its value ('~', '{}') goes with the blanks before it, a comment after it stays; the entry goes on the line after the header.
+            var edits = new List<(long Start, long End, string Text)>();
+            if (existing.Value is not YamlScalarNode { Value: null or "" })
+            {
+                var start = (int)existing.Value.Start.Index;
+                while (start > existing.Key.End.Index && text[start - 1] is ' ' or '\t') start--;
+                edits.Add((start, ValueEnd(text, existing.Value), ""));
+            }
+            var header = text.IndexOf('\n', (int)existing.Key.End.Index);
+            var first = $"  {nameLine}{newline}{lines}";
+            edits.Add(header < 0 ? (text.Length, text.Length, newline + first) : (header + 1, header + 1, first));
+            return Apply(text, edits);
         }
         if (existing.Value is not YamlMappingNode { Style: not YamlDotNet.Core.Events.MappingStyle.Flow, Children.Count: > 0 } entries)
         {
@@ -180,13 +225,23 @@ internal static class YamlEdits
         var indent = (int)entries.Children.First().Key.Start.Column - 1;
         var lineStart = text.IndexOf('\n', (int)LastLeaf(entries).Start.Index);
         var at = lineStart < 0 ? text.Length : lineStart + 1;
-        var entry = $"{new string(' ', indent)}{name}:{newline}" + string.Concat(keys.Select(k => $"{new string(' ', indent + 2)}{k.Key}: {k.Value}{newline}"));
+        var entry = $"{new string(' ', indent)}{nameLine}{newline}" + string.Concat(keys.Select(k => $"{new string(' ', indent + 2)}{k.Key}: {k.Value}{newline}"));
         return at == text.Length && !text.EndsWith('\n') ? text + newline + entry : text[..at] + entry + text[at..];
+    }
+
+    /// <summary>Removes the entry of a top-level mapping whose value is <paramref name="value"/>, with its lines (and a comment on them).</summary>
+    internal static string RemoveEntry(string text, YamlMappingNode root, string section, YamlNode value)
+    {
+        var entries = root.Children.FirstOrDefault(c => Scalar(c.Key) == section).Value as YamlMappingNode ?? throw new ArgumentException($"The file has no '{section}' mapping.");
+        var pair = entries.Children.FirstOrDefault(c => ReferenceEquals(c.Value, value));
+        if (pair.Key is null) throw new ArgumentException($"'{section}' has no such entry.");
+        return Apply(text, [Removal(text, entries, pair)]);
     }
 
     /// <summary>
     /// Adds 'propTemplate' above props when the file has none: a BioInert placed in that file (not one spawned since), whose
-    /// copies show static meshes, lit where they stand. Returns the change, or null when the file had one.
+    /// copies show static meshes, lit by their light environment, or by prop lights where a light of the lights section covers them.
+    /// Returns the change, or null when the file had one.
     /// </summary>
     internal static (string Text, string? Added) AddPropTemplate(MEGame game, string text, string package)
     {
@@ -199,7 +254,8 @@ internal static class YamlEdits
                     ?? throw new ArgumentException($"{Path.GetFileName(GamePaths.ToWindowsPath(package))} has no BioInert to show static meshes on: add 'propTemplate: {{ package: <file>, actor: <a BioInert> }}' to the YAML.");
         }
         var standIn = $"{{ package: {Quote(package)}, actor: {inert} }}";
-        return (AddTopLevel(text, root, "propTemplate", $"{standIn}   # a BioInert: copies of it show the static meshes, lit where they stand", "props"), $"propTemplate: {standIn}");
+        return (AddTopLevel(text, root, "propTemplate", $"{standIn}   # a BioInert: copies of it show the static meshes, lit by their light environment (by prop lights where a light covers them)", "props"),
+            $"propTemplate: {standIn}");
     }
 
     /// <summary>A top-level key on its own line, above another top-level key (or at the end of the file without it).</summary>
@@ -336,7 +392,7 @@ internal static class Rotations
     }
 
     /// <summary>The X, Y and Z axes of UE3's FRotationMatrix for pitch, yaw, roll in Unreal units.</summary>
-    private static ((double X, double Y, double Z) X, (double X, double Y, double Z) Y, (double X, double Y, double Z) Z) Axes(double[] units)
+    internal static ((double X, double Y, double Z) X, (double X, double Y, double Z) Y, (double X, double Y, double Z) Z) Axes(double[] units)
     {
         static double Radians(double u) => u * Math.PI * 2 / 65536;
         var (sp, cp) = Math.SinCos(Radians(units[0]));
