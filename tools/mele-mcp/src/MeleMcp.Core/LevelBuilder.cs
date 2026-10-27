@@ -32,8 +32,8 @@ public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyL
 /// post-process, character lights, start points (see <see cref="LevelStreams"/>), the squad spawned on load (<see cref="SquadSpawns"/>). Its NPCs: the pawn (found by tag, else imported from a
 /// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
 /// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. Its props: any
-/// actor copied from a template and placed (live_place, live_save), or a mesh shown on a copy of the prop template (editor_import);
-/// a removed one is hidden without collision. A missing level is
+/// actor copied from a template and placed (live_place, live_save), or a mesh shown on a copy of the prop template (editor_import),
+/// turned by a yaw or a full rotation and scaled; a removed one is hidden without collision. A missing level is
 /// created, and the LE1CP Sideloader config that loads it is written.
 /// </summary>
 public static class LevelBuilder
@@ -100,6 +100,10 @@ public static class LevelBuilder
         public bool Removed;
         public Vector3? Location;
         public float? Yaw;
+        /// <summary>Pitch, yaw, roll in degrees, instead of <see cref="Yaw"/>.</summary>
+        public float[]? Rotation;
+        public float? Scale;
+        public Vector3? Scale3D;
     }
 
     private sealed class Spec
@@ -333,7 +337,7 @@ public static class LevelBuilder
 
         var props = actor.GetProperties();
         var dirty = Changed(changes, "tag", Put(props, new NameProperty(tag, "Tag")));
-        dirty |= PutPlace(props, prop.Location, prop.Yaw, changes);
+        dirty |= PutPlace(props, prop.Location, prop.Yaw, changes, prop.Rotation, prop.Scale, prop.Scale3D);
         if (dirty) actor.WriteProperties(props);
         return new BuiltProp(prop.Name, ExportInspector.Row(actor), action, changes);
     }
@@ -356,9 +360,10 @@ public static class LevelBuilder
 
     /// <summary>
     /// Puts a mesh of the source package on the placeable's PlaceableMesh, with these materials (none: the mesh's own) and the
-    /// DrawScale and DrawScale3D found in <paramref name="scale"/> (none: 1). Baked light is dropped: it was made for another mesh.
+    /// DrawScale, DrawScale3D and Rotation found in <paramref name="placed"/> (none: 1, and not turned). Baked light is dropped: it
+    /// was made for another mesh.
     /// </summary>
-    private static void ShowMesh(IMEPackage source, IEntry mesh, IReadOnlyList<IEntry?> materials, IEnumerable<Property> scale, IMEPackage pcc, ExportEntry placeable,
+    private static void ShowMesh(IMEPackage source, IEntry mesh, IReadOnlyList<IEntry?> materials, IEnumerable<Property> placed, IMEPackage pcc, ExportEntry placeable,
                                  PackageCache cache, List<string> changes)
     {
         var shown = Object(pcc, placeable.GetProperties(), "PlaceableMesh") ?? throw new ArgumentException($"The prop template {placeable.ObjectName.Instanced} has no PlaceableMesh: give a BioInert.");
@@ -374,12 +379,14 @@ public static class LevelBuilder
         shown.WriteProperties(shownProps);
 
         var props = placeable.GetProperties();
-        var scales = scale.ToList();
+        var values = placed.ToList();
         foreach (var name in new[] { "DrawScale", "DrawScale3D" })
         {
             props.RemoveNamedProperty(name);
-            if (scales.FirstOrDefault(p => p.Name == name) is { } kept) props.AddOrReplaceProp(kept);
+            if (values.FirstOrDefault(p => p.Name == name) is { } kept) props.AddOrReplaceProp(kept);
         }
+        // Turned as what it shows, not as the actor it was copied from: a 'yaw' then keeps that pitch and roll.
+        props.AddOrReplaceProp(values.FirstOrDefault(p => p.Name == "Rotation") ?? CommonStructs.RotatorProp(new Rotator(0, 0, 0), "Rotation"));
         placeable.WriteProperties(props);
         changes.Add($"shows {mesh.InstancedFullPath}");
     }
@@ -458,17 +465,23 @@ public static class LevelBuilder
         return EntryImporter.GetOrAddCrossImportOrPackage(entry.InstancedFullPath, source, pcc, new RelinkerOptionsPackage { Cache = cache });
     }
 
-    /// <summary>Location, and yaw in degrees (pitch and roll kept).</summary>
-    private static bool PutPlace(PropertyCollection props, Vector3? location, float? yaw, List<string> changes)
+    /// <summary>Location; yaw in degrees (pitch and roll kept) or rotation [pitch, yaw, roll] in degrees; DrawScale and DrawScale3D.</summary>
+    private static bool PutPlace(PropertyCollection props, Vector3? location, float? yaw, List<string> changes, float[]? rotation = null, float? scale = null, Vector3? scale3d = null)
     {
         var dirty = location is { } l && Changed(changes, "location", Put(props, CommonStructs.Vector3Prop(l, "Location")));
         if (yaw is { } y)
         {
-            var rotation = props.GetProp<StructProperty>("Rotation") is { } r ? CommonStructs.GetRotator(r) : new Rotator(0, 0, 0);
-            dirty |= Changed(changes, "yaw", Put(props, CommonStructs.RotatorProp(new Rotator(rotation.Pitch, (int)Math.Round(y * 65536 / 360), rotation.Roll), "Rotation")));
+            var turned = props.GetProp<StructProperty>("Rotation") is { } r ? CommonStructs.GetRotator(r) : new Rotator(0, 0, 0);
+            dirty |= Changed(changes, "yaw", Put(props, CommonStructs.RotatorProp(new Rotator(turned.Pitch, Units(y), turned.Roll), "Rotation")));
         }
+        if (rotation is { } pyr) dirty |= Changed(changes, "rotation", Put(props, CommonStructs.RotatorProp(new Rotator(Units(pyr[0]), Units(pyr[1]), Units(pyr[2])), "Rotation")));
+        if (scale is { } s) dirty |= Changed(changes, "scale", Put(props, new FloatProperty(s, "DrawScale")));
+        if (scale3d is { } s3) dirty |= Changed(changes, "scale3d", Put(props, CommonStructs.Vector3Prop(s3, "DrawScale3D")));
         return dirty;
     }
+
+    /// <summary>Degrees to Unreal rotation units (65536 = 360°).</summary>
+    private static int Units(float degrees) => (int)Math.Round(degrees * 65536 / 360);
 
     /// <summary>Main_Sequence: Shepard uses the placeable (BioSeqEvt_ArtPlaceableUsed) → BioSeqAct_AreaTransition to the map and start point.</summary>
     private static void LinkAreaTransition(IMEPackage pcc, ExportEntry usable, string map, string? startPoint, int line, PackageCache cache, List<string> changes)
@@ -953,7 +966,8 @@ public static class LevelBuilder
     {
         if (body is not YamlMappingNode m) throw Fail(body, $"prop '{name}' must be a mapping.");
         var prop = new PropSpec { Name = name, Line = (int)body.Start.Line };
-        foreach (var (key, value) in Entries(m, "tag", "template", "mesh", "removed", "location", "yaw"))
+        YamlNode? rotation = null;
+        foreach (var (key, value) in Entries(m, "tag", "template", "mesh", "removed", "location", "yaw", "rotation", "scale", "scale3d"))
         {
             switch (key)
             {
@@ -966,7 +980,20 @@ public static class LevelBuilder
                     prop.Location = new Vector3(xyz[0], xyz[1], xyz[2]);
                     break;
                 case "yaw": prop.Yaw = Number(value); break;
+                case "rotation":
+                    prop.Rotation = Numbers(value, 3, 3);
+                    rotation = value;
+                    break;
+                case "scale": prop.Scale = Number(value); break;
+                case "scale3d":
+                    var scale = Numbers(value, 3, 3);
+                    prop.Scale3D = new Vector3(scale[0], scale[1], scale[2]);
+                    break;
             }
+        }
+        if (prop.Yaw is not null && rotation is not null)
+        {
+            throw Fail(rotation, $"prop '{name}' has 'yaw' and 'rotation': give one ('rotation' is [pitch, yaw, roll] in degrees, 'yaw' keeps the actor's pitch and roll).");
         }
         if (prop.Template is not null && prop.Mesh is not null)
         {

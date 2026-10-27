@@ -26,15 +26,35 @@ only handles whole classes (`getall`), and commands queued together run in rever
 
 ## In-game editor
 
-F8 in the game opens a level editor drawn over the game: free cam, click a prop to select it, drag the red, green and blue
-arrows to move it (T) or the ring to turn it (R). Del deletes the selection, Ctrl+S saves. **Props** spawns a prop where
-the view points, from one of two tabs:
+F8 in the game opens a level editor drawn over the game: free cam, click a prop to select it, then drag the gizmo of one of
+three tools. Del deletes the selection, Ctrl+Z undoes, Ctrl+Y (or Ctrl+Shift+Z) redoes, Ctrl+S saves. **Props** spawns a
+prop where the view points, from one of two tabs:
 
 - **Catalog:** a grid of thumbnails of the curated props mele-mcp's `catalog_build` writes, with a category list and a
   search. A tooltip gives the size, triangles, how often the game's levels place it and the file it comes from.
 - **In this level:** the meshes in memory, as a list (Phase 1's).
 
-It is Phase 2 of [docs/07](../../docs/07-ingame-editor.md); undo and keeping edits across a map reload come in later phases.
+It is Phase 3 of [docs/07](../../docs/07-ingame-editor.md#10-phase-3-the-save-loop): saved edits come back when the map
+loads again, and ship with their tilt and scale.
+
+| Key | Tool | What the gizmo does |
+|---|---|---|
+| T | Move | Arrows and planes in world space. Ctrl snaps to 10 units from where the drag started. |
+| R | Turn | Three rings in the prop's own space (pitch, yaw and roll). Ctrl snaps to 15 degrees from where the drag started. An npc gets Phase 1's single ring about the vertical: the level YAML keeps a yaw for npcs. |
+| G | Scale | Handles in the prop's own space, one axis or all three (the centre); it changes `DrawScale3D`, never `DrawScale`. Ctrl rounds to 0.1. Off for npcs (they keep a yaw and no scale). |
+
+- **Refusals:** R and G are refused on a mirrored actor (a `DrawScale` or `DrawScale3D` component that is not positive):
+  its matrix gives no rotation or scale back. Move, turn and scale refuse a hidden actor. Move, turn, scale and delete
+  refuse an actor that a session entry still waiting names (or an edit waiting for its actor or its built copy) until the
+  re-apply pass, asked for at once, has applied it: an edit made from the actor as it stood would replace the entry at the
+  next Save. The status line says why.
+- **Delete hides:** `SetHidden(true)` and `SetCollision(false, false)`, not `Destroy`: undo shows it again with the flags it
+  had. Pawns, controllers, `bStatic` and `bNoDelete` actors are still refused.
+- **Undo and redo:** one step per spawn, delete or drag, 200 at most. The game thread opens a drag's step at its first
+  command and closes it when the drag ends (or before any other command); a drag that comes back where it started leaves
+  none. Undoing writes the whole state back (shown or hidden, location, rotation, scale) and marks the edit unsaved. A step
+  whose actor is gone is dropped, with a status line. A map change clears both stacks. The toolbar's Undo and Redo name the
+  step (`Undo move ed_…`).
 
 - **Threads:** the game thread does everything that touches game objects (`Editor.cpp`, after `BioHUD.PostRender` and
   `Camera.UpdateCamera`). The render thread draws [Dear ImGui](https://github.com/ocornut/imgui) and
@@ -44,16 +64,83 @@ It is Phase 2 of [docs/07](../../docs/07-ingame-editor.md); undo and keeping edi
   mouse reads zero, and the game's `SetCursorPos`/`ClipCursor` calls are blocked. F8 and Alt+F4 always work.
 - **Pause:** `WorldInfo.bPlayersOnly`, as photo mode does. Closing gives the old value back.
   - A spawned prop's `DynamicLightEnvironment` only updates when the world ticks: paused, it would render black. After a
-    spawn, and when an arrow or ring drag ends, the editor lets the world tick once and takes the pause back at its next
-    tick. That release is its own: it isn't logged or counted as the game ending the pause.
+    spawn, when a drag ends, after an undo or redo, and after a re-apply applied, spawned or rebound props, the editor lets
+    the world tick once and takes the pause back at its next tick. That release is its own: it isn't logged or counted as the game
+    ending the pause.
 - **Save:** one session file per map, `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json`, outside the install. It holds the
-  latest state of each actor spawned, moved, turned or deleted: spawned ones by tag, level actors by path. mele-mcp's
-  `editor_import` writes it into the level YAML and builds it.
-- **State:** the `editor` op (`live_editor` in mele-mcp) returns open, camera, selection, edits, the status line, the
-  projection check, the catalog (props read, thumbnails on the GPU) and counters.
+  latest state of each actor spawned, moved, turned, scaled or deleted: spawned ones by tag, level actors by path. Each
+  edit keeps that state itself, so a save never reads an actor. mele-mcp's `editor_import` writes it into the level YAML
+  and builds it. A field the edit hasn't changed since it was last saved or read takes the file's value (an import may have
+  written the YAML's into it while the game ran), on the actor too. The status line counts the entries written; a spawn
+  deleted before its first save leaves nothing, is named apart and is not counted in `Save (N)`, and a Save of only such
+  spawns rewrites nothing. A map change saves the unsaved edits first; those of a map whose file could not be written are
+  kept, and the next Save tries again. Until a save writes every map, the toolbar says `not saved`, with why on a line of
+  its own (the status line fades, and the first pass after a load replaces it).
+- **Re-apply on load:** after a map loads, and again each time the loaded or visible streaming levels change and then stay
+  the same for half a second (editor open or not), a pass puts the session's entries back on their actors. See
+  [Re-applying a session](#re-applying-a-session).
+- **State:** the `editor` op (`live_editor` in mele-mcp) returns open, camera, selection (rotation, `DrawScale`,
+  `DrawScale3D`), edits (with `saveProblem`), undo and redo, the session's re-apply (file, applied, dropped, pending with why, the levels the
+  last pass saw), the status line, the projection check, the catalog (props read, thumbnails on the GPU) and counters.
+  Diagnostics shows the same session summary.
 - **Tested 2026-10-27** in the freighter: Phase 0's seven steps ([docs/07 §7](../../docs/07-ingame-editor.md#7-phase-0-the-test-build)),
   the arrows within 0.6 px of where the engine projects the prop; Phase 1's five ([§8](../../docs/07-ingame-editor.md#8-phase-1-the-first-usable-editor)),
-  a crate spawned and one deleted in game, both shipped by build + install. The Catalog tab is not tested in game yet.
+  a crate spawned and one deleted in game, both shipped by build + install; Phase 2's catalog on the Normandy
+  ([§9](../../docs/07-ingame-editor.md#9-phase-2-catalog-and-thumbnails)); Phase 3's five ([§10](../../docs/07-ingame-editor.md#10-phase-3-the-save-loop)):
+  a tilted, scaled catalog prop kept through a reload, then imported, built and installed, and a conflict refused.
+
+### The session file
+
+Version 2 (UTF-8). The bridge reads versions 1 and 2 and writes 2; a file of another version is left as it is, and one
+that can't be parsed is moved aside (`<map>.json.bad-<tick>`) at the next Save.
+
+```json
+{ "version": 2, "map": "BIOA_CLD01", "saved": "2026-10-27T04:00:00Z",
+  "actors": [ { "tag": "ed_Crate_XLarge_03_fdsdl_1", "path": "BIOA_CLD01.TheWorld.PersistentLevel.DynamicSMActor_Spawnable_3",
+                "level": "BIOA_CLD01", "class": "DynamicSMActor_Spawnable", "spawned": true,
+                "mesh": { "path": "biog_apl_phy_crate_xlarge_01_l.Crate_XLarge_03", "file": "BIOA_STA30_02_DSG",
+                          "load": "MeleCatalog_Core.Crates.Crate_XLarge_03" },
+                "location": [1200.5, -340, 96], "rotation": [0, 16384, 2730], "scale": 1, "scale3d": [1, 1, 1.5],
+                "deleted": false, "base": null } ] }
+```
+
+| Field | What it holds |
+|---|---|
+| `location`, `rotation`, `scale`, `scale3d` | The actor's state: rotation in Unreal units (65536 = 360°), `scale` is `DrawScale`, `scale3d` is `DrawScale3D`. |
+| `deleted` | Hidden by Delete. A spawn deleted before it was ever saved is not written. |
+| `mesh` | Spawns only (`null` otherwise): the vanilla mesh and a vanilla file with it, and `load`, the catalog package's copy (`null` for a mesh from the In this level list). |
+| `base` | What the level YAML holds, for `editor_import`'s three-way merge: the actor before the editor first changed it, `null` for a spawn never imported. Save keeps the file's `base` when the entry has one (an import moves it on), with its `deleted` (whether the YAML removes the actor) when an import gave it. A base the editor takes from a shown actor has `deleted: false` (the build that made it did not remove it); one of a version 1 entry taken from a hidden actor has none (the game may have hidden it). |
+| `imported` | Written by `editor_import` only: `{ "before": <the base before the import, plus deleted> | null }`. Save leaves it out: a saved edit is a new state. |
+| `installed` | Written by the bridge only: when Save writes over an imported entry, its `imported.before` (and its own `installed`). The next import's `before` is the base, and the install may still show any of these; `editor_import` leaves them as they are. |
+
+### Re-applying a session
+
+A pass reads the actors of the loaded levels (the persistent level and each streaming level's `LoadedLevel`, through
+`ULevelBase::Actors`) and matches each waiting entry:
+
+- **Matching:** a spawn by its tag (a built copy has it); a level actor by tag when exactly one loaded actor has it, it is
+  a real tag (not empty, `None` or the class name), and that actor is in the entry's level and of its class; else by path
+  with the same class.
+- **Deciding:** an entry with `imported` is dropped when the actor already has its state (the install is done), applied
+  when the actor still has `imported.before` or one of `installed` (or, for a spawn, no actor has its tag yet), and
+  dropped otherwise (the YAML was built from something else since). A version 1 entry is dropped when the actor already has its state (Phase 1's
+  import put it in the level), else applied with the actor's state before applying as its base (a spawn spawned again:
+  its built copy's, once rebound). Anything else is applied. Dropped entries are removed from the file. States compare as
+  `editor_import` compares them: location to 0.01, rotation as an orientation, scales to 0.001.
+- **Applying:** the stored state is written (deleted: hidden); the edit starts saved. An entry that shows an actor the
+  build hid (the YAML state it was judged by says removed, and the actor is hidden) shows it again with its class's
+  collision; one the game hid stays hidden. A spawn no loaded actor has the tag of is spawned again, with its mesh from
+  memory, else from `mesh.load`, else from the catalog entry with that vanilla mesh; a deleted one is kept without an
+  actor. When a built copy with its tag shows up later, the spawn is destroyed and the edit moves to the copy, judged
+  first as its entry would have been when it is still that entry: installed or built from other YAML, the edit takes the
+  copy as built and the entry leaves the file.
+- **Streaming:** an actor of a level loaded but not visible gets the raw writes only, no component update; when the level
+  turns visible, those actors' components are updated. No pass runs while a level is still being added to the world or
+  taken from it (`bShouldBeVisible` ≠ `bIsVisible`), unless that lasts 5 s. When a level unloads, its edits wait for it
+  again (with their state) and their undo steps go.
+- **Waiting:** an entry whose actor isn't loaded waits for a later pass, with why (Diagnostics and the `editor` state list
+  them). A pass that faults is not tried again until the loaded levels change; the entries it had applied or dropped leave
+  the list then.
 
 ### The prop catalog
 

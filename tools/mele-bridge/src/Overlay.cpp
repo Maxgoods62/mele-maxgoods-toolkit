@@ -58,11 +58,22 @@ namespace MeleBridge::Editor
         /// Where the cursor was when a free-cam look started: it goes back there when the button is released.
         POINT LookStart{};
 
-        enum class Tool { Move, Turn };
+        enum class Tool { Move, Turn, Scale };
         Tool Current = Tool::Move;
         Tool LastTool = Tool::Move;
-        /// A turn's yaw in degrees: the selection's at the start of the drag plus each frame's turn.
+        /// A pawn's turn, in degrees: the selection's yaw at the start of the drag plus each frame's turn.
         float DragYaw = 0;
+        /// The selection at the start of the drag: a scale changes only the dragged axis, a pawn's turn only the yaw.
+        FRotator DragRotation{};
+        float DragDrawScale = 1;
+        FVector DragScale3D{ 1, 1, 1 };
+        /// The handle the drag holds: ImGuizmo forgets it on the frame the button is released, whose change still counts.
+        ImGuizmo::MOVETYPE DragHandle = ImGuizmo::MT_NONE;
+        /// The overlay's own refusals (a tool the selection can't take), shown like the game thread's status line.
+        std::string Refusal;
+        LARGE_INTEGER RefusalSince{};
+        /// The selection and tool the gizmo last refused, so it is said once, not every frame.
+        std::string RefusedFor;
         bool ShowProps = false;
         bool MeshesAsked = false;
         char Filter[128]{};
@@ -105,15 +116,46 @@ namespace MeleBridge::Editor
             std::memcpy(up, u, sizeof u);
         }
 
-        /// An actor's transform as UE3's FRotationTranslationMatrix: the axes as rows, then the location.
-        void ModelMatrix(FVector location, FRotator const& rotation, float* m)
+        /// An actor's transform as UE3's local-to-world matrix: the axes as rows, each scaled by DrawScale times its
+        /// DrawScale3D component, then the location.
+        void ModelMatrix(FVector location, FRotator const& rotation, float drawScale, FVector scale3d, float* m)
         {
             Axes(rotation, m, m + 4, m + 8);
+            float const scale[3] = { drawScale * scale3d.X, drawScale * scale3d.Y, drawScale * scale3d.Z };
+            for (int row = 0; row < 3; row++)
+            {
+                for (int column = 0; column < 3; column++) m[row * 4 + column] *= scale[row];
+            }
             m[3] = m[7] = m[11] = 0;
             m[12] = location.X;
             m[13] = location.Y;
             m[14] = location.Z;
             m[15] = 1;
+        }
+
+        /// The rotation of a model matrix, as UE3's FMatrix::Rotator reads it from the normalised rows: pitch and yaw from the
+        /// forward axis, roll from the up and right axes against the right axis with no roll. In double: a float atan2 near the
+        /// poles is off by whole units.
+        FRotator RotatorOf(float const* m)
+        {
+            constexpr double Units = 32768.0 / 3.14159265358979323846;
+            double axis[3][3];
+            for (int row = 0; row < 3; row++)
+            {
+                auto const* r = m + row * 4;
+                auto const length = std::sqrt(double(r[0]) * r[0] + double(r[1]) * r[1] + double(r[2]) * r[2]);
+                for (int i = 0; i < 3; i++) axis[row][i] = length > 0 ? r[i] / length : 0;
+            }
+            auto const& x = axis[0];
+            auto const& y = axis[1];
+            auto const& z = axis[2];
+            FRotator out{ static_cast<int>(std::lround(std::atan2(x[2], std::sqrt(x[0] * x[0] + x[1] * x[1])) * Units)),
+                          static_cast<int>(std::lround(std::atan2(x[1], x[0]) * Units)), 0 };
+            auto const yaw = out.Yaw / Units;
+            double const unrolled[3] = { -std::sin(yaw), std::cos(yaw), 0 };
+            auto const along = [&](double const* a) { return a[0] * unrolled[0] + a[1] * unrolled[1] + a[2] * unrolled[2]; };
+            out.Roll = static_cast<int>(std::lround(std::atan2(along(z), along(y)) * Units));
+            return out;
         }
 
         /// UE3's view: world → camera space with x right, y up, z forward (depth), as rows for row vectors (v * M), which is
@@ -167,9 +209,10 @@ namespace MeleBridge::Editor
         }
 
         /// ImGuizmo only ends a drag inside Manipulate: when Manipulate is skipped (no selection, editor closed), its drag stays
-        /// on and IsOver/IsUsing would keep every click from reaching the world.
+        /// on and IsOver/IsUsing would keep every click from reaching the world. A drag cut short still ends its undo step.
         void ResetGizmo()
         {
+            if (Dragging) Post({ .Type = Command::Kind::EndDrag });
             Dragging = false;
             if (ImGuizmo::IsUsingAny())
             {
@@ -260,6 +303,47 @@ namespace MeleBridge::Editor
                 io.AddMousePosEvent(static_cast<float>(cursor.x) * scaleX, static_cast<float>(cursor.y) * scaleY);
         }
 
+        // ! Tools
+        // ========================================
+
+        /// A negative (or zero) DrawScale or DrawScale3D component: the gizmo's matrix is then left-handed, and neither a
+        /// rotation nor a scale can be read back from it.
+        bool Mirrored(Snapshot const& s)
+        {
+            return s.SelectedDrawScale <= 0 || s.SelectedDrawScale3D.X <= 0 || s.SelectedDrawScale3D.Y <= 0 || s.SelectedDrawScale3D.Z <= 0;
+        }
+
+        /// Why a tool can't take the selection, or empty.
+        std::string ToolRefusal(Snapshot const& s, Tool tool)
+        {
+            if (!s.Selected || tool == Tool::Move) return {};
+            auto const verb = tool == Tool::Turn ? "turned" : "scaled";
+            if (tool == Tool::Scale && s.SelectedPawn) return "not scaled: npcs keep a yaw and no scale";
+            if (Mirrored(s))
+                return std::format("not {}: {} is mirrored (DrawScale {:g}, DrawScale3D {:g} {:g} {:g}); move it, or fix its scale in the YAML",
+                                   verb, s.SelectedPath.substr(s.SelectedPath.rfind('.') + 1), s.SelectedDrawScale, s.SelectedDrawScale3D.X,
+                                   s.SelectedDrawScale3D.Y, s.SelectedDrawScale3D.Z);
+            return {};
+        }
+
+        void Refuse(std::string text)
+        {
+            LEASI_INFO("editor: {}", text);
+            Refusal = std::move(text);
+            QueryPerformanceCounter(&RefusalSince);
+        }
+
+        /// T, R, G and the toolbar's radios: the tool, unless the selection can't take it (then the status line says why).
+        void Choose(Snapshot const& s, Tool tool)
+        {
+            if (auto why = ToolRefusal(s, tool); !why.empty())
+            {
+                Refuse(std::move(why));
+                return;
+            }
+            Current = tool;
+        }
+
         // ! Windows
         // ========================================
 
@@ -279,23 +363,51 @@ namespace MeleBridge::Editor
                 ImGui::TextDisabled("|");
                 ImGui::SameLine();
                 // Not mid-drag: the gizmo would change under the mouse.
-                ImGui::BeginDisabled(ImGuizmo::IsUsingAny());
-                if (ImGui::RadioButton("Move (T)", Current == Tool::Move)) Current = Tool::Move;
+                auto const dragging = ImGuizmo::IsUsingAny();
+                ImGui::BeginDisabled(dragging);
+                if (ImGui::RadioButton("Move (T)", Current == Tool::Move)) Choose(s, Tool::Move);
                 ImGui::SameLine();
-                if (ImGui::RadioButton("Turn (R)", Current == Tool::Turn)) Current = Tool::Turn;
+                if (ImGui::RadioButton("Turn (R)", Current == Tool::Turn)) Choose(s, Tool::Turn);
+                if (s.Selected && s.SelectedPawn && ImGui::IsItemHovered()) ImGui::SetTooltip("npcs turn about the vertical only: the level YAML keeps a yaw");
+                ImGui::SameLine();
+                ImGui::BeginDisabled(s.Selected && s.SelectedPawn);
+                if (ImGui::RadioButton("Scale (G)", Current == Tool::Scale)) Choose(s, Tool::Scale);
+                ImGui::EndDisabled();
+                if (s.Selected && s.SelectedPawn && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("npcs keep a yaw and no scale");
                 ImGui::EndDisabled();
                 ImGui::SameLine();
                 ImGui::TextDisabled("|");
                 ImGui::SameLine();
-                ImGui::BeginDisabled(!s.Selected || !s.SelectedUndeletable.empty());
+                ImGui::BeginDisabled(!s.Selected || !s.SelectedUndeletable.empty() || dragging);
                 if (ImGui::Button("Delete")) Post({ .Type = Command::Kind::Delete });
                 ImGui::EndDisabled();
                 if (s.Selected && !s.SelectedUndeletable.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("%s", s.SelectedUndeletable.c_str());
                 ImGui::SameLine();
+                // Named by the game thread: what the step is and whose ("move ed_crate_x_1").
+                ImGui::BeginDisabled(s.UndoLabel.empty() || dragging);
+                if (ImGui::Button("Undo")) Post({ .Type = Command::Kind::Undo });
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", s.UndoLabel.empty() ? "Nothing to undo" : std::format("Undo {} (Ctrl+Z)", s.UndoLabel).c_str());
+                ImGui::SameLine();
+                ImGui::BeginDisabled(s.RedoLabel.empty() || dragging);
+                if (ImGui::Button("Redo")) Post({ .Type = Command::Kind::Redo });
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", s.RedoLabel.empty() ? "Nothing to redo" : std::format("Redo {} (Ctrl+Y)", s.RedoLabel).c_str());
+                ImGui::SameLine();
                 auto const saveLabel = s.Unsaved > 0 ? std::format("Save ({})###Save", s.Unsaved) : std::string("Save###Save");
                 if (ImGui::Button(saveLabel.c_str())) Post({ .Type = Command::Kind::Save });
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+S. Writes the session file; editor_import in mele-mcp puts it in the level YAML and builds.");
+                // Until a save writes every map (why: the line under the hints): the status line fades, and the first pass after a
+                // load replaces it.
+                if (!s.SaveProblem.empty())
+                {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "not saved");
+                }
                 ImGui::SameLine();
                 ImGui::TextDisabled("|");
                 ImGui::SameLine();
@@ -306,9 +418,11 @@ namespace MeleBridge::Editor
                 if (s.FreeCam)
                     ImGui::TextDisabled("Right mouse: look   WASD: move   Q/E: down/up   Shift: fast   Wheel: speed (%.0f)   Left click: select", s.Speed);
                 else
-                    ImGui::TextDisabled("Left click: select   Arrows: drag to move or turn   Ctrl: snap (10 units, 15 degrees)   Del: delete");
+                    ImGui::TextDisabled("Left click: select   T/R/G: move, turn, scale   Ctrl: snap from where the drag started (10 units, 15 "
+                                        "degrees, scale by 0.1)   Del: delete   Ctrl+Z/Y: undo/redo");
+                if (!s.SaveProblem.empty()) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Last save: %s", s.SaveProblem.c_str());
 
-                // The game thread's last word, for a few seconds.
+                // The last word, the game thread's or the overlay's own, for a few seconds.
                 LARGE_INTEGER now, frequency;
                 QueryPerformanceCounter(&now);
                 QueryPerformanceFrequency(&frequency);
@@ -317,10 +431,13 @@ namespace MeleBridge::Editor
                     StatusSeen = s.StatusFrame;
                     StatusSince = now;
                 }
-                if (!s.Status.empty() && now.QuadPart - StatusSince.QuadPart < 8 * frequency.QuadPart)
+                auto const ours = !Refusal.empty() && RefusalSince.QuadPart >= StatusSince.QuadPart;
+                auto const& status = ours ? Refusal : s.Status;
+                auto const since = ours ? RefusalSince : StatusSince;
+                if (!status.empty() && now.QuadPart - since.QuadPart < 8 * frequency.QuadPart)
                 {
-                    auto const refused = s.Status.starts_with("not ") || s.Status.starts_with("the engine refused");
-                    ImGui::TextColored(refused ? ImVec4(1, 0.6f, 0.3f, 1) : ImVec4(0.5f, 1, 0.6f, 1), "%s", s.Status.c_str());
+                    auto const refused = status.starts_with("not ") || status.starts_with("the engine refused");
+                    ImGui::TextColored(refused ? ImVec4(1, 0.6f, 0.3f, 1) : ImVec4(0.5f, 1, 0.6f, 1), "%s", status.c_str());
                 }
             }
             ImGui::End();
@@ -336,8 +453,12 @@ namespace MeleBridge::Editor
                 ImGui::TextUnformatted(s.SelectedPath.c_str());
                 ImGui::Text("Class: %s%s%s", s.SelectedClass.c_str(), s.SelectedStatic ? " (static)" : "", s.SelectedSpawned ? " (spawned)" : "");
                 ImGui::Text("Tag: %s", s.SelectedTag.c_str());
-                ImGui::Text("X %.1f   Y %.1f   Z %.1f   Yaw %.1f", s.SelectedLocation.X, s.SelectedLocation.Y, s.SelectedLocation.Z,
-                            static_cast<float>(static_cast<short>(s.SelectedRotation.Yaw & 0xFFFF)) * 360.f / 65536.f);
+                auto const degrees = [](int units) { return static_cast<float>(static_cast<short>(units & 0xFFFF)) * 360.f / 65536.f; };
+                ImGui::Text("X %.1f   Y %.1f   Z %.1f", s.SelectedLocation.X, s.SelectedLocation.Y, s.SelectedLocation.Z);
+                ImGui::Text("Pitch %.1f   Yaw %.1f   Roll %.1f", degrees(s.SelectedRotation.Pitch), degrees(s.SelectedRotation.Yaw),
+                            degrees(s.SelectedRotation.Roll));
+                ImGui::Text("DrawScale %g   DrawScale3D %g %g %g", s.SelectedDrawScale, s.SelectedDrawScale3D.X, s.SelectedDrawScale3D.Y,
+                            s.SelectedDrawScale3D.Z);
                 if (ImGui::Button("Deselect")) Post({ .Type = Command::Kind::Deselect });
             }
             ImGui::End();
@@ -920,10 +1041,48 @@ namespace MeleBridge::Editor
                 ImGui::Text("Last pick: %s", s.LastPick.empty() ? "-" : s.LastPick.c_str());
                 if (Diag.CatalogEntries.load() >= 0) ImGui::Text("Catalog: %d props   %d thumbnails on the GPU", Diag.CatalogEntries.load(), Diag.Thumbnails.load());
                 else ImGui::Text("Catalog: not read, or unreadable (see the Props window's Catalog tab)");
+                if (s.Session != nullptr)
+                {
+                    // What the re-apply passes did with the map's session file (docs/07 §10).
+                    auto const& session = *s.Session;
+                    ImGui::Text("Session: %s", session.File.empty() ? "-" : session.File.c_str());
+                    if (!session.Error.empty()) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "  %s", session.Error.c_str());
+                    ImGui::Text("  %d applied   %d dropped   %d waiting   last pass at frame %llu", session.Applied, session.Dropped,
+                                static_cast<int>(session.Pending.size()), session.PassFrame);
+                    constexpr size_t ShownPending = 6;
+                    for (size_t i = 0; i < session.Pending.size() && i < ShownPending; i++) ImGui::TextDisabled("  %s", session.Pending[i].c_str());
+                    if (session.Pending.size() > ShownPending) ImGui::TextDisabled("  and %d more (the editor state lists them all)", static_cast<int>(session.Pending.size() - ShownPending));
+                    if (!session.Levels.empty())
+                    {
+                        std::string levels;
+                        for (auto const& level : session.Levels) levels += (levels.empty() ? "" : ", ") + level;
+                        // Wrapped at a fixed width: the window sizes itself to its content.
+                        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 40);
+                        ImGui::TextUnformatted(("  Levels: " + levels).c_str());
+                        ImGui::PopTextWrapPos();
+                    }
+                }
                 ImGui::Checkbox("ImGui demo window", &ShowDemo);
             }
             ImGui::End();
             if (ShowDemo) ImGui::ShowDemoWindow(&ShowDemo);
+        }
+
+        /// DrawScale3D after a scale drag: the dragged axis (all three for the centre handle) is its row's length over DrawScale,
+        /// the others stay as they were. Ctrl rounds to 0.1, else to 4 decimals; never below the step.
+        FVector ScaleOf(float const* m, bool snap)
+        {
+            float scale[3] = { DragScale3D.X, DragScale3D.Y, DragScale3D.Z };
+            for (int i = 0; i < 3; i++)
+            {
+                auto const axis = static_cast<ImGuizmo::MOVETYPE>(ImGuizmo::MT_SCALE_X + i);
+                if (DragHandle != axis && DragHandle != ImGuizmo::MT_SCALE_XYZ) continue;
+                auto const* r = m + i * 4;
+                auto const value = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) / DragDrawScale;
+                auto const step = snap ? 0.1f : 0.0001f;
+                scale[i] = std::max(std::round(value / step) * step, step);
+            }
+            return { scale[0], scale[1], scale[2] };
         }
 
         void DrawGizmo(Snapshot const& s, float const* view, float const* projection, float width, float height)
@@ -931,51 +1090,102 @@ namespace MeleBridge::Editor
             if (!s.Selected)
             {
                 ResetGizmo();
+                // Selected again, the actor's refusal is said again.
+                RefusedFor.clear();
                 return;
             }
-            if (Dragging && DraggedPath != s.SelectedPath) Dragging = false;
+            if (Dragging && DraggedPath != s.SelectedPath) ResetGizmo();
             if (Current != LastTool)
             {
                 ResetGizmo();
                 LastTool = Current;
             }
 
-            float model[16];
-            ModelMatrix(s.SelectedLocation, s.SelectedRotation, model);
-            // While dragging, our own copy leads: the game applies each move a frame or two later.
-            if (Dragging) std::memcpy(model, DragModel, sizeof model);
-            ImGuizmo::SetOrthographic(false);
-            ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
-            ImGuizmo::SetRect(0, 0, width, height);
-            // Ctrl snaps: 10 units, or 15 degrees. Turning is around the vertical only: the level YAML keeps a yaw.
-            auto const turn = Current == Tool::Turn;
-            float const snap[3] = { turn ? 15.f : 10.f, 10.f, 10.f };
-            float delta[16];
-            ImGuizmo::Manipulate(view, projection, turn ? ImGuizmo::ROTATE_Z : ImGuizmo::TRANSLATE, ImGuizmo::WORLD, model, delta,
-                                 ImGui::GetIO().KeyCtrl ? snap : nullptr);
-            if (ImGuizmo::IsUsing())
+            // R and G are off on a selection they can't take (a pawn's scale, a mirrored actor): said once, no gizmo.
+            auto const why = ToolRefusal(s, Current);
+            if (!why.empty())
             {
-                if (!Dragging) DragYaw = static_cast<float>(s.SelectedRotation.Yaw) * 360.f / 65536.f;
-                Dragging = true;
-                DraggedPath = s.SelectedPath;
-                std::memcpy(DragModel, model, sizeof model);
-                if (turn)
+                ResetGizmo();
+                auto const key = std::format("{}\n{}", s.SelectedPath, static_cast<int>(Current));
+                if (RefusedFor != key)
                 {
-                    // This frame's turn about the vertical, added up: the forward axis alone has no yaw for an actor pitched
-                    // straight up or down.
-                    DragYaw = std::remainder(DragYaw + std::atan2(delta[1], delta[0]) * 180.f / 3.14159265f, 360.f);
-                    Post({ .Type = Command::Kind::Rotate, .X = DragYaw });
-                }
-                else
-                {
-                    Post({ .Type = Command::Kind::Move, .X = model[12], .Y = model[13], .Z = model[14] });
+                    RefusedFor = key;
+                    Refuse(why);
                 }
             }
             else
             {
-                // The drag ended: paused, the prop keeps the light of where it was until the world ticks.
-                if (Dragging) Post({ .Type = Command::Kind::TickWorld });
-                Dragging = false;
+                RefusedFor.clear();
+                float model[16];
+                ModelMatrix(s.SelectedLocation, s.SelectedRotation, s.SelectedDrawScale, s.SelectedDrawScale3D, model);
+                // While dragging, ImGuizmo's own last matrix leads (the game applies each command a frame or two later), exactly as
+                // it returned it: a turn adds each frame's rotation to it.
+                if (Dragging) std::memcpy(model, DragModel, sizeof model);
+                ImGuizmo::SetOrthographic(false);
+                ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
+                ImGuizmo::SetRect(0, 0, width, height);
+                // A pawn turns about the vertical only (the level YAML keeps a yaw for npcs); anything else on three local rings.
+                auto const pawnTurn = Current == Tool::Turn && s.SelectedPawn;
+                auto const operation = Current == Tool::Move ? ImGuizmo::TRANSLATE
+                                       : Current == Tool::Scale ? ImGuizmo::SCALE
+                                       : pawnTurn ? ImGuizmo::ROTATE_Z
+                                                  : ImGuizmo::ROTATE_X | ImGuizmo::ROTATE_Y | ImGuizmo::ROTATE_Z;
+                auto const mode = Current == Tool::Move || pawnTurn ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+                // Ctrl snaps the move to 10 units and the turn to 15 degrees, from where the drag started. A scale is rounded below
+                // instead: ImGuizmo's snap would round the ratio to the scale at the start.
+                auto const ctrl = ImGui::GetIO().KeyCtrl;
+                float const snap[3] = { Current == Tool::Turn ? 15.f : 10.f, 10.f, 10.f };
+                float delta[16]{};
+                auto const changed = ImGuizmo::Manipulate(view, projection, operation, mode, model, delta, ctrl && Current != Tool::Scale ? snap : nullptr);
+                auto const holding = ImGuizmo::IsUsing();
+                if (holding && !Dragging)
+                {
+                    DragYaw = static_cast<float>(s.SelectedRotation.Yaw) * 360.f / 65536.f;
+                    DragRotation = s.SelectedRotation;
+                    DragDrawScale = s.SelectedDrawScale;
+                    DragScale3D = s.SelectedDrawScale3D;
+                    DragHandle = ImGuizmo::GetActiveHandleType();
+                    Dragging = true;
+                    DraggedPath = s.SelectedPath;
+                }
+                // The frame the button is released still moves the matrix: its change counts, then the drag ends. A move counts
+                // every frame of the drag: for a translation, Manipulate returns whether this frame's step differs from the last
+                // one, so a Ctrl-snapped drag at a steady pace (one 10-unit step a frame) would send its first step only, and a
+                // release on such a frame would leave the actor short of the gizmo.
+                auto const moving = Current == Tool::Move;
+                if (Dragging && (holding || changed || moving))
+                {
+                    std::memcpy(DragModel, model, sizeof model);
+                    // A turn or a scale sends only on a frame that changed the matrix. A move sends where the gizmo is: Post keeps
+                    // the latest, and the game thread ignores one that doesn't move the actor (a click without motion edits nothing).
+                    if (moving)
+                    {
+                        Post({ .Type = Command::Kind::Move, .X = model[12], .Y = model[13], .Z = model[14] });
+                    }
+                    else if (changed && pawnTurn)
+                    {
+                        // This frame's turn about the vertical, added up: the forward axis alone has no yaw for an actor pitched
+                        // straight up or down.
+                        DragYaw = std::remainder(DragYaw + std::atan2(delta[1], delta[0]) * 180.f / 3.14159265f, 360.f);
+                        auto const yaw = static_cast<int>(std::lround(DragYaw * 65536.f / 360.f));
+                        Post({ .Type = Command::Kind::Rotate, .Rotation = { DragRotation.Pitch, yaw, DragRotation.Roll } });
+                    }
+                    else if (changed && Current == Tool::Turn)
+                    {
+                        Post({ .Type = Command::Kind::Rotate, .Rotation = RotatorOf(DragModel) });
+                    }
+                    else if (changed && Current == Tool::Scale)
+                    {
+                        auto const scale = ScaleOf(DragModel, ctrl);
+                        Post({ .Type = Command::Kind::Scale, .X = scale.X, .Y = scale.Y, .Z = scale.Z });
+                    }
+                }
+                if (!holding && Dragging)
+                {
+                    // Ends the undo step; paused, the prop keeps the light of where it was until the world ticks once.
+                    Post({ .Type = Command::Kind::EndDrag });
+                    Dragging = false;
+                }
             }
 
             // Our projection of the selection's origin against the engine's own Canvas.Project of it.
@@ -1048,10 +1258,15 @@ namespace MeleBridge::Editor
             // Keys, unless a text field has them (the Props search).
             if (!io.WantTextInput && !Looking.load())
             {
-                if (!ImGuizmo::IsUsingAny() && ImGui::IsKeyPressed(ImGuiKey_T, false)) Current = Tool::Move;
-                if (!ImGuizmo::IsUsingAny() && ImGui::IsKeyPressed(ImGuiKey_R, false)) Current = Tool::Turn;
-                if (s.Selected && s.SelectedUndeletable.empty() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) Post({ .Type = Command::Kind::Delete });
-                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) Post({ .Type = Command::Kind::Save });
+                // Not mid-drag: the drag's step is still open, and the gizmo would change under the mouse.
+                auto const idle = !ImGuizmo::IsUsingAny();
+                if (idle && ImGui::IsKeyPressed(ImGuiKey_T, false)) Choose(s, Tool::Move);
+                if (idle && ImGui::IsKeyPressed(ImGuiKey_R, false)) Choose(s, Tool::Turn);
+                if (idle && ImGui::IsKeyPressed(ImGuiKey_G, false)) Choose(s, Tool::Scale);
+                if (idle && s.Selected && s.SelectedUndeletable.empty() && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) Post({ .Type = Command::Kind::Delete });
+                if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) Post({ .Type = Command::Kind::Save });
+                if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) Post({ .Type = io.KeyShift ? Command::Kind::Redo : Command::Kind::Undo });
+                if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) Post({ .Type = Command::Kind::Redo });
             }
 
             if (free && !Looking.load() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && s.CanvasWidth > 0)
@@ -1163,6 +1378,7 @@ namespace MeleBridge::Editor
                     WantMouse.store(false);
                     WantKeyboard.store(false);
                     ResetGizmo();
+                    RefusedFor.clear();
                     ReleaseThumbnails();
                 }
                 return;

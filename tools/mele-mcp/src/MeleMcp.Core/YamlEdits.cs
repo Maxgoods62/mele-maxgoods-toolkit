@@ -17,6 +17,18 @@ internal static class YamlEdits
 
     internal static string Degrees(float yaw) => yaw.ToString("0.###", Inv);
 
+    /// <summary>A DrawScale or a DrawScale3D component: 4 decimals, as the editor rounds them.</summary>
+    internal static string Scale(double scale) => scale.ToString("0.####", Inv);
+
+    internal static string Scale3D(double[] scale) => $"[{string.Join(", ", scale.Select(Scale))}]";
+
+    /// <summary>[pitch, yaw, roll] in degrees in (-180, 180], from Unreal units.</summary>
+    internal static string Rotation(double[] units) => $"[{string.Join(", ", units.Select(u => Degrees((float)Rotations.Angle(Rotations.Degrees(u)))))}]";
+
+    /// <summary>The key a new entry gets for a rotation (Unreal units): 'yaw' while the actor is upright, else 'rotation'.</summary>
+    internal static (string Key, string Value) RotationKey(double[] units) =>
+        Rotations.YawWith(units, 0, 0) is { } yaw ? ("yaw", Degrees((float)yaw)) : ("rotation", Rotation(units));
+
     /// <summary>A value as a YAML scalar: plain when it can be, else single-quoted (a Windows path, a name with spaces).</summary>
     internal static string Quote(string value) =>
         value.Length > 0 && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-') ? value : $"'{value.Replace("'", "''")}'";
@@ -53,39 +65,96 @@ internal static class YamlEdits
         return entry;
     }
 
-    /// <summary>Replaces these keys' values in an entry (or adds them above its first key), leaving everything else as written.</summary>
-    internal static (string Text, List<string> Changes) SetKeys(string text, YamlNode entry, IReadOnlyList<(string Key, string Value)> wanted)
+    /// <summary>
+    /// Replaces these keys' values in an entry, leaving everything else as written. A missing key gets a line of its own after the
+    /// last of <paramref name="after"/> the entry has (its value's last line), else above the entry's first key; in a flow entry
+    /// ({ ... }), ', key: value' after that value, else after its last one.
+    /// </summary>
+    internal static (string Text, List<string> Changes) SetKeys(string text, YamlNode entry, IReadOnlyList<(string Key, string Value)> wanted, IReadOnlyList<string>? after = null)
     {
         var body = entry as YamlMappingNode ?? throw Fail(entry, "the entry must be a mapping.");
-        // Splice from the end of the text so earlier offsets stay valid.
         var edits = new List<(long Start, long End, string Text)>();
         var changes = new List<string>();
         foreach (var (key, value) in wanted)
         {
-            var existing = body.Children.FirstOrDefault(c => Scalar(c.Key) == key);
-            if (existing.Value is { } node)
+            if (Pair(body, key) is { } existing)
             {
-                // A flow list's End mark is the end of its '[' token; the value ends at the ']' after its last item.
-                var end = node is YamlSequenceNode { Children.Count: > 0 } list ? text.IndexOf(']', (int)list.Children[^1].End.Index) + 1 : node.End.Index;
-                var old = text[(int)node.Start.Index..(int)end];
+                var end = ValueEnd(text, existing.Value);
+                var old = text[(int)existing.Value.Start.Index..end];
                 if (old == value) continue;
-                edits.Add((node.Start.Index, end, value));
+                edits.Add((existing.Value.Start.Index, end, value));
                 changes.Add($"{key}: {old} → {value}");
             }
             else
             {
-                // A new line above the entry's first key, at its indentation.
-                var first = body.Children.First().Key;
-                var at = text.LastIndexOf('\n', (int)first.Start.Index) + 1;
-                edits.Add((at, at, $"{new string(' ', (int)first.Start.Column - 1)}{key}: {value}{NewLine(text)}"));
+                edits.Add(NewKeyLine(text, body, after, $"{key}: {value}"));
                 changes.Add($"{key}: {value} (added)");
             }
         }
-        foreach (var (start, end, value) in edits.OrderByDescending(e => e.Start))
+        return (Apply(text, edits), changes);
+    }
+
+    /// <summary>Removes these keys from an entry, each with its line (and a comment on it).</summary>
+    internal static (string Text, List<string> Changes) RemoveKeys(string text, YamlNode entry, IReadOnlyList<string> keys)
+    {
+        var body = entry as YamlMappingNode ?? throw Fail(entry, "the entry must be a mapping.");
+        var edits = new List<(long Start, long End, string Text)>();
+        var changes = new List<string>();
+        foreach (var key in keys)
         {
-            text = text[..(int)start] + value + text[(int)end..];
+            if (Pair(body, key) is not { } existing) continue;
+            edits.Add(Removal(text, body, existing));
+            changes.Add($"{key}: {text[(int)existing.Value.Start.Index..ValueEnd(text, existing.Value)]} (removed)");
         }
-        return (text, changes);
+        return (Apply(text, edits), changes);
+    }
+
+    /// <summary>
+    /// Writes a rotation (Unreal units) into an actor entry so the build gives it back: 'yaw' while the entry has no 'rotation' and the
+    /// rotation is a yaw over the pitch and roll the build keeps under one (the actor's own: <paramref name="keptPitch"/>,
+    /// <paramref name="keptRoll"/>, 0 for a new or upright actor); else 'rotation: [pitch, yaw, roll]' in degrees, where 'yaw' was.
+    /// Never leaves both keys. A value that already turns the actor the same way stays as written (200 and -160 are one yaw).
+    /// </summary>
+    internal static (string Text, List<string> Changes) SetRotation(string text, YamlNode entry, double[] units, double keptPitch = 0, double keptRoll = 0)
+    {
+        var body = entry as YamlMappingNode ?? throw Fail(entry, "the entry must be a mapping.");
+        var yaw = Pair(body, "yaw");
+        var rotation = Pair(body, "rotation");
+        string Old(YamlNode node) => text[(int)node.Start.Index..ValueEnd(text, node)];
+        if (rotation is null && Rotations.YawWith(units, keptPitch, keptRoll) is { } degrees)
+        {
+            if (yaw is { } y && Rotations.SameYaw(Number(y.Value), degrees)) return (text, []);
+            return SetKeys(text, entry, [("yaw", Degrees((float)degrees))], ["location"]);
+        }
+
+        var value = Rotation(units);
+        var edits = new List<(long Start, long End, string Text)>();
+        var changes = new List<string>();
+        if (rotation is { } r)
+        {
+            var old = Numbers(r.Value, 3, 3).Select(d => Rotations.Units(d)).ToArray();
+            if (!Rotations.Same(old, units))
+            {
+                edits.Add((r.Value.Start.Index, ValueEnd(text, r.Value), value));
+                changes.Add($"rotation: {Old(r.Value)} → {value}");
+            }
+            if (yaw is { } y)
+            {
+                edits.Add(Removal(text, body, y));
+                changes.Add($"yaw: {Old(y.Value)} (removed)");
+            }
+        }
+        else if (yaw is { } y)
+        {
+            // In the place of 'yaw': a comment after it stays on the line.
+            edits.Add((y.Key.Start.Index, ValueEnd(text, y.Value), $"rotation: {value}"));
+            changes.Add($"yaw: {Old(y.Value)} → rotation: {value}");
+        }
+        else
+        {
+            return SetKeys(text, entry, [("rotation", value)], ["location"]);
+        }
+        return (Apply(text, edits), changes);
     }
 
     /// <summary>
@@ -143,6 +212,71 @@ internal static class YamlEdits
         return text[..at] + line + text[at..];
     }
 
+    private static KeyValuePair<YamlNode, YamlNode>? Pair(YamlMappingNode body, string key) =>
+        body.Children.Where(c => Scalar(c.Key) == key).Select(c => (KeyValuePair<YamlNode, YamlNode>?)c).FirstOrDefault();
+
+    /// <summary>
+    /// A new key's line in an entry: after the last line of the last of <paramref name="after"/> it has, else above its first key, at
+    /// its indentation. In a flow entry, ', key: value' after that value, else after its last one (in an empty one, the only key).
+    /// </summary>
+    private static (long Start, long End, string Text) NewKeyLine(string text, YamlMappingNode body, IReadOnlyList<string>? after, string line)
+    {
+        var anchor = body.Children.Where(c => after?.Contains(Scalar(c.Key)) == true).Select(c => c.Value).LastOrDefault();
+        if (body.Style == YamlDotNet.Core.Events.MappingStyle.Flow)
+        {
+            if (body.Children.Count == 0) return (body.Start.Index + 1, body.Start.Index + 1, $" {line} ");
+            var at = ValueEnd(text, anchor ?? body.Children.Last().Value);
+            return (at, at, $", {line}");
+        }
+        var first = body.Children.First().Key;
+        var indented = $"{new string(' ', (int)first.Start.Column - 1)}{line}";
+        if (anchor is null)
+        {
+            var above = text.LastIndexOf('\n', (int)first.Start.Index) + 1;
+            return (above, above, indented + NewLine(text));
+        }
+        var end = text.IndexOf('\n', ValueEnd(text, anchor));
+        return end < 0 ? (text.Length, text.Length, NewLine(text) + indented) : (end + 1, end + 1, indented + NewLine(text));
+    }
+
+    /// <summary>What removes a key: its lines in a block mapping; in a flow one, 'key: value' and the comma that separates it.</summary>
+    private static (long Start, long End, string Text) Removal(string text, YamlMappingNode body, KeyValuePair<YamlNode, YamlNode> pair)
+    {
+        var end = ValueEnd(text, pair.Value);
+        if (body.Style == YamlDotNet.Core.Events.MappingStyle.Flow)
+        {
+            var next = body.Children.Keys.SkipWhile(k => k != pair.Key).Skip(1).FirstOrDefault();
+            if (next is not null) return (pair.Key.Start.Index, next.Start.Index, "");
+            var comma = text.LastIndexOf(',', (int)pair.Key.Start.Index);
+            return (comma > body.Start.Index ? comma : pair.Key.Start.Index, end, "");
+        }
+        var lineEnd = text.IndexOf('\n', end);
+        return (text.LastIndexOf('\n', (int)pair.Key.Start.Index) + 1, lineEnd < 0 ? text.Length : lineEnd + 1, "");
+    }
+
+    /// <summary>Splices edits into the text from its end, so earlier offsets stay valid; edits at one offset keep their order.</summary>
+    private static string Apply(string text, List<(long Start, long End, string Text)> edits)
+    {
+        foreach (var (start, end, value) in edits.Select((e, i) => (Edit: e, Order: i)).OrderByDescending(e => e.Edit.Start).ThenByDescending(e => e.Order).Select(e => e.Edit))
+        {
+            text = text[..(int)start] + value + text[(int)end..];
+        }
+        return text;
+    }
+
+    /// <summary>
+    /// Where a value ends in the text. A flow list's or mapping's End mark is the end of its opening token, so it ends at the closing
+    /// bracket after its last item; a block one where its last value does.
+    /// </summary>
+    private static int ValueEnd(string text, YamlNode node) => node switch
+    {
+        YamlSequenceNode { Style: YamlDotNet.Core.Events.SequenceStyle.Flow } s => text.IndexOf(']', s.Children.Count > 0 ? ValueEnd(text, s.Children[^1]) : (int)s.Start.Index) + 1,
+        YamlMappingNode { Style: YamlDotNet.Core.Events.MappingStyle.Flow } m => text.IndexOf('}', m.Children.Count > 0 ? ValueEnd(text, m.Children.Last().Value) : (int)m.Start.Index) + 1,
+        YamlSequenceNode { Children.Count: > 0 } s => ValueEnd(text, s.Children[^1]),
+        YamlMappingNode { Children.Count: > 0 } m => ValueEnd(text, m.Children.Last().Value),
+        _ => (int)node.End.Index,
+    };
+
     /// <summary>The last value written inside a node: a mapping or list ends where its last child does.</summary>
     private static YamlNode LastLeaf(YamlNode node) => node switch
     {
@@ -152,4 +286,71 @@ internal static class YamlEdits
     };
 
     private static string NewLine(string text) => text.Contains("\r\n") ? "\r\n" : "\n";
+}
+
+/// <summary>
+/// Rotations as the in-game editor saves them (Unreal units, 65536 = 360°) and the YAML writes them (degrees), compared as
+/// orientations: (180, 0, 0) and (0, 180, 180) turn an actor the same way, so do yaw 200 and -160.
+/// </summary>
+internal static class Rotations
+{
+    /// <summary>Degrees within which each axis of two rotations must agree for them to be one (an Unreal unit is 0.0055°).</summary>
+    internal const double Tolerance = 0.02;
+
+    internal static double Degrees(double units) => units * 360 / 65536;
+
+    internal static double Units(double degrees) => degrees * 65536 / 360;
+
+    /// <summary>Degrees in (-180, 180], to 2 decimals.</summary>
+    internal static double Angle(double degrees)
+    {
+        var d = Wrap(Math.Round(Wrap(degrees), 2));
+        return d == 0 ? 0 : d;
+    }
+
+    internal static bool SameYaw(double a, double b) => Math.Abs(Wrap(a - b)) <= Tolerance;
+
+    /// <summary>Whether two rotations (Unreal units) turn an actor the same way: the axes of their rotation matrices within <see cref="Tolerance"/>.</summary>
+    internal static bool Same(double[] a, double[] b)
+    {
+        var (ax, ay, az) = Axes(a);
+        var (bx, by, bz) = Axes(b);
+        return Between(ax, bx) <= Tolerance && Between(ay, by) <= Tolerance && Between(az, bz) <= Tolerance;
+    }
+
+    /// <summary>The yaw (degrees, (-180, 180]) that turns an actor the same way with this pitch and roll (Unreal units); null when none does.</summary>
+    internal static double? YawWith(double[] units, double pitch, double roll)
+    {
+        var (x, _, _) = Axes(units);
+        foreach (var yaw in new[] { Degrees(units[1]), Math.Atan2(x.Y, x.X) * 180 / Math.PI })
+        {
+            if (Same(units, [pitch, Units(yaw), roll])) return Angle(yaw);
+        }
+        return null;
+    }
+
+    private static double Wrap(double degrees)
+    {
+        var d = degrees % 360;
+        return d > 180 ? d - 360 : d <= -180 ? d + 360 : d;
+    }
+
+    /// <summary>The X, Y and Z axes of UE3's FRotationMatrix for pitch, yaw, roll in Unreal units.</summary>
+    private static ((double X, double Y, double Z) X, (double X, double Y, double Z) Y, (double X, double Y, double Z) Z) Axes(double[] units)
+    {
+        static double Radians(double u) => u * Math.PI * 2 / 65536;
+        var (sp, cp) = Math.SinCos(Radians(units[0]));
+        var (sy, cy) = Math.SinCos(Radians(units[1]));
+        var (sr, cr) = Math.SinCos(Radians(units[2]));
+        return ((cp * cy, cp * sy, sp),
+            (sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp),
+            (-(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp));
+    }
+
+    /// <summary>The angle between two unit vectors, in degrees (atan2 of the cross and dot products: exact for small angles).</summary>
+    private static double Between((double X, double Y, double Z) a, (double X, double Y, double Z) b)
+    {
+        var (cx, cy, cz) = (a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+        return Math.Atan2(Math.Sqrt(cx * cx + cy * cy + cz * cz), a.X * b.X + a.Y * b.Y + a.Z * b.Z) * 180 / Math.PI;
+    }
 }

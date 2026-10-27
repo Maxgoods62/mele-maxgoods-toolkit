@@ -124,8 +124,8 @@ public static class LivePlacer
     }
 
     /// <summary>
-    /// Writes a live actor's location and yaw into the level YAML entry with its tag (npcs, usables or props); with none, adds a
-    /// props entry copying the template. Then builds the level.
+    /// Writes a live actor's location and rotation into the level YAML entry with its tag (npcs, usables or props); with none, adds a
+    /// props entry copying the template. npcs and usables keep a yaw; props a yaw while upright, else a full rotation. Then builds the level.
     /// </summary>
     public static LiveSave Save(MEGame game, string yamlPath, string objectPath, string? name, string? template, bool build)
     {
@@ -140,15 +140,25 @@ public static class LivePlacer
         var root = Root(text);
         var location = YamlEdits.Location(MathF.Round(actor.X, 2), MathF.Round(actor.Y, 2), MathF.Round(actor.Z, 2));
         var yaw = YamlEdits.Degrees(MathF.Round(actor.YawDegrees, 2));
+        var turned = Get(game, objectPath, "Rotation")!.AsObject();
+        double[] rotation = [turned["Pitch"]!.GetValue<int>(), turned["Yaw"]!.GetValue<int>(), turned["Roll"]!.GetValue<int>()];
         var found = YamlEdits.Tagged(root, actor.Tag);
 
         string entry, edited;
         List<string> changes;
         var added = found is null;
-        if (found is { } f)
+        if (found is { } f && f.Section == "props")
         {
-            entry = $"{f.Section}.{Scalar(f.Entry.Key)}";
-            (edited, changes) = YamlEdits.SetKeys(text, f.Entry.Value, [("location", location), ("yaw", yaw)]);
+            // 'yaw' and 'rotation' together are an error: the shared writer keeps one, as editor_import does.
+            entry = $"props.{Scalar(f.Entry.Key)}";
+            (edited, changes) = YamlEdits.SetKeys(text, f.Entry.Value, [("location", location)]);
+            (edited, var rotated) = YamlEdits.SetRotation(edited, YamlEdits.Tagged(Root(edited), actor.Tag)!.Value.Entry.Value, rotation);
+            changes.AddRange(rotated);
+        }
+        else if (found is { } other)
+        {
+            entry = $"{other.Section}.{Scalar(other.Entry.Key)}";
+            (edited, changes) = YamlEdits.SetKeys(text, other.Entry.Value, [("location", location), ("yaw", yaw)]);
         }
         else
         {
@@ -156,7 +166,7 @@ public static class LivePlacer
             var level = Path.GetFileNameWithoutExtension(GamePaths.ToWindowsPath(root.Children.FirstOrDefault(c => Scalar(c.Key) == "package").Value is { } p ? Scalar(p) : ""));
             var key = name ?? actor.Tag;
             entry = $"props.{key}";
-            var keys = new List<(string, string)> { ("tag", actor.Tag), ("template", TemplateOf(source, level)), ("location", location), ("yaw", yaw) };
+            var keys = new List<(string, string)> { ("tag", actor.Tag), ("template", TemplateOf(source, level)), ("location", location), YamlEdits.RotationKey(rotation) };
             edited = YamlEdits.AddEntry(text, root, "props", key, keys, "Actors copied from a template and placed in the running game (live_place, then live_save).");
             changes = keys.Select(k => $"{k.Item1}: {k.Item2}").ToList();
             if (Get(game, source, "Class")!.GetValue<string>() == "Engine.StaticMeshActor")

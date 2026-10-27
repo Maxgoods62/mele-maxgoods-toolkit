@@ -23,6 +23,23 @@ namespace MeleBridge::Editor
     extern std::atomic<LONG> AnchorX;
     extern std::atomic<LONG> AnchorY;
 
+    /// The map's session file as the re-apply passes left it (docs/07 §10). Rebuilt when it changes, then shared, not copied.
+    struct SessionState
+    {
+        std::string File;
+        /// Why the file could not be read; empty when it was, or when there is none.
+        std::string Error;
+        /// Entries written back onto their actor (or spawned again), and entries dropped from the file, since the map loaded.
+        int Applied = 0;
+        int Dropped = 0;
+        /// Entries and edits still waiting for their actor, as "key: why".
+        std::vector<std::string> Pending;
+        /// The loaded levels the last pass saw: "BIOA_X", or "BIOA_X (hidden)" for one loaded but not visible.
+        std::vector<std::string> Levels;
+        /// The game frame of the last pass; 0 before the first.
+        unsigned long long PassFrame = 0;
+    };
+
     /// What the game thread saw at the end of its last BioHUD.PostRender, for the overlay.
     struct Snapshot
     {
@@ -37,6 +54,10 @@ namespace MeleBridge::Editor
         bool Selected = false;
         FVector SelectedLocation{};
         FRotator SelectedRotation{};
+        float SelectedDrawScale = 1;
+        FVector SelectedDrawScale3D{ 1, 1, 1 };
+        /// A pawn turns about the vertical only and is not scaled: npcs keep a yaw in the level YAML.
+        bool SelectedPawn = false;
         bool SelectedStatic = false;
         std::string SelectedPath;
         std::string SelectedClass;
@@ -54,12 +75,21 @@ namespace MeleBridge::Editor
         /// StaticMeshes in memory, for the Props list. Built when the list is opened or refreshed, then shared, not copied.
         std::shared_ptr<std::vector<std::string> const> Meshes;
 
-        /// Actors spawned, moved, turned or deleted, and how many of them changed since the last Save.
+        /// Actors spawned, moved, turned, scaled, deleted or re-applied from the session, and how many of them a Save would write
+        /// (changed since the last Save; a spawn deleted before its first save leaves nothing).
         int Edits = 0;
         int Unsaved = 0;
+        /// Why the last save left edits unsaved (a map's file could not be written); empty once a save wrote every map. Shown
+        /// in the toolbar until then: the status line fades, and the first pass after a load replaces it.
+        std::string SaveProblem;
         /// The last thing the editor did or refused, for a line under the toolbar; the frame tells a new one from an old one.
         std::string Status;
         unsigned long long StatusFrame = 0;
+
+        /// What Undo and Redo would do ("move ed_crate_x_1"); empty when there is nothing to undo or redo.
+        std::string UndoLabel;
+        std::string RedoLabel;
+        std::shared_ptr<SessionState const> Session;
     };
 
     Snapshot Latest();
@@ -67,13 +97,16 @@ namespace MeleBridge::Editor
     /// From the overlay to the game thread, run at the next BioHUD.PostRender.
     struct Command
     {
-        /// TickWorld: let the paused world tick once (after an arrow or ring drag), so the prop's light catches up.
-        enum class Kind { Close, FreeCam, Pick, Move, Rotate, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes, TickWorld };
+        /// Move, Rotate and Scale are drag commands: the first one of a drag opens its undo step. EndDrag closes it and lets the
+        /// paused world tick once, so the prop's light catches up.
+        enum class Kind { Close, FreeCam, Pick, Move, Rotate, Scale, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes, Undo, Redo, EndDrag };
         Kind Type;
-        /// Pick: canvas pixels. Move: world location. Rotate: yaw in degrees. Speed: wheel notches.
+        /// Pick: canvas pixels. Move: world location. Scale: DrawScale3D. Speed: wheel notches.
         float X = 0;
         float Y = 0;
         float Z = 0;
+        /// Rotate: the whole rotation, in Unreal units (65536 = 360 degrees).
+        FRotator Rotation{};
         bool On = false;
         /// Spawn: the StaticMesh's path in memory, as the In this level list shows it, or a catalog entry's vanilla path.
         std::string Text;
@@ -136,7 +169,7 @@ namespace MeleBridge::Editor
 
     extern Counters Diag;
 
-    /// Pipe thread: open, camera, selection, edits, calibration, threads, hooks and counters as JSON.
+    /// Pipe thread: open, camera, selection, edits, undo, the session's re-apply, calibration, threads, hooks and counters as JSON.
     json State();
 
     // ! Game thread (Editor.cpp)

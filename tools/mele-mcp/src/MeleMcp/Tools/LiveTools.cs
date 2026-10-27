@@ -140,8 +140,9 @@ public static class LiveTools
         => ToolErrors.Run(() => LivePlacer.Remove(PackageTools.ParseGame(game), objectPath));
 
     [McpServerTool(Name = "live_save", Destructive = true),
-     Description("Writes where a live actor stands (location, yaw) into a level_build YAML file, keeping its comments, then builds the "
-                 + "level. The entry is the npcs, usables or props entry with the actor's tag; with none, a props entry is added that "
+     Description("Writes where a live actor stands into a level_build YAML file, keeping its comments, then builds the level: location, "
+                 + "and for npcs and usables a yaw; for props a yaw while the actor is upright, else 'rotation: [pitch, yaw, roll]' in place of "
+                 + "'yaw' (never both). The entry is the npcs, usables or props entry with the actor's tag; with none, a props entry is added that "
                  + "copies the template it was spawned from. Install the level (game closed) to keep it after a reload.")]
     public static LiveSave LiveSave(
         [Description("Level YAML file (level_build format).")] string file,
