@@ -102,6 +102,15 @@ public static class LiveTools
             ["op"] = "describe", ["object"] = objectPath, ["class"] = className, ["functions"] = functions,
         }, timeoutSeconds));
 
+    [McpServerTool(Name = "live_editor", ReadOnly = true),
+     Description("The in-game editor's state (MeleBridge ASI, F8 in the game; docs/07-ingame-editor.md): open, free cam, camera, canvas "
+                 + "and back buffer sizes, the selection, the last click, the projection check (the overlay's arrows against the engine's "
+                 + "Canvas.Project, in pixels), which hooks are in, thread ids and input counters. Answers without the game thread, so it "
+                 + "works while paused or loading.")]
+    public static JsonObject LiveEditor(
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "editor" }, 5));
+
     [McpServerTool(Name = "live_place", Destructive = true),
      Description("Moves a live actor, or spawns a copy of one (MeleBridge ASI), in front of Shepard facing her, where she stands, or at "
                  + "coordinates. Props land on the floor, pawns at Shepard's height. A static template (StaticMeshActor: most meshes of a "

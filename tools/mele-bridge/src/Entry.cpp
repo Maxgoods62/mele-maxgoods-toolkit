@@ -1,4 +1,5 @@
 #include "MeleBridge/Bridge.hpp"
+#include "MeleBridge/Editor.hpp"
 #include "MeleBridge/Reflection.hpp"
 #include "MeleBridge/SharedVersion.h"
 #include "Common/DefaultLogger.hpp"
@@ -17,6 +18,8 @@ SPI_IMPLEMENT_ATTACH
 
     ::MeleBridge::InitializeGlobals(Init);
     ::MeleBridge::InstallHooks(Init);
+    ::MeleBridge::Editor::InstallInput(Init);
+    ::MeleBridge::Editor::InstallOverlay(Init);
     ::MeleBridge::StartPipeServer();
 
     LEASI_INFO("MeleBridge {} ready", VERSION_STRING_A);

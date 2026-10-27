@@ -1,4 +1,5 @@
 #include "MeleBridge/Bridge.hpp"
+#include "MeleBridge/Editor.hpp"
 #include "MeleBridge/Reflection.hpp"
 #include "MeleBridge/SharedVersion.h"
 #include "Common/Objects.hpp"
@@ -139,6 +140,12 @@ namespace MeleBridge
             return reply;
         }
 
-        throw BridgeError("unknown op " + ToUtf8(op) + " (ping, console, find, get, set, call, describe, subscribe)");
+        if (op == L"editor")
+        {
+            // Atomics and a locked snapshot: no game-thread round trip, so it answers even while the game is paused or loading.
+            return Ok(Editor::State());
+        }
+
+        throw BridgeError("unknown op " + ToUtf8(op) + " (ping, console, find, get, set, call, describe, subscribe, editor)");
     }
 }

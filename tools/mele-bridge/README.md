@@ -24,6 +24,23 @@ only handles whole classes (`getall`), and commands queued together run in rever
   written only while `MassEffect1.exe` is closed. The game check counts a failed `tasklist` as "running".
 - **Log:** `Binaries\Win64\Logs\MeleBridge.log`, rewritten at each start.
 
+## In-game editor (test build)
+
+F8 in the game opens a level editor drawn over the game: free cam, click a prop to select it, drag the red, green and blue
+arrows to move it. It is Phase 0 of [docs/07](../../docs/07-ingame-editor.md): a test build that checks the hooks, the input
+capture and the arrows line up with the game. Props, Save and anything kept after a map reload come in later phases.
+
+- **Threads:** the game thread does everything that touches game objects (`Editor.cpp`, after `BioHUD.PostRender` and
+  `Camera.UpdateCamera`). The render thread draws [Dear ImGui](https://github.com/ocornut/imgui) and
+  [ImGuizmo](https://github.com/CedricGuillemet/ImGuizmo) from a snapshot, in a hooked `IDXGISwapChain::Present`
+  (`Overlay.cpp`). The window thread queues mouse and key messages for ImGui (`Input.cpp`).
+- **Input:** while the editor is open the game gets no mouse or keys: the window's messages are swallowed, the DirectInput
+  mouse reads zero, and the game's `SetCursorPos`/`ClipCursor` calls are blocked. F8 and Alt+F4 always work.
+- **Pause:** `WorldInfo.bPlayersOnly`, as photo mode does. Closing gives the old value back.
+- **State:** the `editor` op (`live_editor` in mele-mcp) returns open, camera, selection, the projection check and counters.
+- **Tested 2026-10-27** in the freighter: all seven steps of [docs/07 §7](../../docs/07-ingame-editor.md#7-phase-0-the-test-build)
+  pass; the arrows sit within 0.6 px of where the engine projects the prop.
+
 ## Protocol
 
 `\\.\pipe\MeleBridge_LE1` takes newline-delimited JSON. Send one request line, get one reply line. Many clients can connect
@@ -97,3 +114,7 @@ After `subscribe`, each watched `ProcessEvent` call arrives as one line:
   only in memory.
 - **Plot table.** It's a single object: `SFXGame.Default__BioWorldInfo.BioGlobalVars0`. Its `GetBool`/`SetBool` (and the
   Int and Float versions) work through `call`. `game_plot` uses them.
+
+## License
+
+GPL-3.0 ([`LICENSE`](../../LICENSE)). Third-party code and what it is used for: [`THIRD_PARTY.md`](THIRD_PARTY.md).

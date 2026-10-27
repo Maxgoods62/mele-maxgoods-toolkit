@@ -20,6 +20,15 @@ namespace MeleBridge
 
         constexpr int MaxArrayItems = 64;
 
+        /// Latent natives need a state frame and iterators read the bytecode after the call: called from outside script, both crash.
+        constexpr wchar_t const* LatentOrIterator[] = {
+            L"Sleep", L"FinishAnim", L"FinishInterp", L"MoveTo", L"MoveToward", L"MoveToDirectNonPathPos", L"FinishRotation",
+            L"WaitForLanding", L"WaitToSeeEnemy", L"AllActors", L"DynamicActors", L"ChildActors", L"BasedActors", L"TouchingActors",
+            L"TraceActors", L"VisibleActors", L"VisibleCollidingActors", L"CollidingActors", L"OverlappingActors", L"ComponentList",
+            L"AllOwnedComponents", L"LocalPlayerControllers", L"AllControllers", L"AllPawns", L"AllNavigationPoints",
+            L"RadiusNavigationPoints", L"NavigationPointCheck",
+        };
+
         /// TArray as it sits in game memory.
         struct RawArray
         {
@@ -535,13 +544,34 @@ namespace MeleBridge
         return ExportValue(t.Property, t.Address, 3);
     }
 
+    void CallProcessEvent(UObject* object, UFunction* function, void* parms)
+    {
+        // ProcessEvent refuses a function with an opcode number (iNative). With it zeroed for the call, ProcessEvent calls Func
+        // (GNatives[iNative]) like any other native: LEX Interop and every UE3 SDK do this. Flags are restored as they were;
+        // the SDK's generated wrappers instead leave every flag bit set.
+        auto const native = function->iNative;
+        auto const flags = function->FunctionFlags;
+        function->iNative = 0;
+        __try
+        {
+            object->ProcessEvent(function, parms, nullptr);
+        }
+        __finally
+        {
+            function->iNative = native;
+            function->FunctionFlags = flags;
+        }
+    }
+
     json CallFunction(UObject* object, std::wstring const& name, json const& args)
     {
         auto const function = FindFunction(object->Class, name);
-        // The SDK's generated wrappers (LEX Interop calls ConsoleCommand through one) leave every flag bit set: no flag is known then.
+        // The SDK's generated wrappers (LEX Interop calls ConsoleCommand through one) leave every flag bit set: no flag is known then,
+        // so the names of the engine's latent and iterator natives back the flags up.
         if (function->FunctionFlags != 0xFFFFFFFF && (function->FunctionFlags & (FUNC_Iterator | FUNC_Latent)))
             throw BridgeError(ToUtf8(name) + " is latent or an iterator: it cannot be called from outside script");
-        if (function->iNative != 0) throw BridgeError(ToUtf8(name) + " is an opcode native: ProcessEvent refuses it");
+        if (std::any_of(std::begin(LatentOrIterator), std::end(LatentOrIterator), [&](wchar_t const* n) { return EqualsNoCase(NameOf(function), n); }))
+            throw BridgeError(ToUtf8(name) + " is latent or an iterator: it cannot be called from outside script");
         if (!args.is_array()) throw BridgeError("args is a list");
 
         auto const params = ParamsOf(function);
@@ -568,7 +598,7 @@ namespace MeleBridge
             throw;
         }
 
-        object->ProcessEvent(function, block.data(), nullptr);
+        CallProcessEvent(object, function, block.data());
 
         json result = json::object();
         if (returned != nullptr) result["return"] = ExportValue(returned, block.data() + returned->Offset, 3);

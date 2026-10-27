@@ -40,7 +40,11 @@ namespace MeleBridge
     json SetProperty(UObject* object, std::wstring const& path, json const& value);
 
     /// Calls a function of the object's class (or its parents) by name through ProcessEvent; args in declaration order.
+    /// Opcode natives (SetLocation, Trace, Destroy) work too; latent and iterator functions are refused.
     json CallFunction(UObject* object, std::wstring const& function, json const& args);
+
+    /// ProcessEvent with a ready parameter block, opcode natives included. No check: the caller knows the function.
+    void CallProcessEvent(UObject* object, UFunction* function, void* parms);
 
     /// A function's parameters (not the return value) from a ProcessEvent parameter block.
     json ExportParams(UFunction* function, BYTE* parms);

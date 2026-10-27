@@ -1,4 +1,5 @@
 #include "MeleBridge/Bridge.hpp"
+#include "MeleBridge/Editor.hpp"
 #include "MeleBridge/Reflection.hpp"
 
 #include <algorithm>
@@ -212,15 +213,19 @@ namespace MeleBridge
                 orig = ProcessEvent_orig.load(std::memory_order_acquire);
             }
 
-            if (HasJobs.load(std::memory_order_acquire) && !InJobs)
+            // The editor's own calls (Canvas.Project, Actor.Trace) only pass through.
+            auto const editor = Editor::Busy();
+            if (HasJobs.load(std::memory_order_acquire) && !InJobs && !editor)
             {
                 InJobs = true;
                 RunJobs();
                 InJobs = false;
             }
-            if (Watching.load(std::memory_order_relaxed) && !InJobs) Publish(Context, Function, Parms);
+            if (Watching.load(std::memory_order_relaxed) && !InJobs && !editor) Publish(Context, Function, Parms);
 
             orig(Context, Function, Parms, Result);
+
+            if (!InJobs && !editor) Editor::AfterProcessEvent(Context, Function, Parms);
         }
     }
 
