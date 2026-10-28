@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The same LEC as mele-mcp. LEC only defines WINDOWS (registry lookup, native DLL copy) in its Win* configurations. -->
+    <ProjectReference Include="..\mele-mcp\external\LegendaryExplorer\LegendaryExplorer\LegendaryExplorerCore\LegendaryExplorerCore.csproj"
+                      SetConfiguration="Configuration=WinRelease"
+                      SetPlatform="Platform=x64" />
+  </ItemGroup>
+</Project>
