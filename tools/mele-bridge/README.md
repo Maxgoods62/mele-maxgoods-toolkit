@@ -321,7 +321,9 @@ fixes that ([docs/07 §11](../../docs/07-ingame-editor.md#11-phase-4-vanilla-act
     brings both back. A light you deleted does not follow. Save writes the light where it ended.
 - **Selection:** a switched prop shows `prop light 40% of target: L adds one`, and `no prop light covers it` when its light
   environment lights it; a prop too big for one prop light shows the radius it would need instead, no L, and while no
-  light covers it a room-light hint. After a drag that leaves a prop under half its target, the status line says so.
+  light covers it a room-light hint. A switched-off light that would cover it is named, as the build's note names it
+  (switching it on in its panel lights the prop). After a drag that leaves a prop under half its target, the status line
+  says so. L always answers on the status line, "L: select a prop first" included.
 - **Lights the editor lists:** its own (`PointLightMovable`, tagged `ed_light_<run>_<n>`) and the YAMLs' `lights:` entries
   (`levels.json`'s `lights` tags, `PointLightToggleable` when built): the Lights tab's rows. Our NPCs' lights (`levels.json`
   `npcs`) are listed in their NPC's section ([NPC lights](#npc-lights)) and tracked apart, so the prop switch never walks

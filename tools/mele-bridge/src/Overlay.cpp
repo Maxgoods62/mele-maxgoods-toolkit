@@ -637,6 +637,9 @@ namespace MeleBridge::Editor
                     if (!s.SelectedCovered)
                         ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "no prop light covers it: lit by its light environment, brighter than vanilla%s",
                                            tooBig ? "" : " (L)");
+                    // The build's note names them too: switching one on lights the prop.
+                    if (!s.SelectedCovered && !s.SelectedCoveringOff.empty())
+                        ImGui::TextWrapped("%s would cover it but switched off: Enabled in its panel (Lights tab) switches it on", s.SelectedCoveringOff.c_str());
                 }
                 if (s.SelectedLight) DrawLightPanel(s);
                 if (ImGui::Button("Deselect")) Post({ .Type = Command::Kind::Deselect });
@@ -1856,8 +1859,8 @@ namespace MeleBridge::Editor
                 if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) Post({ .Type = Command::Kind::Save });
                 if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) Post({ .Type = io.KeyShift ? Command::Kind::Redo : Command::Kind::Undo });
                 if (idle && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) Post({ .Type = Command::Kind::Redo });
-                // The game thread says why when the selection is not a prop it switches.
-                if (idle && !io.KeyCtrl && s.Selected && ImGui::IsKeyPressed(ImGuiKey_L, false)) Post({ .Type = Command::Kind::PropLight });
+                // The game thread says why when nothing is selected or the selection is not a prop it switches: L always answers.
+                if (idle && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L, false)) Post({ .Type = Command::Kind::PropLight });
             }
 
             if (free && !Looking.load() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && s.CanvasWidth > 0)

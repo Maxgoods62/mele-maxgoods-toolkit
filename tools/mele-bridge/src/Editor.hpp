@@ -201,6 +201,8 @@ namespace MeleBridge::Editor
         /// MaxAutoRadius, Auto light and L add none and the target is nothing.
         bool SelectedProp = false;
         bool SelectedCovered = false;
+        /// When none covers it: the switched-off prop lights that would (their names, comma-separated), or empty.
+        std::string SelectedCoveringOff;
         float SelectedReceived = 0;
         float SelectedTarget = 0;
         float SelectedAutoRadius = 0;

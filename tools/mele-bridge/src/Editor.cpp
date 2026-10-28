@@ -1180,13 +1180,14 @@ namespace MeleBridge::Editor
             return (0.2126f * static_cast<float>(color[0]) + 0.7152f * static_cast<float>(color[1]) + 0.0722f * static_cast<float>(color[2])) / 255.f;
         }
 
-        /// A light covers a prop when it is enabled, its channels include Gameplay_4 (both kinds' do), and its falloff at the prop's
-        /// bounds centre is at least 0.25.
-        bool Covers(LightSeen const& light, FVector centre)
+        /// A light reaches a prop when its channels include Gameplay_4 (both kinds' do) and its falloff at the prop's bounds centre
+        /// is at least 0.25; it covers it when it also is enabled. The build's rule (LevelBuilder.SwitchLighting).
+        bool Reaches(LightSeen const& light, FVector centre)
         {
-            return light.Light.Enabled && light.Gameplay4
-                && Attenuation(Distance(light.Location, centre), light.Light.Radius, light.Light.Falloff) >= CoverShare;
+            return light.Gameplay4 && Attenuation(Distance(light.Location, centre), light.Light.Radius, light.Light.Falloff) >= CoverShare;
         }
+
+        bool Covers(LightSeen const& light, FVector centre) { return light.Light.Enabled && Reaches(light, centre); }
 
         /// What a prop gets from prop lights (E): brightness times luminance times falloff, over the enabled props-kind lights. Room
         /// lights don't count: they light the vanilla mesh beside it as well, so they add to both sides of the match.
@@ -2831,13 +2832,14 @@ namespace MeleBridge::Editor
             return nearest != nullptr ? Seed{ nearest->Light.Brightness, nearest->Light.Color } : Seed{};
         }
 
-        /// How prop lights light a switched prop: whether one covers it, what it gets from them (E), where a fresh Auto light would
-        /// stand and its radius from where the view is (over MaxAutoRadius, Auto light and L add none), and what it would give it
-        /// (T).
+        /// How prop lights light a switched prop: whether one covers it (when none does, the switched-off ones that would, as the
+        /// build's note names them), what it gets from them (E), where a fresh Auto light would stand and its radius from where the
+        /// view is (over MaxAutoRadius, Auto light and L add none), and what it would give it (T).
         struct PropLighting
         {
             PropBounds Bounds;
             bool Covered = false;
+            std::vector<AActor*> CoveringOff;
             float Received = 0;
             Placement Auto;
             float Target = 0;
@@ -2870,6 +2872,13 @@ namespace MeleBridge::Editor
             PropLighting lighting;
             lighting.Bounds = *bounds;
             lighting.Covered = std::any_of(lights.begin(), lights.end(), [&](LightSeen const& l) { return Covers(l, bounds->Centre); });
+            if (!lighting.Covered)
+            {
+                for (auto const& l : lights)
+                {
+                    if (!l.Light.Enabled && Reaches(l, bounds->Centre)) lighting.CoveringOff.push_back(l.Actor);
+                }
+            }
             lighting.Received = Received(lights, bounds->Centre);
             lighting.Auto = AutoPlacement(*bounds, G.ViewLocation, G.ViewYaw);
             lighting.Target = Target(*bounds, lighting.Auto, SeedFor(bounds->Centre, lights));
@@ -5622,6 +5631,10 @@ namespace MeleBridge::Editor
                 {
                     s.SelectedProp = true;
                     s.SelectedCovered = lighting->Covered;
+                    for (auto const light : lighting->CoveringOff)
+                    {
+                        s.SelectedCoveringOff += (s.SelectedCoveringOff.empty() ? "" : ", ") + NameFor(light);
+                    }
                     s.SelectedReceived = lighting->Received;
                     s.SelectedTarget = lighting->Target;
                     s.SelectedAutoRadius = lighting->Auto.Radius;
@@ -6063,7 +6076,7 @@ namespace MeleBridge::Editor
             if (s.SelectedEffect) state["selection"]["effect"] = { { "template", s.SelectedTemplate }, { "loops", s.SelectedLoops } };
             if (s.SelectedProp)
                 state["selection"]["propLighting"] = { { "covered", s.SelectedCovered }, { "received", s.SelectedReceived }, { "target", s.SelectedTarget },
-                                                        { "autoRadius", s.SelectedAutoRadius } };
+                                                        { "autoRadius", s.SelectedAutoRadius }, { "coveringOff", s.SelectedCoveringOff } };
         }
         if (c.Valid)
         {
