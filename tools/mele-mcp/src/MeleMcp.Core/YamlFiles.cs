@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using LegendaryExplorerCore.Packages;
 using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
@@ -6,7 +7,7 @@ using YamlDotNet.RepresentationModel;
 namespace MeleMcp.Core;
 
 /// <summary>Shared pieces of the YAML builders (conv_build, plot_build): reading values with line numbers, finding files, text per language.</summary>
-internal static class YamlFiles
+internal static partial class YamlFiles
 {
     /// <summary>Text-only languages fall back to the language whose text they show (FE = French text, English voice).</summary>
     internal static readonly Dictionary<string, string> TextLanguage = new(StringComparer.OrdinalIgnoreCase)
@@ -24,6 +25,138 @@ internal static class YamlFiles
             if (File.Exists(relative)) return Path.GetFullPath(relative);
         }
         return GamePaths.ResolvePackage(game, candidate);
+    }
+
+    /// <summary>
+    /// The package a builder writes, and whether it is missing: the file's 'package' (or the tool's), a full path or a path under
+    /// the mod root that starts with the DLC folder (DLC_MOD_MyMod\CookedPCConsole\BIOA_MyMap.pcc). The mod root is the YAML's
+    /// folder when it has that DLC folder, else the mod of M3's library that has it. A bare file name is looked up as before (the
+    /// YAML's folder, then a file the game loads) and never missing: a builder must not create it, it could resolve into the game
+    /// install. With <paramref name="outRoot"/> (mod_build out=) that folder is the mod root, a full path goes under it by its DLC
+    /// folder, and a DLC folder it does not have yet is first copied from where the build would write without out=.
+    /// </summary>
+    internal static (string Path, bool Missing) Target(MEGame game, string package, string yamlDir, string? outRoot, List<string> notes)
+    {
+        var given = GamePaths.ToWindowsPath(package);
+        if (outRoot is null)
+        {
+            if (Path.IsPathRooted(given)) return Found(Path.GetFullPath(given));
+            if (DlcPart(given) is null) return (Locate(game, given, yamlDir), false);
+            var root = ModRoot(game, given, yamlDir)
+                       ?? throw new FileNotFoundException($"No package '{package}': neither the YAML's folder ({yamlDir}) nor a mod of M3's library has its DLC "
+                                                          + "folder. Make the DLC folder beside the YAML, give a full path, or build with mod_build out=.");
+            return Found(Path.GetFullPath(Path.Combine(root, given)));
+        }
+
+        var into = Path.GetFullPath(GamePaths.ToWindowsPath(outRoot));
+        var part = DlcPart(Path.IsPathRooted(given) ? Path.GetFullPath(given) : given)
+                   ?? throw new ArgumentException($"package '{package}': with out=, give it from its DLC folder on (DLC_MOD_MyMod\\CookedPCConsole\\{Path.GetFileName(given)}), or as a full path in a DLC folder.");
+        var source = Path.IsPathRooted(given) ? Path.GetFullPath(given)
+            : ModRoot(game, given, yamlDir) is { } from ? Path.GetFullPath(Path.Combine(from, given)) : null;
+        var target = Path.GetFullPath(Path.Combine(into, part));
+        var to = DlcFolder(target)!;
+        if (!Directory.Exists(to) && source is not null && DlcFolder(source) is { } copied && Directory.Exists(copied))
+        {
+            PackageWriter.EnsureWritable(game, target);
+            CopyFolder(copied, to);
+            notes.Add($"out=: copied {copied} to {to}; the build changes the copy.");
+        }
+        return Found(target);
+    }
+
+    /// <summary>The file a YAML's 'package' names when it exists: beside the YAML (or a full path), or under its mod root; else null.</summary>
+    internal static string? Existing(MEGame game, string package, string yamlDir)
+    {
+        var given = GamePaths.ToWindowsPath(package);
+        var beside = Path.GetFullPath(Path.Combine(yamlDir, given));
+        if (File.Exists(beside)) return beside;
+        if (Path.IsPathRooted(given) || DlcPart(given) is null) return null;
+        return ModRoot(game, given, yamlDir) is { } root && Path.GetFullPath(Path.Combine(root, given)) is var path && File.Exists(path) ? path : null;
+    }
+
+    /// <summary>
+    /// A package a builder only reads (a mesh's, the prop template's) as 'package' is found: a relative path beside the YAML or
+    /// under its mod root (<see cref="Existing"/>), first under <paramref name="outRoot"/> by its DLC folder with mod_build out=.
+    /// A full path, a file name the YAML's folder lacks, or a path found nowhere stays as given (a file the game loads).
+    /// </summary>
+    internal static string Source(MEGame game, string package, string yamlDir, string? outRoot)
+    {
+        var given = GamePaths.ToWindowsPath(package);
+        if (Path.IsPathRooted(given)) return package;
+        if (outRoot is not null && DlcPart(given) is { } part && Path.GetFullPath(Path.Combine(GamePaths.ToWindowsPath(outRoot), part)) is var copy && File.Exists(copy)) return copy;
+        return Existing(game, package, yamlDir) ?? package;
+    }
+
+    /// <summary>
+    /// A file other than the package that a build changes (a GlobalTlk, the AutoLoad.ini), found at <paramref name="path"/>. With
+    /// <paramref name="outRoot"/> (mod_build out=) its copy there instead, by its DLC folder as <see cref="Target"/> maps the
+    /// package; refused when out= has no such copy (a file outside a DLC folder, or of a DLC folder the build did not copy): an
+    /// out= build never writes the source.
+    /// </summary>
+    internal static string InOut(string path, string? outRoot, string what)
+    {
+        if (outRoot is null) return path;
+        var into = Path.GetFullPath(GamePaths.ToWindowsPath(outRoot));
+        var full = Path.GetFullPath(path);
+        if (full.StartsWith(into.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return full;
+        var copy = DlcPart(full) is { } part ? Path.GetFullPath(Path.Combine(into, part)) : null;
+        if (copy is not null && File.Exists(copy)) return copy;
+        throw new ArgumentException($"{what} {full} has no copy under out= ({into}){(copy is null ? ": it is in no DLC folder" : $": no {copy}")}. An out= build changes "
+                                    + "nothing outside out=, so the file was not built. Keep it in the package's DLC folder (a file name finds it beside the package), or build without out=.");
+    }
+
+    private static (string Path, bool Missing) Found(string path) => (path, !File.Exists(path));
+
+    /// <summary>
+    /// The folder a relative path with a DLC folder lies under: the YAML's folder when it has the path up to that DLC folder,
+    /// else the one mod of M3's library (mods\&lt;game&gt;\&lt;mod&gt;) that has it; null when none does.
+    /// </summary>
+    private static string? ModRoot(MEGame game, string relative, string yamlDir)
+    {
+        var part = DlcPart(relative)!;
+        var prefix = relative[..(relative.Length - part.Length)] + part.Split('\\')[0];
+        if (Directory.Exists(Path.Combine(yamlDir, prefix))) return yamlDir;
+        string library;
+        try
+        {
+            library = Path.Combine(CatalogBuilder.Library(), game.ToString());
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        var mods = Directory.Exists(library) ? Directory.EnumerateDirectories(library).Where(m => Directory.Exists(Path.Combine(m, prefix))).ToList() : [];
+        return mods.Count switch
+        {
+            0 => null,
+            1 => mods[0],
+            _ => throw new ArgumentException($"{mods.Count} mods of M3's library have {prefix} ({string.Join(", ", mods.Select(Path.GetFileName))}): give a full path, or mod_build out=."),
+        };
+    }
+
+    /// <summary>The path from its last DLC folder on (D:\x\DLC_MOD_MyMod\CookedPCConsole\A.pcc → DLC_MOD_MyMod\CookedPCConsole\A.pcc); null without one.</summary>
+    private static string? DlcPart(string path)
+    {
+        var parts = path.Split('\\', '/');
+        for (var at = parts.Length - 2; at >= 0; at--)
+        {
+            if (parts[at].StartsWith("DLC_", StringComparison.OrdinalIgnoreCase)) return string.Join('\\', parts[at..]);
+        }
+        return null;
+    }
+
+    /// <summary>The full path of the DLC folder a file lies in (the last one of its path); null outside one.</summary>
+    private static string? DlcFolder(string path)
+    {
+        var full = Path.GetFullPath(path);
+        return DlcPart(full) is { } part ? full[..^(part.Length - part.Split('\\')[0].Length)] : null;
+    }
+
+    private static void CopyFolder(string from, string to)
+    {
+        Directory.CreateDirectory(to);
+        foreach (var dir in Directory.EnumerateDirectories(from, "*", SearchOption.AllDirectories)) Directory.CreateDirectory(Path.Combine(to, Path.GetRelativePath(from, dir)));
+        foreach (var file in Directory.EnumerateFiles(from, "*", SearchOption.AllDirectories)) File.Copy(file, Path.Combine(to, Path.GetRelativePath(from, file)));
     }
 
     /// <summary>DLC_MOD_X_GlobalTlk_FR → FR; DLC_MOD_X_GlobalTlk → INT.</summary>
@@ -73,6 +206,35 @@ internal static class YamlFiles
             yield return (key, v);
         }
     }
+
+    internal const string RequiresKey = "requires";
+
+    /// <summary>
+    /// A builder file's top-level keys: its own (<paramref name="allowed"/>), and 'requires: mele-mcp &gt;= X.Y.Z', optional in
+    /// any mod file: the oldest mele-mcp that builds it. An older server refuses the file before it reads any other key.
+    /// </summary>
+    internal static IEnumerable<(string Key, YamlNode Value)> TopLevel(YamlMappingNode root, params string[] allowed)
+    {
+        CheckRequires(root);
+        return Entries(root, [.. allowed, RequiresKey]).Where(e => e.Key != RequiresKey);
+    }
+
+    /// <summary>Refuses a file whose 'requires' names a newer mele-mcp than this server (<see cref="Versions.Server"/>).</summary>
+    internal static void CheckRequires(YamlMappingNode root)
+    {
+        var node = root.Children.FirstOrDefault(c => c.Key is YamlScalarNode { Value: RequiresKey }).Value;
+        if (node is null) return;
+        var match = Requires().Match(Scalar(node));
+        if (!match.Success) throw Fail(node, "'requires' is 'mele-mcp >= X.Y.Z', the oldest mele-mcp that builds the file.");
+        var wanted = Versions.ThreeParts(System.Version.Parse(match.Groups[1].Value));
+        if (Versions.Server < wanted)
+        {
+            throw Fail(node, $"the file requires mele-mcp >= {wanted}, and this server is {Versions.Server}. Update mele-mcp to {wanted} or later, then reconnect it.");
+        }
+    }
+
+    [GeneratedRegex(@"^\s*mele-mcp\s*>=\s*(\d+\.\d+(?:\.\d+)?)\s*$")]
+    private static partial Regex Requires();
 
     /// <summary>The file's top-level mapping; YAML syntax errors keep their line.</summary>
     internal static YamlMappingNode Root(string yaml)

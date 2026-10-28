@@ -24,7 +24,7 @@ internal static class LevelStreams
     internal sealed record StartPoint(string Tag, Vector3 Location, float? Yaw, int Line);
 
     /// <param name="others">For a file the level may have streamed under another name, that name: a vanilla file's fork, or a fork's
-    /// vanilla file (docs/07 §11). Its streaming entry is renamed in place, since entries are only ever added: a second one would
+    /// vanilla file (docs/design/in-game-editor.md §11). Its streaming entry is renamed in place, since entries are only ever added: a second one would
     /// stay in StreamingLevels and stream both.</param>
     internal static void SetStreaming(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, IReadOnlyDictionary<string, string> others, PackageCache cache, List<string> changes)
     {
@@ -103,7 +103,7 @@ internal static class LevelStreams
     /// <summary>
     /// Renames, in every SeqAct_WaitForLevelsVisible of the level, a name it no longer streams under (the other name of a pair:
     /// <paramref name="others"/>, as <see cref="SetStreaming"/> takes it) to the one it streams now. A wait looks its levels up by
-    /// name: one the level no longer streams never shows, and the wait (the squad's, docs/07 §11) never finishes. The squad's gets
+    /// name: one the level no longer streams never shows, and the wait (the squad's, docs/design/in-game-editor.md §11) never finishes. The squad's gets
     /// its names from SquadSpawns too, but only while the YAML has 'squad'.
     /// </summary>
     internal static void RenameWaits(IMEPackage pcc, IReadOnlyDictionary<string, string> others, List<string> changes)

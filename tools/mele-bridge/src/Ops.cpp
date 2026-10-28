@@ -54,7 +54,7 @@ namespace MeleBridge
         if (op == L"ping")
         {
             return RunOnGameThread([] {
-                return Ok({ { "bridge", VERSION_STRING_A }, { "map", ToUtf8(MapName()) }, { "objects", UObject::GObjObjects->Count() } });
+                return Ok({ { "bridge", VERSION_STRING_A }, { "protocol", MELE_PROTOCOL_VERSION }, { "map", ToUtf8(MapName()) }, { "objects", UObject::GObjObjects->Count() } });
             }, timeout);
         }
 

@@ -4,7 +4,7 @@
 
 #include <array>
 
-// The in-game editor (F8): see docs/07-ingame-editor.md. Three threads meet here:
+// The in-game editor (F8): see docs/design/in-game-editor.md. Three threads meet here:
 // - the game thread (ProcessEvent hook) does everything that touches game objects (Editor.cpp);
 // - the render thread (IDXGISwapChain::Present hook) draws the ImGui overlay from a snapshot and posts commands (Overlay.cpp);
 // - the window thread queues mouse and key messages for ImGui and keeps them from the game while the editor is open (Input.cpp).
@@ -25,7 +25,7 @@ namespace MeleBridge::Editor
     extern std::atomic<LONG> AnchorX;
     extern std::atomic<LONG> AnchorY;
 
-    /// The map's session file as the re-apply passes left it (docs/07 §10). Rebuilt when it changes, then shared, not copied.
+    /// The map's session file as the re-apply passes left it (docs/design/in-game-editor.md §10). Rebuilt when it changes, then shared, not copied.
     struct SessionState
     {
         std::string File;
@@ -42,7 +42,7 @@ namespace MeleBridge::Editor
         unsigned long long PassFrame = 0;
     };
 
-    /// levels.json as the last map change read it (docs/07 §11): which level files are ours. Shared, not copied.
+    /// levels.json as the last map change read it (docs/design/in-game-editor.md §11): which level files are ours. Shared, not copied.
     struct LevelsState
     {
         std::string File;
@@ -55,13 +55,13 @@ namespace MeleBridge::Editor
         /// Its props and lights tags, all levels together: the built props the editor switches and the lights it lists.
         int Props = 0;
         int Lights = 0;
-        /// Its npcs (each with its built pose), their lights, and its characterLights copies, all levels together (docs/07 §12).
+        /// Its npcs (each with its built pose), their lights, and its characterLights copies, all levels together (docs/design/in-game-editor.md §12).
         int Npcs = 0;
         int NpcLights = 0;
         int CharacterLights = 0;
     };
 
-    /// A light's kind comes from where the light is (docs/07 §12), read once when it is tracked and stored on its edit.
+    /// A light's kind comes from where the light is (docs/design/in-game-editor.md §12), read once when it is tracked and stored on its edit.
     /// Ours (the YAMLs' lights: entries and the editor's spawns) are Props or Room, told apart by their channels: Props, a prop
     /// light on the Gameplay_4 channel only (it lights props, never walls, pawns or vanilla meshes); Room, walls, vanilla meshes,
     /// pawns and props too (BSP, Static, Dynamic, CompositeDynamic and Gameplay_4). Npc: a light of one of our NPCs (levels.json
@@ -69,7 +69,7 @@ namespace MeleBridge::Editor
     /// shadows and level filter: only the kept writer touches them. Stored by name, never as bits.
     enum class LightKind { Props, Room, Npc, Vanilla };
 
-    /// The widest prop light Auto light and L make (docs/07 §11): a prop that needs more from where the view is gets none and
+    /// The widest prop light Auto light and L make (docs/design/in-game-editor.md §11): a prop that needs more from where the view is gets none and
     /// keeps its light environment. A prop light lights every prop on Gameplay_4 within its radius, so a wider one adds to the
     /// props around it, each tuned against the vanilla mesh beside it (the in-game test's huge catalog props got 2421 and 1991,
     /// a whole area). 1024 is the engine's own default for a point light (a spawned one starts with it), three times the widest
@@ -79,7 +79,7 @@ namespace MeleBridge::Editor
     /// ones, over 600 units: architecture), which a room light lights better, with the walls around them.
     constexpr float MaxAutoRadius = 1024;
 
-    /// A light's settings as a session entry's light block holds them (docs/07 §11). Colour in 0-255; falloff is
+    /// A light's settings as a session entry's light block holds them (docs/design/in-game-editor.md §11). Colour in 0-255; falloff is
     /// FalloffExponent.
     struct LightBlock
     {
@@ -94,7 +94,7 @@ namespace MeleBridge::Editor
     };
 
     /// A light the editor tracks (its own spawns, the YAMLs' lights: entries, our NPCs' lights, the lights of the levels' static
-    /// light collections), for the icons and the Lights tab. Its icon's shape is its kind's (docs/07 §12): a disc for ours, a
+    /// light collections), for the icons and the Lights tab. Its icon's shape is its kind's (docs/design/in-game-editor.md §12): a disc for ours, a
     /// diamond for an NPC's, a square for a level's.
     struct LightIcon
     {
@@ -119,7 +119,7 @@ namespace MeleBridge::Editor
         float Metres = 0;
     };
 
-    /// An NPC of our visible levels (levels.json npcs, docs/07 §12), for its section of the Lights tab: its name as the section
+    /// An NPC of our visible levels (levels.json npcs, docs/design/in-game-editor.md §12), for its section of the Lights tab: its name as the section
     /// says it ("Dorn", from the YAML key), the pawn's tag, and the level it is built into. A shown light whose NPC's level is
     /// not visible (Reyes's lights on another deck of the Normandy) gets a section of its NPC, Away; one whose NPC levels.json
     /// no longer lists gets a section of its own, with no name and no level. Add light is offered in neither.
@@ -132,7 +132,7 @@ namespace MeleBridge::Editor
         bool Away = false;
     };
 
-    /// A particle effect (an Emitter) of the loaded levels, for the Effects tab and its icons (docs/07 §12).
+    /// A particle effect (an Emitter) of the loaded levels, for the Effects tab and its icons (docs/design/in-game-editor.md §12).
     struct EffectIcon
     {
         /// Its path: what a click on the icon or its row sends back.
@@ -181,7 +181,7 @@ namespace MeleBridge::Editor
         bool SelectedSpawned = false;
         /// Why Delete refuses the selection; empty when it can be deleted.
         std::string SelectedUndeletable;
-        /// Why Move, Turn and Scale refuse it (a vanilla actor that is not a prop, a room shell: docs/07 §11); empty when they take it.
+        /// Why Move, Turn and Scale refuse it (a vanilla actor that is not a prop, a room shell: docs/design/in-game-editor.md §11); empty when they take it.
         std::string SelectedUnmovable;
         /// Whether an edit of a vanilla selection ships ("ships: ...", "dev-only: ..."); empty for an actor of our levels, a spawn,
         /// or an actor Move, Turn and Scale refuse (SelectedUnmovable).
@@ -191,7 +191,7 @@ namespace MeleBridge::Editor
         /// A light the editor lists: its settings, for the panel. It only moves.
         bool SelectedLight = false;
         LightBlock SelectedLightBlock;
-        /// A light of one of our NPCs (docs/07 §12): the NPC's name ("Dorn"; empty when levels.json no longer lists it) and tag,
+        /// A light of one of our NPCs (docs/design/in-game-editor.md §12): the NPC's name ("Dorn"; empty when levels.json no longer lists it) and tag,
         /// and the light's offset [forward, right, up] (X, Y, Z) from the NPC's reference pose. The tag is empty for any other
         /// selection. The reference pose itself (its own edit in this session, else levels.json's built pose), for the marker the
         /// overlay draws there, when levels.json lists the NPC.
@@ -201,7 +201,7 @@ namespace MeleBridge::Editor
         bool SelectedHasPose = false;
         FVector SelectedPoseLocation{};
         int SelectedPoseYaw = 0;
-        /// A light of a level's static light collection (docs/07 §12, 5b): the selection is that component, Path and Class its own,
+        /// A light of a level's static light collection (docs/design/in-game-editor.md §12, 5b): the selection is that component, Path and Class its own,
         /// Tag its collection's name. Its light type (as LightIcon's), whether it is a spot (its aim is not edited) and one of the
         /// map's characterLights copies. Unmovable says why it doesn't move (its collection scales it), Unchangeable why the panel
         /// is off too (empty when it edits it). Its base (what the YAML or the level file holds): the panel's banner says what a
@@ -217,12 +217,12 @@ namespace MeleBridge::Editor
         FVector SelectedBaseLocation{};
         std::string SelectedChannel;
         std::string SelectedChannelActors;
-        /// An effect (an Emitter, docs/07 §12): its template's name, and whether the template loops (an emitter of it repeats
+        /// An effect (an Emitter, docs/design/in-game-editor.md §12): its template's name, and whether the template loops (an emitter of it repeats
         /// for ever) or ends. It moves and turns, never scales.
         bool SelectedEffect = false;
         std::string SelectedTemplate;
         bool SelectedLoops = false;
-        /// A prop the editor switches to prop lights (docs/07 §11): whether a prop light covers it, what it gets from prop lights
+        /// A prop the editor switches to prop lights (docs/design/in-game-editor.md §11): whether a prop light covers it, what it gets from prop lights
         /// (E) and what a fresh Auto light would give it (T), and that light's radius from where the view is: over
         /// MaxAutoRadius, Auto light and L add none and the target is nothing.
         bool SelectedProp = false;
@@ -244,7 +244,7 @@ namespace MeleBridge::Editor
         /// The lights the editor tracks in visible levels, deleted ones left out; the levels' own lights within 30 m of the view,
         /// the rig's and edited ones wherever they are.
         std::vector<LightIcon> Lights;
-        /// Our NPCs of the visible levels, lights or not, for the Lights tab's sections (docs/07 §12).
+        /// Our NPCs of the visible levels, lights or not, for the Lights tab's sections (docs/design/in-game-editor.md §12).
         std::vector<NpcSection> Npcs;
         /// The effects of the visible levels, deleted ones too, nearest the view first.
         std::vector<EffectIcon> Effects;
@@ -278,7 +278,7 @@ namespace MeleBridge::Editor
         /// the paused world tick once, so the prop's light catches up. PickLight selects a listed light, Light sets the selected
         /// light's settings (the panel), AddLight spawns a prop light (On: a room light) where the view points, PropLight (L)
         /// adds a prop light for the selected prop, AutoLight turns Auto light on or off. PickEffect selects an effect.
-        /// AddNpcLight adds a light to one of our NPCs (docs/07 §12).
+        /// AddNpcLight adds a light to one of our NPCs (docs/design/in-game-editor.md §12).
         enum class Kind { Close, FreeCam, Pick, Move, Rotate, Scale, Deselect, Speed, Spawn, Delete, Save, RefreshMeshes, Undo, Redo, EndDrag,
                           PickLight, Light, AddLight, PropLight, AutoLight, PickEffect, AddNpcLight };
         Kind Type;

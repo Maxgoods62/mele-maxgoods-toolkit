@@ -15,7 +15,7 @@ namespace MeleMcp.Core;
 internal sealed record Thumbnail(byte[]? Png, string? Skip, IReadOnlyList<string> Elements);
 
 /// <summary>
-/// Offline thumbnails of StaticMeshes for the in-game editor's prop menu (docs/07 §3.5): a small CPU rasterizer over LOD0, the
+/// Offline thumbnails of StaticMeshes for the in-game editor's prop menu (docs/design/in-game-editor.md §3.5): a small CPU rasterizer over LOD0, the
 /// diffuse texture each element's material most likely uses (with its diffuse colours), Lambert light, 2×2 supersampling. The
 /// camera is orthographic, a 3/4 view from above at 45° yaw, framing the mesh to 92% of the image. Triangles are not culled
 /// (cooked winding is not checked). Masked materials are cut where their opacity mask is under its clip value, when the mask

@@ -12,11 +12,18 @@ public static class ModTools
      Description("Builds every YAML file in a mod's source folder: plot files (with transitions, consequences or quests) through plot_build, "
                  + "level files (with npcs, usables, streaming, characterLights, startPoints or squad) through level_build, then conversation files (with 'conversation') through conv_build, then again "
                  + "the level files whose NPCs named a conversation the level did not have yet. Stops at the first error, naming the file; files "
-                 + "built before it stay saved.")]
+                 + "built before it stay saved. A file's 'package' is a full path, or a path under the mod root from the DLC folder on "
+                 + "(DLC_MOD_MyMod\\CookedPCConsole\\BIOA_MyMap.pcc): the YAML's folder when it has that DLC folder, else the mod of M3's library "
+                 + "that has it; a missing level or plot package is created from either. A file may start with 'requires: mele-mcp >= X.Y.Z' "
+                 + "(the oldest server that builds it): every file is checked first, and an older server builds nothing.")]
     public static ModBuildResult ModBuild(
         [Description("Folder with the mod's YAML files, e.g. the repo's mods/<name>.")] string folder,
+        [Description("Mod root to build into instead (Windows or /mnt/<drive> path), e.g. a temp folder: every package goes under it by "
+                     + "its DLC folder, and a DLC folder it does not have yet is first copied from where the build would write without out. "
+                     + "GlobalTlk files and the AutoLoad.ini are changed in that copy (a build that would change one outside it is refused), "
+                     + "and levels.json is left alone: the build changes nothing outside out (backups aside). Omitted: each package where its file puts it.")] string? @out = null,
         [Description("Game: LE1.")] string game = "LE1")
-        => ToolErrors.Run(() => ModBuilder.Build(PackageTools.ParseGame(game), folder));
+        => ToolErrors.Run(() => ModBuilder.Build(PackageTools.ParseGame(game), folder, @out));
 
     [McpServerTool(Name = "mod_check", ReadOnly = true),
      Description("Checks a mod's built files in M3's library before installing: refs (LEX's reference check), streaming (stream state "
@@ -24,7 +31,7 @@ public static class ModTools
                  + "(strref without text per language), facefx (spoken line without FXA_<strref> lip sync), ids (plot, quest or string ids "
                  + "another installed mod also defines). Run it after mod_build, before mod_install.")]
     public static ModCheckResult ModCheck(
-        [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'Claude Test Chakwas'.")] string mod,
+        [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'My Mod'.")] string mod,
         [Description("Comma-separated checks (default all): refs, streaming, startpoints, strings, facefx, ids.")] string? checks = null,
         [Description("Languages whose text must exist, comma-separated.")] string languages = "INT,FR",
         [Description("Maximum findings returned (Errors and Warnings still count all).")] int limit = 100,
@@ -38,7 +45,7 @@ public static class ModTools
                  + "ConfigDelta files into Coalesced and runs AutoTOC. Refuses while the game runs. M3 is a GUI app (its window comes up); this "
                  + "waits for the end of the install in M3's log, then compares every mod file with its installed copy.")]
     public static ModInstallResult ModInstall(
-        [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'Claude Test Chakwas'.")] string mod,
+        [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'My Mod'.")] string mod,
         [Description("Start the game after the install (M3 --bootgame).")] bool bootGame = false,
         [Description("Seconds to wait for M3 (it may first have to start).")] int timeoutSeconds = 180,
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")

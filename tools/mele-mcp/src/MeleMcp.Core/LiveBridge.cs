@@ -1,9 +1,12 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using LegendaryExplorerCore.Packages;
+using Microsoft.Win32.SafeHandles;
 
 namespace MeleMcp.Core;
 
@@ -24,6 +27,12 @@ public static partial class LiveBridge
 {
     private static readonly UTF8Encoding Utf8 = new(false);
 
+    /// <summary>
+    /// The protocol check per game process: null when its bridge speaks ours, else the error. A process keeps the MeleBridge.asi it
+    /// started with, so only its first checked connection pings; a restarted game is checked again. A ping that fails is not kept.
+    /// </summary>
+    private static readonly ConcurrentDictionary<(uint Id, DateTime Started), string?> Checked = new();
+
     public static string PipeName(MEGame game) => $"MeleBridge_{game}";
 
     /// <summary>Enumerating \\.\pipe\ does not connect.</summary>
@@ -34,10 +43,14 @@ public static partial class LiveBridge
     /// <summary>One request; the reply without its "ok". A refused request throws with the bridge's message.</summary>
     public static JsonObject Request(MEGame game, JsonObject request, double timeoutSeconds = 5) => RequestAll(game, [request], timeoutSeconds)[0];
 
-    /// <summary>Several requests over one connection, in order.</summary>
+    /// <summary>
+    /// Several requests over one connection, in order. When all of them are 'editor' ops, the protocol check is skipped (and nothing
+    /// kept): the bridge answers them off the game thread (live_editor works while the game loads), and the check waits for that thread.
+    /// </summary>
     public static List<JsonObject> RequestAll(MEGame game, IReadOnlyList<JsonObject> requests, double timeoutSeconds = 5)
     {
-        using var pipe = Connect(game);
+        var check = requests.Any(r => !(r["op"] is JsonValue op && op.TryGetValue<string>(out var name) && name == "editor"));
+        using var pipe = Connect(game, timeoutSeconds, check);
         var writer = new StreamWriter(pipe, Utf8) { AutoFlush = true, NewLine = "\n" };
         var reader = new StreamReader(pipe, Utf8);
         var replies = new List<JsonObject>();
@@ -155,13 +168,96 @@ public static partial class LiveBridge
         }
     }
 
-    private static NamedPipeClientStream Connect(MEGame game)
+    /// <param name="checkProtocol">Whether to check the bridge's protocol first (<see cref="CheckProtocol"/>).</param>
+    private static NamedPipeClientStream Connect(MEGame game, double timeoutSeconds = 5, bool checkProtocol = true)
     {
         if (!GameBridge.IsGameRunning(game)) throw new InvalidOperationException($"{game} is not running.");
         if (!IsAvailable(game))
             throw new InvalidOperationException($"Pipe {PipeName(game)} not found: MeleBridge.asi is not installed (tools/mele-bridge/build.sh --install, game closed), or the game is still starting.");
         var pipe = new NamedPipeClientStream(".", PipeName(game), PipeDirection.InOut, PipeOptions.Asynchronous);
-        pipe.Connect(3000);
-        return pipe;
+        try
+        {
+            pipe.Connect(3000);
+            if (checkProtocol) CheckProtocol(pipe, timeoutSeconds);
+            return pipe;
+        }
+        catch
+        {
+            pipe.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Refuses a bridge whose pipe protocol is not <see cref="Versions.BridgeProtocol"/>: mixed versions would otherwise fail later
+    /// as an unknown op or a missing key. Pings on the first checked connection to a game process only, and keeps the answer (ours,
+    /// or the refusal) for that process; a bridge before the protocol number (MeleBridge 1) answers the ping without one. The bridge
+    /// answers ping on the game thread, so while the game loads it can fail: then nothing is kept, and the next request pings again.
+    /// </summary>
+    private const string PingNote = "The check ('ping', before the first request to a game process) runs on the game thread, which waits while the game "
+                                    + "loads: try again once it has loaded. live_editor needs no check.";
+
+    private static void CheckProtocol(NamedPipeClientStream pipe, double timeoutSeconds)
+    {
+        var process = ServerProcess(pipe);
+        if (process is { } known && Checked.TryGetValue(known, out var refused))
+        {
+            if (refused is not null) throw new InvalidOperationException(refused);
+            return;
+        }
+
+        string? error;
+        using (var writer = new StreamWriter(pipe, Utf8, 1024, leaveOpen: true) { AutoFlush = true, NewLine = "\n" })
+        using (var reader = new StreamReader(pipe, Utf8, false, 1024, leaveOpen: true))
+        {
+            // Nothing else is on the pipe until the next request, so this reader buffers no more than the ping's reply.
+            writer.WriteLine(new JsonObject { ["op"] = "ping", ["timeoutMs"] = (int)(timeoutSeconds * 1000) }.ToJsonString());
+            var line = ReadLine(reader, TimeSpan.FromSeconds(timeoutSeconds + 2))
+                       ?? throw new IOException($"MeleBridge did not answer the protocol check within {timeoutSeconds + 2} s. {PingNote}");
+            JsonObject reply;
+            try
+            {
+                reply = Check(line);
+            }
+            catch (InvalidOperationException e)
+            {
+                throw new InvalidOperationException($"MeleBridge refused the protocol check: {e.Message.TrimEnd('.')}. {PingNote}", e);
+            }
+            error = ProtocolError(reply);
+        }
+        if (process is { } id) Checked[id] = error;
+        if (error is not null) throw new InvalidOperationException(error);
+    }
+
+    /// <summary>Null when the ping reply's "protocol" is ours; else what to do, naming the bridge version and the protocol it reported.</summary>
+    internal static string? ProtocolError(JsonObject ping)
+    {
+        int? protocol = ping["protocol"] is JsonValue p && p.TryGetValue<int>(out var n) ? n : null;
+        if (protocol == Versions.BridgeProtocol) return null;
+        var bridge = ping["bridge"] is JsonValue b && b.TryGetValue<string>(out var v) ? v : "?";
+        var reported = protocol is null ? "reports no pipe protocol (bridges before 2 do not)" : $"speaks pipe protocol {protocol}";
+        return $"MeleBridge {bridge} in the game {reported}; mele-mcp {Versions.Server} needs protocol {Versions.BridgeProtocol}. "
+               + "Build and install the MeleBridge.asi of the same toolkit release (tools/mele-bridge/build.sh --install, game closed), then start the game again.";
+    }
+
+    /// <summary>The game process serving this pipe, by id and start time (ids are reused); null when Windows does not say.</summary>
+    private static (uint Id, DateTime Started)? ServerProcess(NamedPipeClientStream pipe)
+    {
+        if (!Native.GetNamedPipeServerProcessId(pipe.SafePipeHandle, out var id)) return null;
+        try
+        {
+            using var process = Process.GetProcessById((int)id);
+            return (id, process.StartTime);
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+    }
+
+    private static class Native
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverProcessId);
     }
 }

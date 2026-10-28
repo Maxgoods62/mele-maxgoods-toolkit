@@ -8,7 +8,7 @@ using LegendaryExplorerCore.Unreal.ObjectInfo;
 namespace MeleMcp.Core;
 
 /// <summary>
-/// The point and spot lights of a level's light collections (StaticLightCollectionActor, SLCA; docs/07 §12.4): their fields as the
+/// The point and spot lights of a level's light collections (StaticLightCollectionActor, SLCA; docs/design/in-game-editor.md §12.4): their fields as the
 /// game loads them (through their archetypes: a prefab's, then the class defaults), their light type, where they stand, and what a
 /// fork of their file or the map's characterLights copy writes into them. A light stands at its Translation taken through the
 /// SLCA's binary matrix at its index in LightComponents, the parent UE3 gives it at load; LE1 applies a written Translation on top
@@ -61,7 +61,7 @@ internal static class SlcaLights
     }
 
     /// <summary>
-    /// The light type (docs/07 §12.4), as MeleBridge reads it from the live light, in this order: B when built into a lightmap and
+    /// The light type (docs/design/in-game-editor.md §12.4), as MeleBridge reads it from the live light, in this order: B when built into a lightmap and
     /// UseDirectLightMap; else D with bForceDynamicLight or the Dynamic channel; else U with any channel outside BSP, Static and
     /// CompositeDynamic; else C.
     /// </summary>
@@ -172,7 +172,7 @@ internal static class SlcaLights
     }
 
     /// <summary>
-    /// The map's characterLights copy of a light collection (docs/07 §12.4): each point and spot light of it gets each field its
+    /// The map's characterLights copy of a light collection (docs/design/in-game-editor.md §12.4): each point and spot light of it gets each field its
     /// vanilla: entry gives (keyed by the source file: <paramref name="entries"/>), else the source file's own value again, so a
     /// deleted entry gives the source's back. A location is written through the copy's own binary matrix. A receipt line per light
     /// changed goes to <paramref name="changes"/>; a U light's names what it lights in the files the map streams (<paramref name="streams"/>,

@@ -36,7 +36,7 @@ public sealed record BuiltLight(string Name, ExportRow Actor, string Action, IRe
 /// <param name="Lights">The lights of the lights: section; NPC lights are in their NPC's changes.</param>
 /// <param name="MissingConversations">Conversations the NPCs name that the level does not have yet: build them, then the level again.</param>
 /// <param name="Forks">The receipt of each fork of a streamed file (its vanilla entries), written, unchanged or deleted.</param>
-/// <param name="LevelsFile">levels.json, whose key for this level the build wrote; null when it built another package than the file's.</param>
+/// <param name="LevelsFile">levels.json, whose key for this level the build wrote; null when it built another package than the file's, or into mod_build out=.</param>
 public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyList<string> LevelChanges, IReadOnlyList<BuiltNpc> Npcs, IReadOnlyList<BuiltUsable> Usables, IReadOnlyList<BuiltProp> Props,
     IReadOnlyList<BuiltLight> Lights, int StringCount, IReadOnlyList<string> TlkFiles, string? SideloaderConfig, IReadOnlyList<string> MissingConversations, IReadOnlyList<string> Notes,
     IReadOnlyList<string> BackupPaths, IReadOnlyList<BuiltFork> Forks, string? LevelsFile);
@@ -52,7 +52,7 @@ public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyL
 /// room too), switched on or off. Vanilla actors of the files it streams:
 /// moved, turned, scaled or hidden in a fork of the file, which the level streams instead (<see cref="ForkBuilder"/>); an effect (an emitter)
 /// is moved, turned or hidden only; a light of a light collection gets its brightness, colour, radius, falloff, on/off and place
-/// (docs/07 §12.4), in a fork for a file it streams, in the map for its characterLights copies. A missing level is created, and the
+/// (docs/design/in-game-editor.md §12.4), in a fork for a file it streams, in the map for its characterLights copies. A missing level is created, and the
 /// LE1CP Sideloader config that loads it is written. Last, its key of levels.json, which tells MeleBridge which levels are ours, where
 /// its NPCs stand and their lights, and its character lights.
 /// </summary>
@@ -91,11 +91,11 @@ public static class LevelBuilder
     /// </summary>
     private sealed record NpcPose(Vector3 Origin, int Yaw, Vector3 Was, int WasYaw);
 
-    /// <summary>An NPC's pose as built, for levels.json (docs/07 §12): MeleBridge measures her lights' offsets from it.</summary>
+    /// <summary>An NPC's pose as built, for levels.json (docs/design/in-game-editor.md §12): MeleBridge measures her lights' offsets from it.</summary>
     private sealed record BuiltPose(NpcSpec Npc, string Tag, Vector3 Location, int Yaw);
 
     /// <summary>
-    /// A light of the lights: section (docs/07 §11): a point light on the channels of its kind. props: Gameplay_4 only, so it lights
+    /// A light of the lights: section (docs/design/in-game-editor.md §11): a point light on the channels of its kind. props: Gameplay_4 only, so it lights
     /// props and nothing else; room: walls, vanilla meshes, pawns and props. Switched off (enabled: false), never removed.
     /// </summary>
     private sealed class LightEntrySpec
@@ -194,7 +194,8 @@ public static class LevelBuilder
         public readonly Dictionary<int, Dictionary<string, string>> Strings = [];
     }
 
-    public static LevelBuildResult Build(MEGame game, string yamlPath, string? packageOverride)
+    /// <param name="outRoot">mod_build out=: the mod root to build into instead (see <see cref="YamlFiles.Target"/>).</param>
+    public static LevelBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null)
     {
         if (!game.IsGame1()) throw new ArgumentException("level_build handles Game 1 (LE1) levels.");
         LecHost.EnsureInitialized();
@@ -203,22 +204,24 @@ public static class LevelBuilder
         var spec = Parse(File.ReadAllText(file));
         var dir = Path.GetDirectoryName(file)!;
 
-        // A missing level is created, but only from a full path: a bare name could resolve into the game install.
-        var candidate = GamePaths.ToWindowsPath(packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."));
-        var create = Path.IsPathRooted(candidate) && !File.Exists(candidate);
-        var package = create ? Path.GetFullPath(candidate) : Locate(game, candidate, dir);
-        var globals = spec.GlobalTlk.Select(g => Locate(game, g, Path.GetDirectoryName(package)!, dir)).ToList();
+        // A missing level is created from a full path or one under the mod root, never from a bare name: it could resolve into the game install.
+        var notes = new List<string>();
+        var (package, create) = Target(game, packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."), dir, outRoot, notes);
+        var globals = spec.GlobalTlk.Select(g => InOut(Locate(game, g, Path.GetDirectoryName(package)!, dir), outRoot, "globalTlk")).ToList();
         if (spec.Strings.Count > 0 && globals.Count == 0) throw new ArgumentException("The file gives a name text but no 'globalTlk' to write it to (actor names are read from the GlobalTlk).");
         foreach (var target in globals.Prepend(package)) PackageWriter.EnsureWritable(game, target);
+        // A mesh or the prop template from the mod's own files, as editor_import names it (the YAML's own 'package' string), is found
+        // as 'package' is (with out=, in the copy).
+        if (spec.PropTemplate is { Package: { } standIn }) spec.PropTemplate = spec.PropTemplate with { Package = Source(game, standIn, dir, outRoot) };
+        foreach (var prop in spec.Props.Where(p => p.Mesh is not null)) prop.Mesh = prop.Mesh! with { Package = Source(game, prop.Mesh.Package, dir, outRoot) };
 
-        var notes = new List<string>();
         if (create)
         {
             LevelCreator.Create(game, package);
             notes.Add($"Created the level {Path.GetFileName(package)}.");
         }
 
-        // Forks before the map (docs/07 §11): the map never names a file not written yet. Every file's fork is made in memory first,
+        // Forks before the map (docs/design/in-game-editor.md §11): the map never names a file not written yet. Every file's fork is made in memory first,
         // so a refusal in any of them writes none, and the error lists them all. Each streamed file then goes by the name the map
         // streams it under, and the other name of its pair (the vanilla file, or its fork) is renamed in place.
         var map = Path.GetFileNameWithoutExtension(package);
@@ -254,7 +257,7 @@ public static class LevelBuilder
             }
             if (spec.PostProcess is { } post) LevelStreams.SetPostProcess(game, pcc, level, post.Package, post.Line, levelChanges);
             // The first copy of a name is the one the build keeps (levels.json names it): its lights take the vanilla: entries keyed by its
-            // source file, and the source's own values where they have none (docs/07 §12.4).
+            // source file, and the source's own values where they have none (docs/design/in-game-editor.md §12.4).
             var copies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var light in spec.CharacterLights)
             {
@@ -278,7 +281,7 @@ public static class LevelBuilder
             var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList();
             var builtLights = spec.Lights.Select(l => BuildLight(game, pcc, level, spec, l, cache)).ToList();
             NoteOrphanLights(pcc, level, spec, notes);
-            // Each prop is lit by prop lights or by its light environment, from the lights: entries (docs/07 §11).
+            // Each prop is lit by prop lights or by its light environment, from the lights: entries (docs/design/in-game-editor.md §11).
             var looks = new Dictionary<(string?, string), (bool Static, StructProperty? Channels)>();
             var builtProps = spec.Props.Select(p => BuildProp(game, pcc, level, spec, p, cache, looks, notes)).ToList();
             var streamed = pcc.Exports.Where(e => e.ClassName == "LevelStreamingKismet").Select(e => e.GetProperty<NameProperty>("PackageName")?.Value.Instanced)
@@ -311,8 +314,8 @@ public static class LevelBuilder
         }
 
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
-        // Last: it describes the build, and only the YAML's own package is the level the game loads.
-        var levelsFile = packageOverride is null ? WriteLevelsFile(package, spec, levels, poses) : null;
+        // Last: it describes the build, and only the YAML's own package is the level the game loads (not another package, nor an out= copy).
+        var levelsFile = packageOverride is null && outRoot is null ? WriteLevelsFile(package, spec, levels, poses) : null;
         return new LevelBuildResult(package, create, levelChanges, npcs, usables, props, lights, spec.Strings.Count, tlkFiles, config, missing, notes, backups, forks, levelsFile);
     }
 
@@ -335,13 +338,31 @@ public static class LevelBuilder
             : Path.GetFullPath(GamePaths.ToWindowsPath(custom));
     }
 
+    /// <summary>The DLC folders levels.json says level_build built into (its 'dlc', and each level's); none without a readable file.</summary>
+    internal static List<string> BuiltDlcFolders()
+    {
+        try
+        {
+            var path = LevelsFilePath();
+            if (!File.Exists(path) || JsonNode.Parse(File.ReadAllText(path)) is not JsonObject doc) return [];
+            var levels = doc["levels"] as JsonObject ?? [];
+            return levels.Select(l => (l.Value as JsonObject)?["dlc"]).Prepend(doc["dlc"])
+                .Select(d => d is JsonValue v && v.TryGetValue<string>(out var name) ? name : null)
+                .OfType<string>().Where(d => d.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
+    }
+
     /// <summary>
-    /// Writes this level's key of levels.json (docs/07 §11, §12), which MeleBridge reads on each map change and when the file changes:
+    /// Writes this level's key of levels.json (docs/design/in-game-editor.md §11, §12), which MeleBridge reads on each map change and when the file changes:
     /// the vanilla files the level streams (by their vanilla names), the tags of its props that are not removed (the props it may
     /// switch to prop lights) and of its lights: entries (the lights it lists); every NPC of the YAML by her tag, with her YAML name,
     /// her pose as built and her lights' offsets (none too: the editor lists her NPC lights and edits them as offsets); the
     /// characterLights copies, by the collection's name in the level, with the file each is copied from; 'dlc', the DLC folder it lies
-    /// in. Other keys stay. Unreadable, the file is kept aside (.bad-&lt;ticks&gt;) and a new one started. Written beside it, then moved over it.
+    /// in (at the top for MeleBridge, the last level built; in the level's key too, which catalog_index reads). Other keys stay. Unreadable, the file is kept aside (.bad-&lt;ticks&gt;) and a new one started. Written beside it, then moved over it.
     /// </summary>
     private static string WriteLevelsFile(string package, Spec spec, IReadOnlyList<string> streams, IReadOnlyList<BuiltPose> poses)
     {
@@ -357,12 +378,14 @@ public static class LevelBuilder
             doc = new JsonObject();
         }
         doc["version"] = 1;
-        if (ForkBuilder.DlcOf(package) is { } dlc) doc["dlc"] = dlc;
+        var dlc = ForkBuilder.DlcOf(package);
+        if (dlc is not null) doc["dlc"] = dlc;
         if (doc["levels"] is not JsonObject levels) doc["levels"] = levels = new JsonObject();
         var key = Path.GetFileNameWithoutExtension(package);
         foreach (var old in levels.Select(l => l.Key).Where(k => k.Equals(key, StringComparison.OrdinalIgnoreCase)).ToList()) levels.Remove(old);
         levels[key] = new JsonObject
         {
+            ["dlc"] = dlc,
             ["streams"] = new JsonArray(streams.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray()),
             ["props"] = new JsonArray(spec.Props.Where(p => !p.Removed).Select(p => p.Tag).OfType<string>().Select(t => (JsonNode?)JsonValue.Create(t)).ToArray()),
             // Switched off ones too: the editor lists them, and switches them on again. NPC lights are under their NPC.
@@ -546,7 +569,7 @@ public static class LevelBuilder
         return new BuiltProp(prop.Name, ExportInspector.Row(actor), action, changes);
     }
 
-    // ---- Prop lighting (docs/07 §11) ----
+    // ---- Prop lighting (docs/design/in-game-editor.md §11) ----
 
     /// <summary>A light covers a prop when its falloff at the prop's bounds centre is at least this (d ≤ 0.71·R at falloff 2).</summary>
     internal const double CoveredFalloff = 0.25;
@@ -569,7 +592,7 @@ public static class LevelBuilder
         distance >= radius || radius <= 0 ? 0 : Math.Pow(1 - distance * distance / (radius * radius), falloff);
 
     /// <summary>
-    /// The switch of docs/07 §11: a prop that a lights: entry covers (enabled, on Gameplay_4 as both kinds are, falloff at its bounds
+    /// The switch of docs/design/in-game-editor.md §11: a prop that a lights: entry covers (enabled, on Gameplay_4 as both kinds are, falloff at its bounds
     /// centre at least <see cref="CoveredFalloff"/>) is lit by prop lights: its light environment off, its mesh on Gameplay_4 alone,
     /// written in full (a channel left out of a tagged struct takes its archetype's). Any other prop is lit by its light environment,
     /// with the channels a new copy of its source has (today's look), and gets a note: its light environment sums the level's lights
@@ -1090,7 +1113,7 @@ public static class LevelBuilder
         return true;
     }
 
-    /// <summary>A fill light kept at <see cref="LightSpec.Offset"/> from the NPC, lighting only dynamic objects (see docs/06 §A.8–A.9).</summary>
+    /// <summary>A fill light kept at <see cref="LightSpec.Offset"/> from the NPC, lighting only dynamic objects (see docs/le1-lighting.md §A.8–A.9).</summary>
     private static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, LightSpec light, NpcPose pose, PackageCache cache,
         Lazy<(StructProperty?, FloatProperty?)> templateLook, List<string> changes)
     {
@@ -1139,7 +1162,7 @@ public static class LevelBuilder
     /// (<see cref="TakeTemplateLight"/>). A light of the level that only has the template's name (another file's template of that
     /// name, or the level's own) is not cloned: the template is imported under a free name (<see cref="AddActor"/>). Always
     /// written: its tag and place, the component's bEnabled, bOnlyAffectSameAndSpecifiedLevels false (the level filter never
-    /// matches a pawn in a Sideloader level, docs/06 §A.9), the radius and brightness given, CachedParentToWorld's WPlane, new
+    /// matches a pawn in a Sideloader level, docs/le1-lighting.md §A.9), the radius and brightness given, CachedParentToWorld's WPlane, new
     /// GUIDs for a new copy, imported or cloned (lightmaps, shadow maps and a primitive's IrrelevantLights know a light by its
     /// LightGuid, so no two lights share one). A lights: entry (<see cref="LightSettings.Kind"/>) also gets the actor's bEnabled,
     /// its colour, falloff, no shadows, dynamic light, its kind's channels in full and no OtherLevelsToAffect (the template's level
@@ -1580,7 +1603,7 @@ public static class LevelBuilder
     private static Spec Parse(string yaml)
     {
         var spec = new Spec();
-        foreach (var (key, value) in Entries(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "streaming", "postProcess",
+        foreach (var (key, value) in TopLevel(Root(yaml), "package", "defaultLanguage", "globalTlk", "sideloader", "lightTemplate", "streaming", "postProcess",
                      "characterLights", "startPointTemplate", "startPoints", "squad", "npcs", "usables", "propTemplate", "props", "vanilla", "lights"))
         {
             switch (key)
@@ -1724,7 +1747,7 @@ public static class LevelBuilder
 
     /// <summary>
     /// BIOA_FRE31_00_LAY.StaticLightCollectionActor_127.PointLight_35_LC: {location: [x, y, z], brightness, color: [r, g, b], radius, falloff,
-    /// enabled} (docs/07 §12.4): a point or spot light of a light collection; a field left out keeps the file's value. It moves and keeps
+    /// enabled} (docs/design/in-game-editor.md §12.4): a point or spot light of a light collection; a field left out keeps the file's value. It moves and keeps
     /// its channels: no rotation, scale, removed or kind. Sun and sky lights are not edited.
     /// </summary>
     private static ForkBuilder.Entry VanillaLightOf(YamlNode key, string[] parts, YamlNode body)
@@ -1940,7 +1963,7 @@ public static class LevelBuilder
         return new Source(package, actor ?? throw Fail(value, "the template needs 'actor'."), (int)value.Start.Line);
     }
 
-    /// <summary>{type: ClaudeNurseReyes, strref: 74210001, fr: "...", en: "..."}.</summary>
+    /// <summary>{type: MyNurse, strref: 74210001, fr: "...", en: "..."}.</summary>
     private static NameSpec NameOf(YamlNode value, Dictionary<int, Dictionary<string, string>> strings)
     {
         if (value is not YamlMappingNode m) throw Fail(value, "a name is {type: <actor type>, strref: <id>, fr: \"...\"}.");

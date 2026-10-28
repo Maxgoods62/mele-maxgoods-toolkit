@@ -10,7 +10,7 @@ internal static class YamlEdits
 {
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-    /// <summary>The sections whose entries are actors the build finds again by tag (lights: docs/07 §11).</summary>
+    /// <summary>The sections whose entries are actors the build finds again by tag (lights: docs/design/in-game-editor.md §11).</summary>
     private static readonly string[] ActorSections = ["npcs", "usables", "props", "lights"];
 
     internal static string Location(float x, float y, float z) => $"[{string.Join(", ", new[] { x, y, z }.Select(f => f.ToString("R", Inv)))}]";
@@ -307,14 +307,14 @@ internal static class YamlEdits
     /// <summary>
     /// Adds 'propTemplate' above props when the file has none: a BioInert placed in that file (not one spawned since), whose
     /// copies show static meshes, lit by their light environment, or by prop lights where a light of the lights section covers them.
-    /// Returns the change, or null when the file had one.
+    /// Written as <paramref name="package"/>, read from <paramref name="path"/> (default: the same). Returns the change, or null when the file had one.
     /// </summary>
-    internal static (string Text, string? Added) AddPropTemplate(MEGame game, string text, string package)
+    internal static (string Text, string? Added) AddPropTemplate(MEGame game, string text, string package, string? path = null)
     {
         var root = Root(text);
         if (root.Children.Keys.Any(k => Scalar(k) == "propTemplate")) return (text, null);
         string inert;
-        using (var pcc = PackageInspector.Open(game, package))
+        using (var pcc = PackageInspector.Open(game, path ?? package))
         {
             inert = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioInert" && e.Parent?.InstancedFullPath == "TheWorld.PersistentLevel")?.ObjectName.Instanced
                     ?? throw new ArgumentException($"{Path.GetFileName(GamePaths.ToWindowsPath(package))} has no BioInert to show static meshes on: add 'propTemplate: {{ package: <file>, actor: <a BioInert> }}' to the YAML.");

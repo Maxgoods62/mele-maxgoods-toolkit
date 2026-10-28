@@ -29,13 +29,13 @@ public sealed record FieldConflict(string Field, string Base, string Yaml, strin
 public sealed record EditorImportResult(string File, string Session, bool Written, IReadOnlyList<ImportedActor> Actors, int Marked, LevelBuildResult? Build, IReadOnlyList<string> Notes);
 
 /// <summary>
-/// Merges what the in-game editor saved (MeleBridge's session file, one per map; docs/07 §3.7, §10) into a level YAML file, keyed by
+/// Merges what the in-game editor saved (MeleBridge's session file, one per map; docs/design/in-game-editor.md §3.7, §10) into a level YAML file, keyed by
 /// tag, so a rebuild keeps it: moved, turned or scaled actors get their location, rotation and scale, field by field against the
 /// state the YAML held when the editor first changed them (a value changed in the YAML since is kept, both changed is a conflict);
 /// meshes spawned in the editor get a props entry, deleted props 'removed: true' (the build hides their actor). Vanilla actors of the
 /// files the level streams (meshes and effects) get a vanilla entry, keyed by file and actor name, which the build ships in a fork of the
-/// file (docs/07 §11); those of other levels stay dev-only. NPC lights go into their NPC's lights list as offsets from the NPC. Lights of
-/// light collections (docs/07 §12.4) get a vanilla entry too, keyed by file, collection and light: shipped in a fork, or for a light of
+/// file (docs/design/in-game-editor.md §11); those of other levels stay dev-only. NPC lights go into their NPC's lights list as offsets from the NPC. Lights of
+/// light collections (docs/design/in-game-editor.md §12.4) get a vanilla entry too, keyed by file, collection and light: shipped in a fork, or for a light of
 /// the map's characterLights copy, keyed by the copy's source file and written into the map.
 /// </summary>
 public static class EditorImport
@@ -89,7 +89,7 @@ public static class EditorImport
     /// <param name="Scale3D">DrawScale3D.</param>
     /// <param name="Deleted">In a base: whether the YAML's entry has removed: true (editor_import writes it, MeleBridge's Save keeps it; null
     /// in a base without it, which merges 'removed' two-way). In imported.before: whether the installed level hides the actor.</param>
-    /// <param name="Light">A light's block (docs/07 §11); null for any other actor.</param>
+    /// <param name="Light">A light's block (docs/design/in-game-editor.md §11); null for any other actor.</param>
     /// <param name="Npc">An NPC light's NPC and offset; null for any other actor.</param>
     private sealed record Transform(double[]? Location, double[]? Rotation, double? Scale, double[]? Scale3D, bool? Deleted = null, LightBlock? Light = null, SessionNpc? Npc = null);
 
@@ -97,7 +97,7 @@ public static class EditorImport
     private sealed record SessionNpc(string? Tag, double[]? Offset);
 
     /// <summary>
-    /// A light's state in a session entry (docs/07 §11): kind by name (props or room; npc for an NPC light, vanilla for a light of a light
+    /// A light's state in a session entry (docs/design/in-game-editor.md §11): kind by name (props or room; npc for an NPC light, vanilla for a light of a light
     /// collection), radius, brightness, colour [r, g, b] (0-255), falloff exponent, and whether it is on. A spawned light the editor deleted
     /// keeps its 'enabled' and is 'deleted'; it shows enabled and not deleted. A vanilla light has its light type (B, C, U or D).
     /// </summary>
@@ -129,7 +129,7 @@ public static class EditorImport
     /// what an import wrote. Null in version 1 and for a spawn never imported.</param>
     /// <param name="Imported">Present once an import applied the entry: MeleBridge re-applies it until the install shows it, then drops it.</param>
     /// <param name="Installed">What an install may still show, kept by MeleBridge's Save from earlier imports (written by MeleBridge only).</param>
-    /// <param name="Light">A light's block (docs/07 §11): a light the editor spawned, a light of a lights section or an NPC light; null for any other actor.</param>
+    /// <param name="Light">A light's block (docs/design/in-game-editor.md §11): a light the editor spawned, a light of a lights section or an NPC light; null for any other actor.</param>
     /// <param name="Npc">An NPC light's NPC and offset (its location is the NPC's pose plus the offset); null for any other actor.</param>
     private sealed record SessionActor(string? Tag, string? Path, string? Level, bool Spawned, SessionMesh? Mesh, double[]? Location, double[]? Rotation,
         double? Scale, double[]? Scale3D, bool Deleted, Transform? Base, JsonElement? Imported, string? Class = null, JsonElement? Installed = null, LightBlock? Light = null,
@@ -187,10 +187,11 @@ public static class EditorImport
         var sessionFile = sessionPath is null ? FindSession(level, root, notes) : Path.GetFullPath(GamePaths.ToWindowsPath(sessionPath));
         var dropFile = DroppedFile(sessionFile);
 
-        // A spawned mesh's file as the YAML names it: the level by its own path (by name, the game finds the installed copy), others by
-        // name, a fork of this map by its vanilla file's (docs/07 §11: the fork is a build output, not a source).
-        var own = Path.Combine(Path.GetDirectoryName(file)!, GamePaths.ToWindowsPath(package));
-        own = File.Exists(own) ? Path.GetFullPath(own) : GamePaths.ToWindowsPath(package);
+        // A spawned mesh's file as the YAML names it: the level as its 'package' gives it, read from where level_build finds it (beside the
+        // YAML or under its mod root; by name, the game finds the installed copy), so a relative one stays relative; others by name, a fork
+        // of this map by its vanilla file's (docs/design/in-game-editor.md §11: the fork is a build output, not a source).
+        var ownFile = Existing(game, package, Path.GetDirectoryName(file)!);
+        var own = ownFile is not null && !Path.IsPathRooted(GamePaths.ToWindowsPath(package)) ? package : ownFile ?? GamePaths.ToWindowsPath(package);
         string FileOf(string name) => ForkBuilder.Canonical(level, Path.GetFileNameWithoutExtension(name)) is var vanilla && vanilla.Equals(level, StringComparison.OrdinalIgnoreCase)
             ? own
             : Pcc(vanilla);
@@ -209,8 +210,8 @@ public static class EditorImport
                 .DistinctBy(c => c.Collection, StringComparer.OrdinalIgnoreCase).ToList()
             : [];
 
-        using var files = new Files(game);
-        var vanillaFiles = new VanillaFiles(game, Path.IsPathRooted(own) ? ForkBuilder.DlcOf(own) : null, files);
+        using var files = new Files(game, own, ownFile);
+        var vanillaFiles = new VanillaFiles(game, (ownFile ?? (Path.IsPathRooted(own) ? own : null)) is { } ownPath ? ForkBuilder.DlcOf(ownPath) : null, files);
         // A light's archetypes end in Engine's class default objects.
         using var cache = new PackageCache();
         // MeleBridge may save, or a re-apply pass drop entries, while this runs (the game may be running). The YAML written and the
@@ -524,7 +525,7 @@ public static class EditorImport
     }
 
     /// <summary>
-    /// Merges an actor's place into its entry (found in a text by <paramref name="locate"/>), field by field (docs/07 §10): the editor's
+    /// Merges an actor's place into its entry (found in a text by <paramref name="locate"/>), field by field (docs/design/in-game-editor.md §10): the editor's
     /// value when the YAML still has the base's, the YAML's when the editor still has it (the session entry takes it too, so importing
     /// again keeps it), and on a conflict what <paramref name="policy"/> says: refuse leaves the actor out. Without a base (version 1, or
     /// a spawn never imported), the editor's value wins. 'removed' merges the same way against the base's 'deleted'. Props and vanilla
@@ -659,7 +660,7 @@ public static class EditorImport
         : Side.Conflict;
 
     /// <summary>
-    /// A vanilla actor's edit (docs/07 §11), merged into vanilla.&lt;file&gt;.&lt;actor&gt;, which the build ships in a fork of the file. The
+    /// A vanilla actor's edit (docs/design/in-game-editor.md §11), merged into vanilla.&lt;file&gt;.&lt;actor&gt;, which the build ships in a fork of the file. The
     /// file is the actor's level when the YAML streams it, else the vanilla file its level stands for as a fork of this map; null when
     /// it is neither (dev-only). Merged field by field as a props entry, a value the entry leaves out being the file's (through its
     /// archetypes). A new entry gets the fields the editor changed from the file's (deleted: removed: true), and a comment on its key
@@ -849,7 +850,7 @@ public static class EditorImport
     }
 
     /// <summary>
-    /// A light of a light collection (docs/07 §12.4: a session entry of kind vanilla), merged into vanilla.&lt;file&gt;.&lt;collection&gt;.&lt;light&gt;:
+    /// A light of a light collection (docs/design/in-game-editor.md §12.4: a session entry of kind vanilla), merged into vanilla.&lt;file&gt;.&lt;collection&gt;.&lt;light&gt;:
     /// a light of a file the YAML streams (a light of a fork counts as its vanilla file's), which the build ships in the file's fork, or a
     /// light of the map's own characterLights copy, keyed by the copy's source file (the build writes it into the map). Merged field by
     /// field as a lights entry is (<see cref="MergeLight"/>: location, radius, brightness, color, falloff, enabled), a value the entry
@@ -1047,7 +1048,7 @@ public static class EditorImport
     }
 
     /// <summary>
-    /// A light's edit (docs/07 §11), merged into its lights entry field by field as props are (<see cref="Merge"/>): its location and each
+    /// A light's edit (docs/design/in-game-editor.md §11), merged into its lights entry field by field as props are (<see cref="Merge"/>): its location and each
     /// light field, with MeleBridge's tolerances (location 0.01, radius 0.01, brightness and falloff 0.001; kind, colour and enabled
     /// exact). A value the entry leaves out is the build's (kind props, colour white, falloff 2, on); a radius or brightness, the base's.
     /// A spawned light the editor deleted is off: 'enabled: false' in the YAML and the base; its session block keeps its own 'enabled'
@@ -1181,7 +1182,7 @@ public static class EditorImport
                                          + "and npc { tag, offset [forward, right, up] }.";
 
     /// <summary>
-    /// An NPC light's edit (docs/07 §11), merged into its item of npcs.&lt;name&gt;.lights field by field as a lights entry is
+    /// An NPC light's edit (docs/design/in-game-editor.md §11), merged into its item of npcs.&lt;name&gt;.lights field by field as a lights entry is
     /// (<see cref="MergeLight"/>): its offset [forward, right, up] from the NPC (each axis within 0.02, written to 2 decimals) in place of a
     /// location, and no kind (it keeps its template's channels). A value the item leaves out is the template's (colour white, falloff 2,
     /// on); a radius or brightness, the base's. The session entry's location follows the offset it ends with, from <paramref name="pose"/>
@@ -1454,7 +1455,7 @@ public static class EditorImport
             var edited = YamlEdits.AddEntry(text, Root(text), "props", YamlEdits.Quote(tag), keys, PropsComment);
             Reread(edited, $"props.{tag}");
             var changes = keys.Select(k => $"{k.Key}: {k.Value}").ToList();
-            (edited, var standIn) = YamlEdits.AddPropTemplate(game, edited, source);
+            (edited, var standIn) = YamlEdits.AddPropTemplate(game, edited, source, files.PathOf(source));
             if (standIn is not null) changes.Insert(0, standIn);
             text = edited;
             return new ImportedActor(key, "added", $"props.{tag}", changes, null);
@@ -1610,7 +1611,7 @@ public static class EditorImport
     }
 
     /// <summary>
-    /// Marks the entries this import applied (docs/07 §10): 'base' = what the YAML holds now (and 'deleted': whether it removes the
+    /// Marks the entries this import applied (docs/design/in-game-editor.md §10): 'base' = what the YAML holds now (and 'deleted': whether it removes the
     /// actor), so the next merge starts from it, and 'imported' = { before: the base they had, plus whether the YAML removed them },
     /// the state the installed level still shows: MeleBridge re-applies an entry until the install shows it, then drops it. An entry
     /// without a base (version 1) gets the YAML's entry before this import as 'before'; a props entry this import added, none (no
@@ -1755,10 +1756,16 @@ public static class EditorImport
         return (session, text);
     }
 
-    /// <summary>Packages opened once per import: the meshes of a map mostly come from the same few files.</summary>
-    private sealed class Files(MEGame game) : IDisposable
+    /// <summary>
+    /// Packages opened once per import: the meshes of a map mostly come from the same few files. <paramref name="ownName"/>, the
+    /// level as the YAML names it, is read from <paramref name="ownPath"/>, where level_build finds it.
+    /// </summary>
+    private sealed class Files(MEGame game, string ownName, string? ownPath) : IDisposable
     {
         private readonly Dictionary<string, IMEPackage?> open = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The file read for a package named so.</summary>
+        public string PathOf(string package) => ownPath is not null && package == ownName ? ownPath : package;
 
         /// <summary>A file as level_build opens a mesh's package (a path, or a file the game loads); null when there is none.</summary>
         public IMEPackage? Get(string package)
@@ -1767,7 +1774,8 @@ public static class EditorImport
             try
             {
                 // A missing path is not looked up by its name: that finds the installed copy, not the file the YAML names.
-                pcc = Path.IsPathRooted(package) && !File.Exists(package) ? null : PackageInspector.Open(game, package);
+                var path = PathOf(package);
+                pcc = Path.IsPathRooted(path) && !File.Exists(path) ? null : PackageInspector.Open(game, path);
             }
             catch (FileNotFoundException)
             {

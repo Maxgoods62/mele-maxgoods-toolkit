@@ -248,7 +248,7 @@ public static class LivePlacer
         ?? throw new InvalidOperationException($"The game spawned nothing from {template} (an abstract class, or the spawn was refused).");
 
     /// <summary>
-    /// A copy is lit by its light environment (docs/07 §11's uncovered state), as a build of a prop no prop light covers is: the BioInert it
+    /// A copy is lit by its light environment (docs/design/in-game-editor.md §11's uncovered state), as a build of a prop no prop light covers is: the BioInert it
     /// copies may be a built prop lit by prop lights (its light environment off, its mesh on Gameplay_4 alone), which a copy elsewhere
     /// would keep, black. The light environment is switched on, the mesh takes the channels of the first of its archetypes not on
     /// Gameplay_4, and the components are re-attached twice: one re-attach leaves the light environment's lights on the old channels.

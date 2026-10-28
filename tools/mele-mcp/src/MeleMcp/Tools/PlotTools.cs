@@ -47,9 +47,10 @@ public static class PlotTools
     [McpServerTool(Name = "plot_build", Destructive = true),
      Description("Builds an LE1 DLC plot package from a YAML file: state transitions and consequences (elements as plot_map_get prints them), "
                  + "journal quests (title, goals, tasks, plot items, task evaluations) with their text written to the mod's GlobalTlk files, and "
-                 + "the missing AutoLoad.ini [Packages] lines. A missing package given as a full path is created. Every event and quest in the "
-                 + "file replaces the package's, others are kept; running it twice reports 'unchanged'. See the tool README for the format. "
-                 + "Backs every file up first and refuses files inside the game install.")]
+                 + "the missing AutoLoad.ini [Packages] lines. A missing package given as a full path, or under the mod root from the "
+                 + "DLC folder on (as mod_build says), is created. Every event and quest in the file replaces the package's, others are "
+                 + "kept; running it twice reports 'unchanged'. See the tool README for the format. Backs every file up first and refuses "
+                 + "files inside the game install.")]
     public static PlotBuildResult PlotBuild(
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
         [Description("Plot package, instead of the file's 'package'.")] string? package = null,

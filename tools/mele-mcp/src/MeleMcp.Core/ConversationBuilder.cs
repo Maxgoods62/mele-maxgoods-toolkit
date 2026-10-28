@@ -70,7 +70,8 @@ public static partial class ConversationBuilder
         public List<NodeSpec> Nodes = [];
     }
 
-    public static ConvBuildResult Build(MEGame game, string yamlPath, string? packageOverride)
+    /// <param name="outRoot">mod_build out=: the mod root to build into instead (see <see cref="YamlFiles.Target"/>).</param>
+    public static ConvBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null)
     {
         if (!game.IsGame1()) throw new ArgumentException("conv_build handles Game 1 (LE1) conversations.");
         LecHost.EnsureInitialized();
@@ -78,13 +79,14 @@ public static partial class ConversationBuilder
         if (!File.Exists(file)) throw new FileNotFoundException($"No file {file}.");
         var spec = Parse(File.ReadAllText(file));
         var dir = Path.GetDirectoryName(file)!;
-        var package = Locate(game, packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."), dir);
+        var notes = new List<string>();
+        var (package, missing) = Target(game, packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."), dir, outRoot, notes);
+        if (missing) throw new FileNotFoundException($"No package {package}: a conversation goes into an existing level (level_build or level_new creates one).");
         var conversation = spec.Conversation ?? throw new ArgumentException("The file has no 'conversation'.");
         // GlobalTlk files usually sit next to the level; resolve and check every target before writing any.
-        var globals = spec.GlobalTlk.Select(g => Locate(game, g, Path.GetDirectoryName(package)!, dir)).ToList();
+        var globals = spec.GlobalTlk.Select(g => InOut(Locate(game, g, Path.GetDirectoryName(package)!, dir), outRoot, "globalTlk")).ToList();
         foreach (var target in globals.Prepend(package)) PackageWriter.EnsureWritable(game, target);
 
-        var notes = new List<string>();
         var strings = new Dictionary<int, Dictionary<string, string>>();
         var backups = new List<string>();
         var tlkFiles = new List<string>();
@@ -335,7 +337,7 @@ public static partial class ConversationBuilder
     {
         var root = Root(yaml);
         var spec = new Spec();
-        foreach (var (key, value) in Entries(root, "package", "conversation", "from", "defaultLanguage", "globalTlk", "start", "nodes"))
+        foreach (var (key, value) in TopLevel(root, "package", "conversation", "from", "defaultLanguage", "globalTlk", "start", "nodes"))
         {
             switch (key)
             {

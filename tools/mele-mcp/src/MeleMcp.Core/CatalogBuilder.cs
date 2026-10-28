@@ -35,7 +35,7 @@ public sealed record CatalogBuildResult(int Entries, IReadOnlyDictionary<string,
     IReadOnlyList<string> Written, IReadOnlyDictionary<string, double> Seconds, IReadOnlyList<string> Notes);
 
 /// <summary>
-/// Builds the in-game editor's prop catalog (docs/07 §3.5, §3.6): MeleCatalog_Core.pcc, a package of the chosen meshes that the
+/// Builds the in-game editor's prop catalog (docs/design/in-game-editor.md §3.5, §3.6): MeleCatalog_Core.pcc, a package of the chosen meshes that the
 /// bridge loads one mesh at a time with DynamicLoadObject, in a dev mod of its own in M3's library; and, for the bridge's menu,
 /// catalog.json and its thumbnails under %LOCALAPPDATA%\MeleBridge\LE1\catalog. Nothing in the game install is written: the
 /// package reaches the game when the mod is installed (mod_install, game closed).
@@ -524,7 +524,7 @@ public static class CatalogBuilder
     }
 
     /// <summary>M3's mod library: settings.ini's LibraryPath, else the 'mods' folder next to ME3TweaksModManager.exe (as mod_install finds it).</summary>
-    private static string Library()
+    internal static string Library()
     {
         const string settings = @"C:\ProgramData\ME3TweaksModManager\settings.ini";
         var section = "";

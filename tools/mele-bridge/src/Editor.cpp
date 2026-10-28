@@ -74,21 +74,21 @@ namespace MeleBridge::Editor
         /// The package catalog_build ports the catalog's meshes into ("package" in catalog.json). A mesh in memory under it is the
         /// catalog's copy: only its catalog entry knows the vanilla mesh and file a session names.
         constexpr char const CatalogPrefix[] = "MeleCatalog_Core.";
-        /// The session formats Save writes (docs/07 §12): version 3 when an entry (its base, imported.before or installed
+        /// The session formats Save writes (docs/design/in-game-editor.md §12): version 3 when an entry (its base, imported.before or installed
         /// included) holds an npc or vanilla light, which a Phase 4 bridge would rewrite with its own light writer, channels and
         /// shadows included; else 2. The bridge reads version 1 (Phase 1's) to 3.
         constexpr int SessionVersion = 2, KeptLightVersion = 3;
         /// After an effect step the paused world runs this long (TickFor), so the effect's particles show where it is now.
         constexpr ULONGLONG EffectRunMs = 1500;
         /// After a step of a baked or character-only level light, the light environments in its reach are reset and the paused
-        /// world runs this long (docs/07 §12, spike S2): an environment updates only in Tick, fully at most once a second
+        /// world runs this long (docs/design/in-game-editor.md §12, spike S2): an environment updates only in Tick, fully at most once a second
         /// (MinTimeBetweenFullUpdates 1.0 on Dorn's), and blends over 0.3 s.
         constexpr ULONGLONG LightRunMs = 1500;
         /// An environment is reset when its owner stands within the light's radius plus this (a pawn's own size).
         constexpr float EnvironmentReach = 100;
         /// An untouched level light is listed within this of the view (30 m); the overlay draws at most 150 of them.
         constexpr float LevelLightReach = 3000;
-        /// A level light whose collection's matrix scales it by more than this is not moved (docs/07 §12): its Translation would
+        /// A level light whose collection's matrix scales it by more than this is not moved (docs/design/in-game-editor.md §12): its Translation would
         /// be scaled too. None in the freighter or its rig (spike S0).
         constexpr float MaxParentScale = 1e-3f;
         /// levels.json is checked for a new write time this often while the editor is open.
@@ -106,7 +106,7 @@ namespace MeleBridge::Editor
         constexpr ULONGLONG UnsettledMs = 5000;
 
         /// FLightingChannelContainer's bits (Engine_structs.hpp): bInitialized, BSP, Static, Dynamic, CompositeDynamic, then the
-        /// named channels; Gameplay_4 (the SDK's Gameplay03) is free in every scanned level (docs/07 §11).
+        /// named channels; Gameplay_4 (the SDK's Gameplay03) is free in every scanned level (docs/design/in-game-editor.md §11).
         constexpr DWORD ChannelInitialized = 0x1, ChannelBsp = 0x2, ChannelStatic = 0x4, ChannelDynamic = 0x8, ChannelCompositeDynamic = 0x10;
         constexpr DWORD ChannelGameplay4 = 0x02000000;
         constexpr DWORD RoomChannels = ChannelBsp | ChannelStatic | ChannelDynamic | ChannelCompositeDynamic;
@@ -124,7 +124,7 @@ namespace MeleBridge::Editor
         /// covers its prop. A turned or tilted prop's world box grows and its sphere doesn't, so its light may stand farther out
         /// than 2.5 radii cover.
         constexpr float AutoReach = 0.65f;
-        /// A prop light's brightness and colour with no prop light to take them from: one measurement (docs/07 §11 spike: radius
+        /// A prop light's brightness and colour with no prop light to take them from: one measurement (docs/design/in-game-editor.md §11 spike: radius
         /// 350, about 210 units above the vanilla crate's pivot, 1.01 of its brightness), not a calibration.
         constexpr float SeedBrightness = 0.15f;
         /// A seed whose brightness times luminance is under this gives nothing (brightness 0, or black): a new prop light never
@@ -139,7 +139,7 @@ namespace MeleBridge::Editor
         constexpr float RoomLightHeight = 250, RoomLightRadius = 600, RoomLightBrightness = 0.5f;
         /// A mesh's channels when neither the switch nor its archetype has better: what the engine gives a dynamic mesh.
         constexpr DWORD DynamicMeshChannels = ChannelInitialized | ChannelDynamic | ChannelCompositeDynamic;
-        /// An NPC light (docs/07 §12) has a state when it stands within this of the state's location on each axis: offsets
+        /// An NPC light (docs/design/in-game-editor.md §12) has a state when it stands within this of the state's location on each axis: offsets
         /// written to 2 decimals move a built light by up to 0.007 per axis, and a float at the Normandy's heights steps by 0.004.
         constexpr float NpcLightNoise = 0.05f;
         /// The pose check: an NPC's pawn with no edit stands within this many units and degrees of its built pose, or its lights
@@ -203,7 +203,7 @@ namespace MeleBridge::Editor
             std::optional<FVector> Offset;
         };
 
-        /// An NPC light's link to its NPC (docs/07 §12): the pawn's tag, and the light's offset from the NPC's reference pose as
+        /// An NPC light's link to its NPC (docs/design/in-game-editor.md §12): the pawn's tag, and the light's offset from the NPC's reference pose as
         /// [forward, right, up] in X, Y and Z, turned by the NPC's yaw.
         struct NpcLink
         {
@@ -235,7 +235,7 @@ namespace MeleBridge::Editor
             /// the In this level list.
             std::string MeshLoad;
             Pose Now;
-            /// A light's settings (docs/07 §11); none for anything else. Of a light's pose only the location counts. Its on/off is
+            /// A light's settings (docs/design/in-game-editor.md §11); none for anything else. Of a light's pose only the location counts. Its on/off is
             /// Light->Enabled: Deleted is only a spawned light the editor deleted, and the actor shows Enabled && !Deleted. Its
             /// kind is its source's (§12), read once: Npc and Vanilla lights go through the kept writer (ApplyLight).
             std::optional<LightBlock> Light;
@@ -270,7 +270,7 @@ namespace MeleBridge::Editor
             /// The state last written to the session file or read from it (pose, light block, deleted).
             std::optional<EntryState> SavedState;
             HideFlags ShownFlags;
-            /// The room-shell test's measure (docs/07 §11): the largest half-extent of its primitives' world boxes with the actor
+            /// The room-shell test's measure (docs/design/in-game-editor.md §11): the largest half-extent of its primitives' world boxes with the actor
             /// as its level file has it, taken when the edit bound it, before anything wrote to it. None when its level was not
             /// visible then (its components not attached: no bounds yet).
             std::optional<float> FileExtent;
@@ -285,7 +285,7 @@ namespace MeleBridge::Editor
             bool Rebindable = false;
             /// On a built copy of the spawn: when the copy's level leaves, the edit waits for it instead of spawning again.
             bool OnCopy = false;
-            /// A light Auto light made for a fresh spawn: that prop's edit (docs/07 §11's link). It holds while both were never saved
+            /// A light Auto light made for a fresh spawn: that prop's edit (docs/design/in-game-editor.md §11's link). It holds while both were never saved
             /// and the light is unedited (a tuned light is the user's own and never goes with a prop); meanwhile a drag of the prop
             /// takes the light along (Follow).
             std::optional<size_t> MadeFor;
@@ -293,7 +293,7 @@ namespace MeleBridge::Editor
             /// of that drag: a later drag of the prop takes it along again, and brings it back once the prop fits. A light the
             /// user deleted stays deleted.
             bool DragDeleted = false;
-            /// A light of a level's static light collection (docs/07 §12, 5b): the edit's target is that component (Comp, its slot
+            /// A light of a level's static light collection (docs/design/in-game-editor.md §12, 5b): the edit's target is that component (Comp, its slot
             /// and class), and Actor is its collection, which nothing here ever writes (the hard guard). Component stays set while
             /// the edit waits for its level. Its collection's object name and its light type (B, C, U, D; 0 unknown) go into its
             /// session entry. Its path is the component's; it has no tag, a rotation of zeros and scales of 1.
@@ -322,7 +322,7 @@ namespace MeleBridge::Editor
         /// Light: a change of a light's settings (the panel, or a built light switched off by Delete).
         enum class StepKind { Spawn, Delete, Move, Turn, Scale, Light };
 
-        /// An NPC light a move or a turn of its NPC carried (docs/07 §12): the actor as an edit keeps it (index and class), its
+        /// An NPC light a move or a turn of its NPC carried (docs/design/in-game-editor.md §12): the actor as an edit keeps it (index and class), its
         /// offset, and where it stood before the step and after it. After is the NPC's pose after the step plus the offset turned
         /// by its yaw, computed from the pawn's edit (CloseDrag reads no game memory). A light with an edit is written through
         /// it, its offset kept; one without gets no edit (the build places it from the NPC's pose).
@@ -344,7 +344,7 @@ namespace MeleBridge::Editor
             StepKind Kind = StepKind::Move;
             StepState Before;
             StepState After;
-            /// The auto light that goes with a spawn or a delete of its prop (docs/07 §11's link), written with it while the link
+            /// The auto light that goes with a spawn or a delete of its prop (docs/design/in-game-editor.md §11's link), written with it while the link
             /// still holds; or the one that followed a drag of its prop, written with it whenever it has its actor (AlsoOf).
             std::optional<size_t> Also;
             StepState AlsoBefore;
@@ -376,7 +376,7 @@ namespace MeleBridge::Editor
             bool operator==(LevelSeen const&) const = default;
         };
 
-        /// A light of an NPC of ours as the last build placed it (levels.json npcs, docs/07 §12): its tag as the file has it, and
+        /// A light of an NPC of ours as the last build placed it (levels.json npcs, docs/design/in-game-editor.md §12): its tag as the file has it, and
         /// its offset [forward, right, up] (X, Y, Z) from the NPC's Location, turned by its yaw.
         struct BuiltNpcLight
         {
@@ -398,7 +398,7 @@ namespace MeleBridge::Editor
             std::string Level;
         };
 
-        /// levels.json (docs/07 §11, §12), read on each map change and whenever its write time changes (CheckLevels): the level
+        /// levels.json (docs/design/in-game-editor.md §11, §12), read on each map change and whenever its write time changes (CheckLevels): the level
         /// files built from our YAMLs, the vanilla files each streams, and the NPCs each has. Without it, every actor keeps Phase
         /// 3's rules.
         struct LevelsFile
@@ -427,7 +427,7 @@ namespace MeleBridge::Editor
             std::shared_ptr<LevelsState const> Summary;
         };
 
-        /// Where a tracked light comes from (docs/07 §12): ours (kind Props or Room by its channels), an NPC's, or a level's.
+        /// Where a tracked light comes from (docs/design/in-game-editor.md §12): ours (kind Props or Room by its channels), an NPC's, or a level's.
         enum class LightSource { Ours, Npc, Vanilla };
 
         /// An actor the props switch, the light lists, the effect list or the NPC list track, as long as its slot holds it. A level
@@ -459,7 +459,7 @@ namespace MeleBridge::Editor
             std::string Rig;
         };
 
-        /// A light as the prop lighting rule sees it (docs/07 §11): where, its settings as the component has them (on is bEnabled),
+        /// A light as the prop lighting rule sees it (docs/design/in-game-editor.md §11): where, its settings as the component has them (on is bEnabled),
         /// and whether its channels include Gameplay_4.
         struct LightSeen
         {
@@ -521,7 +521,7 @@ namespace MeleBridge::Editor
             AActor* Selected = nullptr;
             int SelectedIndex = -1;
             UClass* SelectedClass = nullptr;
-            /// A selected level light (docs/07 §12, 5b): the component, its slot and class; Selected is then its collection.
+            /// A selected level light (docs/design/in-game-editor.md §12, 5b): the component, its slot and class; Selected is then its collection.
             UPointLightComponent* SelectedComp = nullptr;
             int SelectedCompIndex = -1;
             UClass* SelectedCompClass = nullptr;
@@ -573,12 +573,12 @@ namespace MeleBridge::Editor
             LevelsFile Ours;
             /// When levels.json's write time was last checked (CheckLevels).
             ULONGLONG LevelsCheckedAt = 0;
-            /// The actors the loaded levels' Kismet names (docs/07 §12), with their slot and the variable that names them
+            /// The actors the loaded levels' Kismet names (docs/design/in-game-editor.md §12), with their slot and the variable that names them
             /// ("Sequence_1791.SeqVar_Object_0"). Read again when first needed after a map change or a level turned visible.
             std::unordered_map<UObject*, std::pair<int, std::string>> Kismet;
             bool KismetStale = true;
 
-            /// Our listed lights, our NPCs' lights (docs/07 §12: apart, so the props switch never walks them), the switched props
+            /// Our listed lights, our NPCs' lights (docs/design/in-game-editor.md §12: apart, so the props switch never walks them), the switched props
             /// and the effects of the loaded levels (§11, §12), read again when stale: after a map change, a change of the loaded
             /// levels, a pass, a spawn, a new levels.json.
             std::vector<Tracked> Lights;
@@ -706,7 +706,7 @@ namespace MeleBridge::Editor
             G.SelectedCompClass = nullptr;
         }
 
-        /// A level light (docs/07 §12, 5b): its collection is the selected actor, the component the light.
+        /// A level light (docs/design/in-game-editor.md §12, 5b): its collection is the selected actor, the component the light.
         void SelectLight(AActor* owner, UPointLightComponent* light)
         {
             Select(owner);
@@ -730,7 +730,7 @@ namespace MeleBridge::Editor
             return name.size() >= 5 && _strnicmp(name.c_str(), "BIOA_", 5) == 0 ? name.substr(5) : name;
         }
 
-        /// The fork of a vanilla level file in a map (docs/07 §11): a renamed copy the map streams instead, named
+        /// The fork of a vanilla level file in a map (docs/design/in-game-editor.md §11): a renamed copy the map streams instead, named
         /// <map minus BIOA_>_<file minus BIOA_> (BIOA_CLD01 and BIOA_FRE31_00_LAY: CLD01_FRE31_00_LAY), as level_build and
         /// editor_import name it. Nothing stores the pair: the rule is the link.
         std::string ForkName(std::string const& map, std::string const& file) { return WithoutBioa(map) + "_" + WithoutBioa(file); }
@@ -914,7 +914,7 @@ namespace MeleBridge::Editor
             return std::nullopt;
         }
 
-        /// The kinds that keep their channels, shadows and level filter (docs/07 §12): only the kept writer writes them.
+        /// The kinds that keep their channels, shadows and level filter (docs/design/in-game-editor.md §12): only the kept writer writes them.
         bool KeptKind(LightKind kind) { return kind == LightKind::Npc || kind == LightKind::Vanilla; }
 
         /// A light block as an entry (its base, imported.before, installed) writes it: kind by name, colour as three integers.
@@ -1089,7 +1089,7 @@ namespace MeleBridge::Editor
         // ! Lights
         // ========================================
 
-        /// A level's static light collection (docs/07 §12, 5b): a Light actor whose lights are its components. Nothing here writes
+        /// A level's static light collection (docs/design/in-game-editor.md §12, 5b): a Light actor whose lights are its components. Nothing here writes
         /// one (Shielded): a reattach of it reattaches its hundred lights.
         bool IsCollection(UObject* object)
         {
@@ -1107,7 +1107,7 @@ namespace MeleBridge::Editor
         }
 
         /// A point light: what the editor spawns and the build copies. Every light is bHidden by class default, so nothing reads a
-        /// light's bHidden as deleted, and nothing hides one (docs/07 §11).
+        /// light's bHidden as deleted, and nothing hides one (docs/design/in-game-editor.md §11).
         bool IsLight(AActor* actor) { return PointOf(actor) != nullptr; }
 
         DWORD BitsOf(FLightingChannelContainer const& channels)
@@ -1127,7 +1127,7 @@ namespace MeleBridge::Editor
         /// light is on Dynamic, and would read as a room light.
         LightKind KindOf(DWORD bits) { return (bits & RoomChannels) != 0 ? LightKind::Room : LightKind::Props; }
 
-        /// The source a stored kind says (docs/07 §12).
+        /// The source a stored kind says (docs/design/in-game-editor.md §12).
         LightSource SourceOf(LightKind kind)
         {
             if (kind == LightKind::Npc) return LightSource::Npc;
@@ -1161,7 +1161,7 @@ namespace MeleBridge::Editor
         /// A level light's settings (5b): the kind is vanilla.
         LightBlock LevelLightOf(UPointLightComponent const* light) { return FieldsOf(light, LightKind::Vanilla); }
 
-        /// A level light's type (docs/07 §12, 5b), from its live fields by level_build's rule and in its order: B baked (built into
+        /// A level light's type (docs/design/in-game-editor.md §12, 5b), from its live fields by level_build's rule and in its order: B baked (built into
         /// the lightmaps, which keep it on the walls whatever the editor does), D dynamic (bForceDynamicLight, or the Dynamic
         /// channel: drawn live), U on a special channel (Skybox, Unnamed, Cinematic, Gameplay, Crowd: it lights only meshes on
         /// it), else C (BSP, Static, CompositeDynamic: characters and props through their light environments).
@@ -1198,7 +1198,7 @@ namespace MeleBridge::Editor
         /// A matrix row's first three numbers.
         FVector RowOf(FPlane const& row) { return { row.X, row.Y, row.Z }; }
 
-        /// Where a level light stands (docs/07 §12, 5b): its Translation through the matrix its collection's file gives it at load
+        /// Where a level light stands (docs/design/in-game-editor.md §12, 5b): its Translation through the matrix its collection's file gives it at load
         /// (CachedParentToWorld, row vectors: T.x X + T.y Y + T.z Z + W), which is LightToWorld's origin; read so, it is right while
         /// its level is loaded but not visible too (no transform update yet). A matrix not set (all zeros) reads LightToWorld.
         FVector PlaceOfLight(UPointLightComponent const* light)
@@ -1239,7 +1239,7 @@ namespace MeleBridge::Editor
             return true;
         }
 
-        /// The hard guard (docs/07 §12, 5b): nothing writes a static light collection, no pose, no flags, no reattach (one
+        /// The hard guard (docs/design/in-game-editor.md §12, 5b): nothing writes a static light collection, no pose, no flags, no reattach (one
         /// reattaches all its lights, about a hundred). True for one, said once per collection in the log.
         bool Shielded(AActor* actor, char const* what)
         {
@@ -1252,7 +1252,7 @@ namespace MeleBridge::Editor
 
         bool OurLight(AActor* actor);
 
-        /// The kept writer (docs/07 §12), for an NPC's or a level's light: its channels, shadows, level filter and colour alpha
+        /// The kept writer (docs/design/in-game-editor.md §12), for an NPC's or a level's light: its channels, shadows, level filter and colour alpha
         /// stay as built, and each of radius, brightness, colour, falloff and on/off is written only when the wanted value
         /// differs from the live one (the radius by more than 0.01, brightness and falloff by more than 0.001, the colour
         /// exactly). A field an entry lacks was filled from the light itself (LightFrom), so it is never written: an untouched
@@ -1320,7 +1320,7 @@ namespace MeleBridge::Editor
             static_cast<ALight*>(actor)->bEnabled = on ? 1 : 0;
         }
 
-        /// Writes a light's settings through the writer its stored kind takes (docs/07 §12): ours through WriteLight, an NPC's
+        /// Writes a light's settings through the writer its stored kind takes (docs/design/in-game-editor.md §12): ours through WriteLight, an NPC's
         /// or a level's through the kept writer. Every write of a light's settings comes here.
         void ApplyLight(AActor* actor, LightBlock const& light, bool deleted)
         {
@@ -1328,7 +1328,7 @@ namespace MeleBridge::Editor
             else WriteLight(actor, light, deleted);
         }
 
-        /// Whether a light already shows a state (docs/07 §11), as editor_import counts two equal: the location to 2 decimals, the
+        /// Whether a light already shows a state (docs/design/in-game-editor.md §11), as editor_import counts two equal: the location to 2 decimals, the
         /// component's bEnabled as light.enabled && !deleted, each light field within editor_import's tolerances. Its rotation, its
         /// scales and bHidden don't count. A field the state lacks is the light's own. The light is read with the source the
         /// state's kind names (§12), so an npc state compares with the light read as npc; an npc state's location is had within
@@ -1362,7 +1362,7 @@ namespace MeleBridge::Editor
             return static_cast<float>(std::sqrt(double(a.X - b.X) * (a.X - b.X) + double(a.Y - b.Y) * (a.Y - b.Y) + double(a.Z - b.Z) * (a.Z - b.Z)));
         }
 
-        /// A light's falloff at a distance (docs/07 §11): (1 - (d/R)^2)^falloff, 0 from the radius out. The bridge and level_build
+        /// A light's falloff at a distance (docs/design/in-game-editor.md §11): (1 - (d/R)^2)^falloff, 0 from the radius out. The bridge and level_build
         /// use this one rule.
         float Attenuation(float distance, float radius, float falloff)
         {
@@ -1399,7 +1399,7 @@ namespace MeleBridge::Editor
             return sum;
         }
 
-        /// Where Auto light and L put a prop light (docs/07 §11): outside the bounds box's near face toward the camera, horizontally,
+        /// Where Auto light and L put a prop light (docs/design/in-game-editor.md §11): outside the bounds box's near face toward the camera, horizontally,
         /// by half the bounds radius, at the box's top plus half the bounds radius; radius 2.5 bounds radii, never under 120, and
         /// never under its distance to the bounds centre over AutoReach, so it always covers the prop (the box of a turned prop is
         /// wider than its sphere). A camera straight above stands for the direction it looks from.
@@ -1457,7 +1457,7 @@ namespace MeleBridge::Editor
 
         size_t IndexOf(Edit const& edit) { return static_cast<size_t>(&edit - G.Edits.data()); }
 
-        /// A level light's pose as an edit holds it (docs/07 §12, 5b): where it stands, a rotation of zeros and scales of 1 (an
+        /// A level light's pose as an edit holds it (docs/design/in-game-editor.md §12, 5b): where it stands, a rotation of zeros and scales of 1 (an
         /// entry needs them, and its aim is not edited).
         Pose LightPose(UPointLightComponent const* light) { return { PlaceOfLight(light), {}, 1, { 1, 1, 1 } }; }
 
@@ -1506,7 +1506,7 @@ namespace MeleBridge::Editor
             if (auto const extent = Visible(actor) ? ExtentOf(actor) : 0.f; extent > 0) e.FileExtent = extent;
         }
 
-        /// A level light's edit takes its component as it stands (docs/07 §12, 5b), its collection as its actor, which nothing
+        /// A level light's edit takes its component as it stands (docs/design/in-game-editor.md §12, 5b), its collection as its actor, which nothing
         /// writes. Its edit has its settings; one from an entry without them (none should be) takes the light's own. Its last
         /// reset is where it stands now: the first reset after a change takes the environments there too.
         void BindLight(Edit& e, AActor* owner, UPointLightComponent* light)
@@ -1558,7 +1558,7 @@ namespace MeleBridge::Editor
 
         std::pair<BuiltNpc const*, BuiltNpcLight const*> NpcLightOf(AActor* actor);
 
-        /// A light the editor lists and lets be picked (docs/07 §11, §12): one it spawned (or a session entry's light), a built
+        /// A light the editor lists and lets be picked (docs/design/in-game-editor.md §11, §12): one it spawned (or a session entry's light), a built
         /// lights: entry of our YAMLs (levels.json's lights tags of its level), or a light of one of our NPCs (levels.json's npcs
         /// lights of its level). Vanilla light actors are none of these.
         bool ListedLight(AActor* actor)
@@ -1570,7 +1570,7 @@ namespace MeleBridge::Editor
 
         bool Phase3Rules(AActor* actor);
 
-        /// A light our own writer may write (docs/07 §12's hard guard): an editor spawn, or a built lights: entry of our YAMLs.
+        /// A light our own writer may write (docs/design/in-game-editor.md §12's hard guard): an editor spawn, or a built lights: entry of our YAMLs.
         bool OurLight(AActor* actor)
         {
             auto const edit = EditOf(actor);
@@ -1580,7 +1580,7 @@ namespace MeleBridge::Editor
             return edit != nullptr && edit->Light && !KeptKind(edit->Light->Kind) && NpcLightOf(actor).first == nullptr && Phase3Rules(actor);
         }
 
-        /// The NPC of our levels an actor is a light of, and that light's entry (levels.json npcs, docs/07 §12): the actor's tag
+        /// The NPC of our levels an actor is a light of, and that light's entry (levels.json npcs, docs/design/in-game-editor.md §12): the actor's tag
         /// is in its own level's npcs.*.lights. Nulls for any other actor.
         std::pair<BuiltNpc const*, BuiltNpcLight const*> NpcLightOf(AActor* actor)
         {
@@ -1594,7 +1594,7 @@ namespace MeleBridge::Editor
             return { &npc, &npc.Lights[light->second.second] };
         }
 
-        /// Where an untouched light comes from (docs/07 §12): an NPC's when levels.json names it among its level's npcs lights,
+        /// Where an untouched light comes from (docs/design/in-game-editor.md §12): an NPC's when levels.json names it among its level's npcs lights,
         /// else ours. An edited light's source is its edit's stored kind (SourceOf(kind)).
         LightSource SourceOf(AActor* actor) { return NpcLightOf(actor).first != nullptr ? LightSource::Npc : LightSource::Ours; }
 
@@ -1608,7 +1608,7 @@ namespace MeleBridge::Editor
             return name;
         }
 
-        /// The NPC levels.json lists with this tag (docs/07 §12): an NPC's tag names one pawn across our YAMLs. Null when none
+        /// The NPC levels.json lists with this tag (docs/design/in-game-editor.md §12): an NPC's tag names one pawn across our YAMLs. Null when none
         /// does. Looked up again whenever needed (a new levels.json replaces them all), from the file alone: Save calls it while
         /// the world's levels may be gone.
         BuiltNpc const* NpcNamed(std::string const& tag)
@@ -1642,7 +1642,7 @@ namespace MeleBridge::Editor
             return it != G.Edits.end() ? &*it : nullptr;
         }
 
-        /// Where an NPC's light offsets are measured from (docs/07 §12): its pawn's Location (the collision centre) and yaw.
+        /// Where an NPC's light offsets are measured from (docs/design/in-game-editor.md §12): its pawn's Location (the collision centre) and yaw.
         struct NpcPose
         {
             FVector Location{};
@@ -1685,7 +1685,7 @@ namespace MeleBridge::Editor
             return std::nullopt;
         }
 
-        /// The place of an NPC light's edit at its NPC's reference pose plus its offset (docs/07 §12), into at. Whether that
+        /// The place of an NPC light's edit at its NPC's reference pose plus its offset (docs/design/in-game-editor.md §12), into at. Whether that
         /// moves it: the pawn's edit may have moved since the entry was saved, or npc_place built the NPC elsewhere. An NPC
         /// levels.json doesn't list leaves at as it is.
         bool NpcPlace(Edit const& e, FVector& at)
@@ -1699,7 +1699,7 @@ namespace MeleBridge::Editor
             return true;
         }
 
-        /// A prop the switch puts on prop lights (docs/07 §11): an editor spawn, or a built prop of our levels (levels.json's props
+        /// A prop the switch puts on prop lights (docs/design/in-game-editor.md §11): an editor spawn, or a built prop of our levels (levels.json's props
         /// tags of its level). Usables, live_place copies and vanilla meshes keep their light environment.
         bool SwitchedProp(AActor* actor)
         {
@@ -1759,7 +1759,7 @@ namespace MeleBridge::Editor
             return &NewEdit(actor);
         }
 
-        /// A new edit of an untouched level light (docs/07 §12, 5b): its state now, which is also its base (what the level file or
+        /// A new edit of an untouched level light (docs/design/in-game-editor.md §12, 5b): its state now, which is also its base (what the level file or
         /// the YAML holds). Saved under its canonical path (a fork's light by its vanilla file), with its collection's name.
         Edit& NewLightEdit(AActor* owner, UPointLightComponent* light)
         {
@@ -1792,7 +1792,7 @@ namespace MeleBridge::Editor
             return &NewLightEdit(owner, light);
         }
 
-        /// Moves a level light alone (docs/07 §12, 5b; spike S1): the Translation that puts it there through its collection's matrix,
+        /// Moves a level light alone (docs/design/in-game-editor.md §12, 5b; spike S1): the Translation that puts it there through its collection's matrix,
         /// through SetTranslation, which updates that one light (a reattach of the collection would redo all of them). Raw while its
         /// level is loaded but not visible: it takes its place when it attaches. False, writing nothing, when the matrix can't be
         /// inverted.
@@ -1970,7 +1970,7 @@ namespace MeleBridge::Editor
             return text;
         }
 
-        /// The props whose prop lighting an edit's change may change (docs/07 §11): an ours light's change any prop's, a prop's
+        /// The props whose prop lighting an edit's change may change (docs/design/in-game-editor.md §11): an ours light's change any prop's, a prop's
         /// change its own. An NPC's or a level's light is never on the prop lights' channel (§12). An effect's change kills and
         /// restarts its particles (§12). A level light's change resets the light environments in its reach (5b). Checked at the
         /// end of the tick (Reswitch, Rerun, Reset): this only takes note, since CloseDrag runs in Fail(), which must not touch
@@ -2018,7 +2018,7 @@ namespace MeleBridge::Editor
             if (SameStep(step.Before, step.After) && !step.Also) return;
             NoteChanged(step.Target);
             if (step.Also) NoteChanged(*step.Also);
-            // A prop's drag: the reswitch says so when it leaves the prop under half its target (docs/07 §11).
+            // A prop's drag: the reswitch says so when it leaves the prop under half its target (docs/design/in-game-editor.md §11).
             if (share >= 0) G.DragWarn = { step.Target, share };
             PushStep(std::move(step));
         }
@@ -2031,7 +2031,7 @@ namespace MeleBridge::Editor
         std::vector<CarriedLight> LightsOf(std::string const& tag);
 
         /// The first drag command of a drag opens its step, with the edit's state before it; one for another edit or tool closes
-        /// the step under way first. A move or a turn of one of our NPCs carries its NPC lights (docs/07 §12): each joins the step
+        /// the step under way first. A move or a turn of one of our NPCs carries its NPC lights (docs/design/in-game-editor.md §12): each joins the step
         /// with its offset and where it stands (Carry). A prop's share of its target is taken then, for the warning when the drag
         /// ends. A prop's linked auto light joins the step, to follow it (Follow), with the side of the prop it stands on, unless
         /// another shown prop needs the light where it is (NeededBy), as a delete of the prop keeps it then. One a drag deleted
@@ -2095,7 +2095,7 @@ namespace MeleBridge::Editor
             G.TickingOnce = true;
         }
 
-        /// Lets the paused world run for a while (docs/07 §12): an effect's particles only move in Tick, so a moved or restarted
+        /// Lets the paused world run for a while (docs/design/in-game-editor.md §12): an effect's particles only move in Tick, so a moved or restarted
         /// effect shows where it is now only once the world has run. The editor's own release, beside TickOnce: the editor
         /// sets bPlayersOnly again at every tick, so an outside write would last one frame. The takeback in Tick waits for the
         /// deadline (a later call only moves it on), then takes the pause back without counting it as the game's. Returns
@@ -2181,7 +2181,7 @@ namespace MeleBridge::Editor
             if (open)
             {
                 ResolveFunctions();
-                // npc_place and mod_build rewrite it while the map runs (docs/07 §12).
+                // npc_place and mod_build rewrite it while the map runs (docs/design/in-game-editor.md §12).
                 CheckLevels(true);
                 // Pause as photo mode does: only players tick. Their input is held back by Input.cpp.
                 RestorePause();
@@ -2220,7 +2220,7 @@ namespace MeleBridge::Editor
         }
 
         /// The nearest visible primitive whose bounds the ray enters, for meshes the trace does not hit (no collision).
-        /// Bounds that hold the camera, or room-sized ones, are skipped, and so are particle systems (docs/07 §12): an effect's
+        /// Bounds that hold the camera, or room-sized ones, are skipped, and so are particle systems (docs/design/in-game-editor.md §12): an effect's
         /// box (a dust card's is about 1000 units across) would take the click from a crate behind it. Effects are picked by
         /// their icon.
         AActor* PickByBounds(FVector origin, FVector dir, APlayerController* pc, float& distance)
@@ -2333,7 +2333,7 @@ namespace MeleBridge::Editor
                         if (name.is_string()) streams.push_back(name.get<std::string>());
                     }
                 }
-                // The props the switch may change and the lights the editor lists (docs/07 §11), by tag.
+                // The props the switch may change and the lights the editor lists (docs/design/in-game-editor.md §11), by tag.
                 for (auto const& [field, tags] : { std::pair{ "props", &ours.Props }, std::pair{ "lights", &ours.Lights } })
                 {
                     auto const list = level.find(field);
@@ -2344,7 +2344,7 @@ namespace MeleBridge::Editor
                         if (tag.is_string()) set.insert(Lower(tag.get<std::string>()));
                     }
                 }
-                // Its NPCs as the build placed them, with their lights' offsets (docs/07 §12). One without a name, a location or a
+                // Its NPCs as the build placed them, with their lights' offsets (docs/design/in-game-editor.md §12). One without a name, a location or a
                 // yaw is skipped, and so is a light without three numbers.
                 if (auto const npcs = level.find("npcs"); npcs != level.end() && npcs->is_object())
                 {
@@ -2394,7 +2394,7 @@ namespace MeleBridge::Editor
             return time;
         }
 
-        /// levels.json (docs/07 §11), read again on each map change, and when its write time changes (CheckLevels): level_build
+        /// levels.json (docs/design/in-game-editor.md §11), read again on each map change, and when its write time changes (CheckLevels): level_build
         /// rewrites it, npc_place too. A missing or broken file reads as unknown, and every actor keeps Phase 3's rules.
         void ReadLevels()
         {
@@ -2442,7 +2442,7 @@ namespace MeleBridge::Editor
                 LEASI_WARN("editor: {}; until then every actor keeps Phase 3's rules", ours.Problem);
         }
 
-        /// levels.json again when its write time changed since it was read (docs/07 §12): npc_place builds, which rewrites it,
+        /// levels.json again when its write time changed since it was read (docs/design/in-game-editor.md §12): npc_place builds, which rewrites it,
         /// and moves the pawn and its lights live, so the NPCs' built poses must follow. On F8 open (now) and once a second while
         /// the editor is open; the map change reads it anyway. The lights, props, effects and NPCs are tracked again, and a pass
         /// tries the NPC light entries that waited for their NPC's pose (the pose check) again.
@@ -2494,7 +2494,7 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// One of our levels (docs/07 §11): a levels.json key, or a file in our DLC folder that is not a fork by the rule (a level
+        /// One of our levels (docs/design/in-game-editor.md §11): a levels.json key, or a file in our DLC folder that is not a fork by the rule (a level
         /// of ours built before levels.json had it). The level by name, and its object (an actor's Outer) for its linker's file.
         bool OurLevel(std::string const& level, UObject* levelObject)
         {
@@ -2524,14 +2524,14 @@ namespace MeleBridge::Editor
             return edit != nullptr && edit->Spawned;
         }
 
-        /// Changed under Phase 3's rules (docs/07 §10): an editor spawn, an actor of one of our levels, or any actor while
+        /// Changed under Phase 3's rules (docs/design/in-game-editor.md §10): an editor spawn, an actor of one of our levels, or any actor while
         /// levels.json is missing. Any other actor is a vanilla one, which the refusal gate below decides on.
         bool Phase3Rules(AActor* actor)
         {
             return !G.Ours.Read || SpawnedByEditor(actor) || OurLevel(LevelOf(actor), actor->Outer);
         }
 
-        /// The classes of a vanilla level the editor changes: props, and effects (docs/07 §12: moved, turned, hidden; EffectRefusal
+        /// The classes of a vanilla level the editor changes: props, and effects (docs/design/in-game-editor.md §12: moved, turned, hidden; EffectRefusal
         /// gates them first). Matched up the class chain, by name.
         constexpr char const* EditableClasses[] = { "StaticMeshActor", "BioInert", "Emitter" };
 
@@ -2612,7 +2612,7 @@ namespace MeleBridge::Editor
         }
 
         /// A particle system: its box is where its particles fly (a dust card's is about 1000 units across), not a size, so the
-        /// room-shell test leaves it out (docs/07 §12) and a wide effect never reads as a room shell.
+        /// room-shell test leaves it out (docs/design/in-game-editor.md §12) and a wide effect never reads as a room shell.
         bool Particles(UPrimitiveComponent* p)
         {
             static UClass* const particles = UParticleSystemComponent::StaticClass();
@@ -2631,7 +2631,7 @@ namespace MeleBridge::Editor
             return extent;
         }
 
-        /// The room-shell test's measure (docs/07 §11): ExtentOf the actor as its level file has it, before the editor's own edits,
+        /// The room-shell test's measure (docs/design/in-game-editor.md §11): ExtentOf the actor as its level file has it, before the editor's own edits,
         /// as editor_import and the build measure it at the file's pose. A scale or a turn made in the editor then never turns a
         /// prop into a room shell halfway through a drag, nor locks it after one. An actor with no edit stands as its file has
         /// it; an edit took the measure when it bound the actor (Bind). One bound while its level was not visible (a pass wrote
@@ -2671,7 +2671,7 @@ namespace MeleBridge::Editor
             return static_cast<float>(extent);
         }
 
-        /// Why Delete refuses an actor under Phase 3's rules (docs/07 §10).
+        /// Why Delete refuses an actor under Phase 3's rules (docs/design/in-game-editor.md §10).
         std::string Undeletable(AActor* actor)
         {
             if (actor->IsA(APawn::StaticClass()) || actor->IsA(AController::StaticClass())) return "pawns and controllers are not deleted";
@@ -2684,7 +2684,7 @@ namespace MeleBridge::Editor
             return {};
         }
 
-        /// The Kismet set (docs/07 §12): every object a SeqVar_Object's ObjValue or a SeqVar_ObjectList's ObjList names, in the
+        /// The Kismet set (docs/design/in-game-editor.md §12): every object a SeqVar_Object's ObjValue or a SeqVar_ObjectList's ObjList names, in the
         /// Kismet of a loaded level (the persistent one or a streaming level's), with the variable that names it. Read when first
         /// needed after a map change or a level turned visible. Only the loaded levels: a variable of a level not loaded is
         /// missed, and level_build's fork, which reads the whole file, has the last word.
@@ -2725,7 +2725,7 @@ namespace MeleBridge::Editor
             return it != G.Kismet.end() && it->second.first == actor->ObjectInternalInteger ? it->second.second : std::string{};
         }
 
-        /// The refusal of an actor Kismet holds (docs/07 §12), for effects and props alike: an import and a build would refuse
+        /// The refusal of an actor Kismet holds (docs/design/in-game-editor.md §12), for effects and props alike: an import and a build would refuse
         /// its edit anyway.
         std::string KismetRefusal(AActor* actor)
         {
@@ -2748,7 +2748,7 @@ namespace MeleBridge::Editor
             return Real(component) && GetProperty(component, L"bAutoActivate", 0) == true;
         }
 
-        /// Why the editor leaves an effect alone (docs/07 §12), in any level, ours included; empty when it edits it. One the game
+        /// Why the editor leaves an effect alone (docs/design/in-game-editor.md §12), in any level, ours included; empty when it edits it. One the game
         /// made at run time (an impact, a shield) has no load flags: no level file has it, and its entry would never match after a
         /// reload. One Kismet holds, or one that is off until Kismet or a matinee starts it, is the story's.
         std::string EffectRefusal(AActor* actor)
@@ -2760,7 +2760,7 @@ namespace MeleBridge::Editor
             return {};
         }
 
-        /// Why the vanilla gate refuses an actor (docs/07 §11); empty when it may change: a prop or an effect (by class) loaded
+        /// Why the vanilla gate refuses an actor (docs/design/in-game-editor.md §11); empty when it may change: a prop or an effect (by class) loaded
         /// from its file, that no loaded Kismet holds (§12), not a room shell (measured as its file has it: FileExtentOf), and, to
         /// be deleted, with no part that stays drawn while it is hidden. bStatic and bNoDelete no longer refuse it: hiding
         /// destroys nothing.
@@ -2782,7 +2782,7 @@ namespace MeleBridge::Editor
             return {};
         }
 
-        /// Why the editor refuses to delete an actor (deleting), or to move, turn or scale it; empty when it may (docs/07 §11). An
+        /// Why the editor refuses to delete an actor (deleting), or to move, turn or scale it; empty when it may (docs/design/in-game-editor.md §11). An
         /// editor spawn and an actor of our levels keep Phase 3's rules, and so does every actor while levels.json is missing. Any
         /// other actor is a vanilla one: VanillaRefusal. When the bridge can't tell whether its level is ours (Unsure), the
         /// refusal says what to do.
@@ -2795,12 +2795,12 @@ namespace MeleBridge::Editor
             if (IsCollection(actor)) return ClassRefusal(actor->Class);
             if (IsLight(actor))
             {
-                // A light is never hidden nor destroyed: Delete switches it off, so bStatic and bNoDelete don't matter (docs/07
-                // §11). Only a listed one is edited, a spawned one already deleted is not deleted again, and a light of the YAML
-                // already off is not switched off again (that would only make an edit that changes nothing). One of our levels
-                // that no levels.json entry names was built before the entry was (§12); one of a vanilla level is a light actor
-                // no map of ours streams. An NPC's light is edited only while its NPC stands where its offsets are measured
-                // from (the pose check).
+                // A light is never hidden nor destroyed: Delete switches it off, so bStatic and bNoDelete don't matter
+                // (docs/design/in-game-editor.md §11). Only a listed one is edited, a spawned one already deleted is not deleted
+                // again, and a light of the YAML already off is not switched off again (that would only make an edit that changes
+                // nothing). One of our levels that no levels.json entry names was built before the entry was (§12); one of a
+                // vanilla level is a light actor no map of ours streams. An NPC's light is edited only while its NPC stands where
+                // its offsets are measured from (the pose check).
                 if (!ListedLight(actor))
                     return Phase3Rules(actor) ? "no levels.json entry names this light (run mod_build)"
                                               : "a vanilla light actor; no map of ours streams one, so it can't ship";
@@ -2816,7 +2816,7 @@ namespace MeleBridge::Editor
                                        edit != nullptr ? Called(*edit) : NameFor(actor));
                 return {};
             }
-            // An effect is gated in our levels too (docs/07 §12): the game spawns impacts and shields into the map's own level.
+            // An effect is gated in our levels too (docs/design/in-game-editor.md §12): the game spawns impacts and shields into the map's own level.
             if (actor->IsA(AEmitter::StaticClass()))
             {
                 if (auto why = EffectRefusal(actor); !why.empty()) return why;
@@ -2838,7 +2838,7 @@ namespace MeleBridge::Editor
             return false;
         }
 
-        /// Whether an edit of a vanilla actor ships (docs/07 §11): the actor stands in a fork already, or in a vanilla file the
+        /// Whether an edit of a vanilla actor ships (docs/design/in-game-editor.md §11): the actor stands in a fork already, or in a vanilla file the
         /// running map streams (its levels.json streams), which the next build forks. Anything else is dev-only: the bridge
         /// re-applies it, no build ships it (and when the bridge can't tell whether the level is ours, Unsure says what to do).
         /// No text for an editor spawn or an actor of our levels.
@@ -2875,7 +2875,7 @@ namespace MeleBridge::Editor
         // ! Level lights
         // ========================================
 
-        /// A level light's command (docs/07 §12, 5b): the panel's change, a move, or a delete (it switches the light off).
+        /// A level light's command (docs/design/in-game-editor.md §12, 5b): the panel's change, a move, or a delete (it switches the light off).
         enum class LightOp { Change, Move, Delete };
 
         /// The vanilla file a collection of one of our levels was copied from (levels.json characterLights: the rig); empty for any
@@ -2888,7 +2888,7 @@ namespace MeleBridge::Editor
             return it != level->second.end() ? it->second : std::string{};
         }
 
-        /// Why the editor leaves a level light alone for a command (docs/07 §12, 5b), or empty. A collection of one of our levels
+        /// Why the editor leaves a level light alone for a command (docs/design/in-game-editor.md §12, 5b), or empty. A collection of one of our levels
         /// that no characterLights item names: no build writes its lights. A move of one its collection's matrix scales: its
         /// Translation would be scaled too. A delete of one already off. A light of a file no map of ours streams is edited all the
         /// same: its ships line says dev-only.
@@ -2907,7 +2907,7 @@ namespace MeleBridge::Editor
             return {};
         }
 
-        /// Whether a level light's edit ships (docs/07 §12, 5b): a characterLights copy's is built into the map; any other ships as
+        /// Whether a level light's edit ships (docs/design/in-game-editor.md §12, 5b): a characterLights copy's is built into the map; any other ships as
         /// an edit of its collection would (ShipsOf: in a fork, or dev-only).
         std::string LightShips(AActor* owner, AWorldInfo* world)
         {
@@ -2923,8 +2923,8 @@ namespace MeleBridge::Editor
             UPointLightComponent* Light = nullptr;
         };
 
-        /// The point and spot lights of a static light collection: its Components (at run time LightComponents is empty, docs/07
-        /// §12). Its sun and sky lights are other classes, so never among them.
+        /// The point and spot lights of a static light collection: its Components (at run time LightComponents is empty,
+        /// docs/design/in-game-editor.md §12). Its sun and sky lights are other classes, so never among them.
         template <typename Each>
         void LightsIn(AActor* owner, Each const& each)
         {
@@ -2938,7 +2938,7 @@ namespace MeleBridge::Editor
         // ! Prop lighting
         // ========================================
 
-        /// What the switch writes of a prop (docs/07 §11): its static mesh components that show a mesh through a dynamic light
+        /// What the switch writes of a prop (docs/design/in-game-editor.md §11): its static mesh components that show a mesh through a dynamic light
         /// environment, and those environments. None for a mesh lit by its lightmap (a StaticMeshActor's): the switch leaves it.
         struct PropParts
         {
@@ -2996,7 +2996,7 @@ namespace MeleBridge::Editor
         }
 
         /// The listed lights, our NPCs' lights, the switched props, the effects and our NPCs' pawns of the loaded levels
-        /// (ListedLight, NpcLightOf, SwitchedProp, NpcOfPawn, docs/07 §12), read again when stale. A level's tag lists are looked
+        /// (ListedLight, NpcLightOf, SwitchedProp, NpcOfPawn, docs/design/in-game-editor.md §12), read again when stale. A level's tag lists are looked
         /// up once per level, so no actor's path is built but a tracked one's, once. An NPC light is one whose edit has the npc
         /// kind, or whose tag levels.json names among its own level's npcs lights: it goes in OtherLights, which the props switch
         /// never walks. The point and spot lights of each static light collection go in LevelLights (5b), with their type, a
@@ -3130,7 +3130,7 @@ namespace MeleBridge::Editor
             return nullptr;
         }
 
-        /// Why an NPC's lights are not edited now (docs/07 §12), or empty. Their offsets are measured from the NPC's reference
+        /// Why an NPC's lights are not edited now (docs/design/in-game-editor.md §12), or empty. Their offsets are measured from the NPC's reference
         /// pose: levels.json must list the NPC, and its pawn, unless the editor moved or turned it in this session, must stand
         /// within 5 units and 2 degrees of its built pose. The game never moves our NPCs (spike S5); npc_place does, and rewrites
         /// levels.json, which CheckLevels reads again. That covers npc_place only while the map stays loaded: npc_place builds
@@ -3185,7 +3185,7 @@ namespace MeleBridge::Editor
             if (Visible(c.Actor)) UpdateComponents(c.Actor);
         }
 
-        /// A move or a turn of one of our NPCs takes its lights along (docs/07 §12), at each drag command: each to the pawn's
+        /// A move or a turn of one of our NPCs takes its lights along (docs/design/in-game-editor.md §12), at each drag command: each to the pawn's
         /// pose now plus its offset.
         void Carry()
         {
@@ -3199,7 +3199,7 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// Puts each light of an NPC at its reference pose plus its offset (docs/07 §12): after a pass wrote the NPC's edit.
+        /// Puts each light of an NPC at its reference pose plus its offset (docs/design/in-game-editor.md §12): after a pass wrote the NPC's edit.
         void PlaceLights(std::string const& tag)
         {
             auto const npc = NpcNamed(tag);
@@ -3231,7 +3231,7 @@ namespace MeleBridge::Editor
         /// Whether a seed gives nothing: brightness 0, or black (DarkSeed).
         bool Dark(Seed const& seed) { return seed.Brightness * Luminance(seed.Color) < DarkSeed; }
 
-        /// A new prop light's brightness and colour (docs/07 §11): the last prop light edited in this map, else the nearest prop
+        /// A new prop light's brightness and colour (docs/design/in-game-editor.md §11): the last prop light edited in this map, else the nearest prop
         /// light that is on, else 0.15 white. One that gives nothing is passed over: the new light would cover its prop, turn it
         /// black and make its target nothing, so the selection would read 100%.
         Seed SeedFor(FVector at, std::vector<LightSeen> const& lights)
@@ -3344,7 +3344,7 @@ namespace MeleBridge::Editor
             CallProcessEvent(environment, Fn.SetEnvironmentEnabled, &parms);
         }
 
-        /// The switch of docs/07 §11 for one shown prop of a visible level: covered by a light, its light environment off and its
+        /// The switch of docs/design/in-game-editor.md §11 for one shown prop of a visible level: covered by a light, its light environment off and its
         /// meshes on Gameplay_4 alone; not covered, its environment on and its meshes back on their own channels. A prop already so
         /// is left alone. The environment off first, then the channels, two reattaches (one leaves the environment's lights on the
         /// old channels: spike), then the environment on again when uncovered. Returns whether it wrote anything.
@@ -3443,7 +3443,7 @@ namespace MeleBridge::Editor
         // ! Effects
         // ========================================
 
-        /// Whether an effect's template loops (docs/07 §12): one of its emitters repeats for ever (EmitterLoops 0 in its first
+        /// Whether an effect's template loops (docs/design/in-game-editor.md §12): one of its emitters repeats for ever (EmitterLoops 0 in its first
         /// level of detail's required module). Else it ends, and a moved one shows nothing once it has.
         bool Loops(UParticleSystem* system)
         {
@@ -3471,7 +3471,7 @@ namespace MeleBridge::Editor
         }
 
         /// At the end of the tick: each effect a step changed (NoteChanged: a move, a turn, a delete, an undo or redo, a pass that
-        /// applied one) kills its particles and starts again where it is now (docs/07 §12), then the paused world runs 1.5 s
+        /// applied one) kills its particles and starts again where it is now (docs/design/in-game-editor.md §12), then the paused world runs 1.5 s
         /// (TickFor) so they show. Without the kill, the old particles stay where they were (spike S4). A deleted (hidden) one is
         /// only killed: it shows nothing, and SetHidden and the kill show at once while paused (S4), so it lets no world run.
         /// Live only: nothing of it ships.
@@ -3504,7 +3504,7 @@ namespace MeleBridge::Editor
                                           : "");
         }
 
-        /// At the end of the tick (docs/07 §12, 5b): after a step of a baked or character light (B, C: NoteChanged), each enabled
+        /// At the end of the tick (docs/design/in-game-editor.md §12, 5b): after a step of a baked or character light (B, C: NoteChanged), each enabled
         /// light environment whose owner stands within the light's reach before or after the step is reset (SetEnabled false,
         /// then true), then the paused world runs 1.5 s (TickFor): an environment takes in a light only while the world ticks
         /// (spike S2). A U or D light has a proxy, which its refresh updated. One switched to prop lights (§11) is off: left so.
@@ -3576,7 +3576,7 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// The prop an auto light was made for, while the link holds (docs/07 §11): neither ever saved, and the light unedited (a
+        /// The prop an auto light was made for, while the link holds (docs/design/in-game-editor.md §11): neither ever saved, and the light unedited (a
         /// move or a panel change clears MadeFor).
         std::optional<size_t> LinkOf(Edit const& light)
         {
@@ -3654,7 +3654,7 @@ namespace MeleBridge::Editor
             return from(alongX ? FVector{ toward, 0, 0 } : FVector{ 0, toward, 0 });
         }
 
-        /// A drag of a prop takes its linked auto light along (docs/07 §11's link), at each drag command, once the prop's
+        /// A drag of a prop takes its linked auto light along (docs/design/in-game-editor.md §11's link), at each drag command, once the prop's
         /// components were updated (its bounds are where it is now): the light goes where a fresh Auto light would, for the prop's
         /// bounds now and from the view now, with the radius that gives; its brightness, colour, falloff and kind stay.
         /// - The view now, not the light's old side: T is measured from it, so the light meets T by construction and neither the
@@ -3753,7 +3753,7 @@ namespace MeleBridge::Editor
             return wanted;
         }
 
-        /// The selected level light, for a command (docs/07 §12, 5b): none when no level light is selected, or when the editor
+        /// The selected level light, for a command (docs/design/in-game-editor.md §12, 5b): none when no level light is selected, or when the editor
         /// refuses it this command (said once, or with say).
         UPointLightComponent* LightTarget(char const* verb, LightOp op, void (*say)(std::string) = SayOnce)
         {
@@ -3766,7 +3766,7 @@ namespace MeleBridge::Editor
             return G.SelectedComp;
         }
 
-        /// A move of a level light (docs/07 §12, 5b): each drag command moves that light alone (MoveLight); the light environments
+        /// A move of a level light (docs/design/in-game-editor.md §12, 5b): each drag command moves that light alone (MoveLight); the light environments
         /// in its reach are reset once the drag ends (CloseDrag, Reset).
         void MoveLevelLight(FVector to)
         {
@@ -3792,7 +3792,7 @@ namespace MeleBridge::Editor
             edit->Saved = false;
         }
 
-        /// The panel on a level light (docs/07 §12, 5b): the kept writer, then the one-light refresh (a U or D light shows it at
+        /// The panel on a level light (docs/design/in-game-editor.md §12, 5b): the kept writer, then the one-light refresh (a U or D light shows it at
         /// once; a B or C one has no proxy, and characters take it when the drag ends: Reset). Its kind stays vanilla.
         void SetLevelLight(LightBlock wanted)
         {
@@ -3813,7 +3813,7 @@ namespace MeleBridge::Editor
             edit->Saved = false;
         }
 
-        /// Delete of a level light (docs/07 §12, 5b): switched off, a light step, never hidden nor destroyed; a baked one for
+        /// Delete of a level light (docs/design/in-game-editor.md §12, 5b): switched off, a light step, never hidden nor destroyed; a baked one for
         /// characters and props only (the walls keep their lightmaps). LightRefusal turns down one already off.
         void DeleteLevelLight()
         {
@@ -3852,7 +3852,7 @@ namespace MeleBridge::Editor
             UpdateComponents(actor);
             edit->Now.Location = to;
             edit->Saved = false;
-            // A moved NPC light has a new offset from its NPC's reference pose (docs/07 §12); Refusal made sure levels.json lists
+            // A moved NPC light has a new offset from its NPC's reference pose (docs/design/in-game-editor.md §12); Refusal made sure levels.json lists
             // the NPC.
             if (edit->Npc)
             {
@@ -3945,7 +3945,7 @@ namespace MeleBridge::Editor
         /// A field the command changes is held to the panel's range; one it sends back as the light has it passes as it is, so a
         /// lights: entry built outside the ranges (a radius of 6000) keeps it when another control moves. A command that changes
         /// nothing makes no edit. A prop light's brightness and colour seed the next prop light of the map. The kind is the
-        /// light's source's (docs/07 §12): only ours switch between prop and room lights, and an NPC's or a level's light keeps
+        /// light's source's (docs/design/in-game-editor.md §12): only ours switch between prop and room lights, and an NPC's or a level's light keeps
         /// its kind whatever the command says. A level light's goes to SetLevelLight.
         void SetLight(LightBlock wanted)
         {
@@ -3969,7 +3969,7 @@ namespace MeleBridge::Editor
             if (wanted.Kind == LightKind::Props) G.LastSeed = Seed{ wanted.Brightness, wanted.Color };
         }
 
-        /// Delete of a listed light (docs/07 §11): switched off, never destroyed nor hidden, so undo writes the old state back to the
+        /// Delete of a listed light (docs/design/in-game-editor.md §11): switched off, never destroyed nor hidden, so undo writes the old state back to the
         /// same actor. A built light: light.enabled false, a light step. A spawned light: deleted, like a spawned prop. Refusal has
         /// turned down a built light already off before anything touches it: it would leave an edit that changes nothing.
         void DeleteLight(AActor* actor)
@@ -4118,7 +4118,7 @@ namespace MeleBridge::Editor
                 // its prop brings it back once the prop fits, as after that drag.
                 if (step.Kind == StepKind::Move || step.Kind == StepKind::Turn || step.Kind == StepKind::Scale) light.DragDeleted = light.Deleted;
             }
-            // The lights a move or a turn of an NPC carried (docs/07 §12), where the step found or left them.
+            // The lights a move or a turn of an NPC carried (docs/design/in-game-editor.md §12), where the step found or left them.
             for (auto const& c : step.Carried) PutCarried(c, redo ? c.After : c.Before);
             // A level light is switched off, never hidden: it stays selectable.
             if (edit.Component) SelectLight(edit.Actor, edit.Comp);
@@ -4369,8 +4369,9 @@ namespace MeleBridge::Editor
             return actor;
         }
 
-        /// A PointLightMovable with a tag, through CallSpawnWithoutNoDelete: Light's default is bNoDelete, which Spawn refuses (docs/07
-        /// §11). The editor's lights and the ones a pass spawns again both come from here. Null when the engine refuses.
+        /// A PointLightMovable with a tag, through CallSpawnWithoutNoDelete: Light's default is bNoDelete, which Spawn refuses
+        /// (docs/design/in-game-editor.md §11). The editor's lights and the ones a pass spawns again both come from here. Null
+        /// when the engine refuses.
         AActor* SpawnLight(APlayerController* pc, std::string const& tag, FVector location)
         {
             auto const cls = APointLightMovable::StaticClass();
@@ -4385,7 +4386,7 @@ namespace MeleBridge::Editor
             return spawn.ReturnValue;
         }
 
-        /// A light for one of our NPCs (docs/07 §12): SpawnLight's PointLightMovable with the look of the build's default NPC
+        /// A light for one of our NPCs (docs/design/in-game-editor.md §12): SpawnLight's PointLightMovable with the look of the build's default NPC
         /// light template (LE1CP's PointLightToggleable_7 through Engine.pcc's archetypes): channels {bInitialized, Dynamic}, no
         /// dynamic shadows, bForceDynamicLight, no level filter, white with alpha 0, falloff 2. The class defaults would cast
         /// shadows on all four base channels. Its settings then go through the kept writer, which keeps this look. Add light and
@@ -4422,7 +4423,7 @@ namespace MeleBridge::Editor
                 why = "the engine refused to spawn a PointLightMovable";
                 return std::nullopt;
             }
-            // Its edit first: our writer writes only a light of ours, an editor spawn among them (docs/07 §12).
+            // Its edit first: our writer writes only a light of ours, an editor spawn among them (docs/design/in-game-editor.md §12).
             auto& edit = NewEdit(actor);
             edit.Spawned = true;
             edit.Light = light;
@@ -4535,7 +4536,7 @@ namespace MeleBridge::Editor
             Say(std::format("added prop light {} for {} (radius {:.0f}, brightness {:.2f})", Called(edit), NameFor(prop), edit.Light->Radius, edit.Light->Brightness));
         }
 
-        /// Add light (docs/07 §12): a light for one of our NPCs, the one an NPC section of the Lights tab names (tag), or the
+        /// Add light (docs/design/in-game-editor.md §12): a light for one of our NPCs, the one an NPC section of the Lights tab names (tag), or the
         /// selected pawn (no tag), at offset [60, 0, 80] from its reference pose, radius 100, brightness 1.2, with the default
         /// template's look (SpawnNpcLight), tagged <npc tag>_light_<run>_<n> and selected for the panel. One step: undone, it is
         /// deleted. No tick: an NPC light reaches its NPC at once, paused (spike S5), and a tick could move NPCs.
@@ -4650,7 +4651,7 @@ namespace MeleBridge::Editor
             G.LastPick = std::format("{}: not a light the editor lists any more", path);
         }
 
-        /// A click on an effect's icon, or on its row in the Effects tab (docs/07 §12): the effect at that path, refused or not
+        /// A click on an effect's icon, or on its row in the Effects tab (docs/design/in-game-editor.md §12): the effect at that path, refused or not
         /// (the Selection window says why).
         void PickEffect(std::string const& path)
         {
@@ -4668,7 +4669,7 @@ namespace MeleBridge::Editor
         /// A prop where the view points, facing the camera. The mesh is one in memory (the In this level list, or a catalog entry
         /// a level has), or a catalog entry's copy loaded from the catalog package; the session names the vanilla mesh and a
         /// vanilla file either way. With Auto light on, a spawn that no light covers, or that gets under 0.6 of its target from prop
-        /// lights, gets a prop light of its own, in the spawn's step and linked to it (docs/07 §11), unless it is too big for one.
+        /// lights, gets a prop light of its own, in the spawn's step and linked to it (docs/design/in-game-editor.md §11), unless it is too big for one.
         void Spawn(APlayerController* pc, UCanvas* canvas, Command const& c)
         {
             if (Fn.Spawn == nullptr || Fn.SetStaticMesh == nullptr || Fn.DeProject == nullptr || Fn.Trace == nullptr)
@@ -4750,7 +4751,7 @@ namespace MeleBridge::Editor
         // ! Save
         // ========================================
 
-        /// A session entry, version 2 or 3 (docs/07 §10, §12). imported is left out: a saved edit is a new state. What an install
+        /// A session entry, version 2 or 3 (docs/design/in-game-editor.md §10, §12). imported is left out: a saved edit is a new state. What an install
         /// may still show goes into installed instead, and the base keeps whether the YAML removes the actor when an import said
         /// so. A light's entry (§11) has no mesh, and a light block beside its pose and in its base; its rotation and scales are
         /// the actor's. An NPC light's (§12) also has an npc block (the pawn's tag and the offset), in its base too. A level
@@ -4804,7 +4805,7 @@ namespace MeleBridge::Editor
 
         /// Before Save writes an edit over the file's entry for it: each field the editor didn't change since the edit was last
         /// saved or read takes the entry's value, which an import may have moved on (a YAML value the merge kept, onConflict=yaml
-        /// included): the pose's, each of a light block's, and deleted (docs/07 §11). The actor follows when the edit has one (a
+        /// included): the pose's, each of a light block's, and deleted (docs/design/in-game-editor.md §11). The actor follows when the edit has one (a
         /// light's settings, then one reattach). Returns whether anything changed.
         bool TakeFileValues(Edit& e, json const& entry)
         {
@@ -4894,7 +4895,7 @@ namespace MeleBridge::Editor
         /// earlier file was moved to (then every edit of the map is written, saved ones too, since the earlier file had them), and
         /// the edits written; with none (only spawns deleted before their first save), the file is not rewritten. A file of a
         /// version this bridge doesn't know is left alone. The file is written as version 3 when an entry holds an npc or vanilla
-        /// light, else 2 (VersionFor, docs/07 §12).
+        /// light, else 2 (VersionFor, docs/design/in-game-editor.md §12).
         SessionWrite WriteSession(std::string const& map, std::vector<Edit*> const& unsaved, std::vector<Edit*> const& all)
         {
             if (map.empty()) throw BridgeError("the map name is empty");
@@ -5289,7 +5290,7 @@ namespace MeleBridge::Editor
             }
             // A level that turned visible: its actors' components were attached over several frames, some maybe before an edit
             // wrote its actor raw (a level not visible gets no component update). Updated again, they take the raw transform
-            // and flags. Its Kismet is read with the others' when next needed (docs/07 §12).
+            // and flags. Its Kismet is read with the others' when next needed (docs/design/in-game-editor.md §12).
             for (auto const& level : G.Levels)
             {
                 if (!level.Visible) continue;
@@ -5300,7 +5301,7 @@ namespace MeleBridge::Editor
                 for (auto const& e : G.Edits)
                 {
                     if (!Bound(e) || e.LevelObject != level.Level || e.LevelIndex != level.Index) continue;
-                    // A level light alone: a reattach of its collection would redo all of its lights (docs/07 §12, 5b).
+                    // A level light alone: a reattach of its collection would redo all of its lights (docs/design/in-game-editor.md §12, 5b).
                     if (e.Component) RefreshLight(e.Comp);
                     else UpdateComponents(e.Actor);
                 }
@@ -5382,7 +5383,7 @@ namespace MeleBridge::Editor
             return loaded;
         }
 
-        /// The loaded actor an entry or a detached edit names (docs/07 §10). A spawn: the one actor with its tag (a built copy). A
+        /// The loaded actor an entry or a detached edit names (docs/design/in-game-editor.md §10). A spawn: the one actor with its tag (a built copy). A
         /// level actor: by tag when exactly one loaded actor has it, it is a real tag, and that actor is in the entry's level and
         /// of its class (the same tag in another level is another actor while the entry's level isn't loaded); else by path with
         /// the same class. The entry's level is its vanilla file, or the running map's fork of it (§11), found by the rule: the
@@ -5524,7 +5525,7 @@ namespace MeleBridge::Editor
 
         enum class Verdict { Apply, Drop };
 
-        /// Rules 1 and 2 of docs/07 §10, for an entry and the actor it matched (null: a spawn no loaded actor has the tag of).
+        /// Rules 1 and 2 of docs/design/in-game-editor.md §10, for an entry and the actor it matched (null: a spawn no loaded actor has the tag of).
         /// builtHidden: the actor is hidden, and the YAML's state it was judged by says the YAML removes it (the build hid it, not
         /// the game): an entry that shows it shows it again. A light is compared by HasLight, and is never built hidden: every
         /// light is bHidden by class default (§11).
@@ -5601,7 +5602,7 @@ namespace MeleBridge::Editor
                 e.MeshFile = Text(*mesh, "file");
                 e.MeshLoad = Text(*mesh, "load");
             }
-            // A light's settings (docs/07 §11); a field the block lacks is a fresh light's. An NPC light's NPC and offset (§12).
+            // A light's settings (docs/design/in-game-editor.md §11); a field the block lacks is a fresh light's. An NPC light's NPC and offset (§12).
             if (HasLightBlock(entry)) e.Light = LightFrom(entry, LightBlock{});
             if (e.Light) e.Npc = NpcFrom(entry, std::nullopt);
             // A level light's collection and type (5b); BindLight reads the type again from the light.
@@ -5687,7 +5688,7 @@ namespace MeleBridge::Editor
         }
 
         /// An edit's own spawn, replaced by the built copy: destroyed, or hidden if the engine refuses (a light switched off: it is
-        /// never hidden; through the writer its kind takes, docs/07 §12).
+        /// never hidden; through the writer its kind takes, docs/design/in-game-editor.md §12).
         void DestroySpawn(Edit const& e)
         {
             auto const actor = e.Actor;
@@ -5706,7 +5707,7 @@ namespace MeleBridge::Editor
         /// them), else the catalog package's copy by mesh.load, else by the catalog entry with that vanilla mesh. Returns how many.
         int Respawn(APlayerController* pc, std::vector<size_t> const& which)
         {
-            // Lights first: a light has no mesh, and comes back through the same helper as the editor's (docs/07 §11), an NPC's
+            // Lights first: a light has no mesh, and comes back through the same helper as the editor's (docs/design/in-game-editor.md §11), an NPC's
             // with the NPC light look (§12), not the class defaults.
             int count = 0;
             std::vector<size_t> props;
@@ -5854,7 +5855,7 @@ namespace MeleBridge::Editor
             // Before the write: the copy as built.
             if (!e.Base && source.is_object() && !source.contains("base")) TakeBase(e, actor);
             if (builtHidden) TakeBuiltHidden(e);
-            // An NPC light stands at its NPC's reference pose plus its offset (docs/07 §12): the pawn's edit may have moved since.
+            // An NPC light stands at its NPC's reference pose plus its offset (docs/design/in-game-editor.md §12): the pawn's edit may have moved since.
             auto place = pose;
             if (NpcPlace(e, place.Location)) e.Saved = false;
             Put(e, place, deleted);
@@ -5899,7 +5900,7 @@ namespace MeleBridge::Editor
 
         /// Removes the entries a pass dropped from the map's session file, each only if the file still has it as it was read (a
         /// save or an import since leaves it alone). Same temp-file write as Save. A version 2 or 3 file's version follows what
-        /// is left (VersionFor, docs/07 §12); a version 1 file stays 1.
+        /// is left (VersionFor, docs/design/in-game-editor.md §12); a version 1 file stays 1.
         void DropEntries(std::string const& map, std::vector<json> const& dropped)
         {
             try
@@ -5977,7 +5978,7 @@ namespace MeleBridge::Editor
             return true;
         }
 
-        /// One re-apply pass (docs/07 §10): built copies take over spawned-again spawns, detached edits find their actor again,
+        /// One re-apply pass (docs/design/in-game-editor.md §10): built copies take over spawned-again spawns, detached edits find their actor again,
         /// and the session's entries are matched, judged and applied, dropped, or left waiting. An NPC light's entry or edit waits
         /// while its NPC fails the pose check, and is placed at its NPC's reference pose plus its offset; a pawn of ours the pass
         /// wrote takes its lights along (§12).
@@ -6049,7 +6050,7 @@ namespace MeleBridge::Editor
                 {
                     if (!TakeOver(e, actor, loaded, dropped)) continue;
                     applied++;
-                    // An effect's particles start again where it is now (docs/07 §12).
+                    // An effect's particles start again where it is now (docs/design/in-game-editor.md §12).
                     NoteChanged(i);
                     carrier(actor);
                 }
@@ -6097,7 +6098,7 @@ namespace MeleBridge::Editor
                     entry.Why = why;
                     continue;
                 }
-                // An NPC light waits while its NPC fails the pose check (docs/07 §12): its offsets are measured from a pose the
+                // An NPC light waits while its NPC fails the pose check (docs/design/in-game-editor.md §12): its offsets are measured from a pose the
                 // pawn is not at.
                 if (auto const link = KindIn(a) == LightKind::Npc ? NpcFrom(a, std::nullopt) : std::nullopt)
                 {
@@ -6168,7 +6169,7 @@ namespace MeleBridge::Editor
             std::erase_if(G.Entries, [](Entry const& entry) { return entry.Done; });
 
             auto const spawned = Respawn(pc, respawn);
-            // Our NPCs the pass moved or turned take their lights along, spawned again ones included (docs/07 §12).
+            // Our NPCs the pass moved or turned take their lights along, spawned again ones included (docs/design/in-game-editor.md §12).
             if (!carriers.empty())
             {
                 G.TrackedStale = true;
@@ -6230,7 +6231,7 @@ namespace MeleBridge::Editor
             G.SummaryStale = true;
         }
 
-        /// A map change or a load (docs/07 §10). Every edit lets go of its actor (the old world's actors are gone, and a new actor
+        /// A map change or a load (docs/design/in-game-editor.md §10). Every edit lets go of its actor (the old world's actors are gone, and a new actor
         /// in a reused slot would take its moves); the unsaved ones are saved from their stored state; the edits of each map
         /// written are cleared, those of a map whose file could not be written stay, detached and unsaved, for the next Save to
         /// retry; undo starts empty; and the new map's session waits for the first pass.
@@ -6283,7 +6284,7 @@ namespace MeleBridge::Editor
             G.PassFaulted = false;
             G.PassWanted = false;
             G.PassNow = true;
-            // The props, lights and effects of the old world are gone, and a new prop light's seed is this map's (docs/07 §11). So is
+            // The props, lights and effects of the old world are gone, and a new prop light's seed is this map's (docs/design/in-game-editor.md §11). So is
             // its Kismet (§12).
             G.Lights.clear();
             G.OtherLights.clear();
@@ -6384,7 +6385,7 @@ namespace MeleBridge::Editor
             return text;
         }
 
-        /// A selected level light, for the Selection window and the panel (docs/07 §12, 5b): the component where its Translation
+        /// A selected level light, for the Selection window and the panel (docs/design/in-game-editor.md §12, 5b): the component where its Translation
         /// puts it, with no rotation and scale 1, its collection as its tag, its type, its refusals per command, its ships line
         /// when the panel edits it, its base when it has an edit, and a U light's channels (read once per selection).
         void PublishLevelLight(Snapshot& s, AWorldInfo* world, UCanvas* canvas)
@@ -6478,7 +6479,7 @@ namespace MeleBridge::Editor
                 {
                     s.SelectedLight = true;
                     s.SelectedLightBlock = edit != nullptr && edit->Light ? *edit->Light : LightOf(actor, SourceOf(actor));
-                    // An NPC's light (docs/07 §12): its NPC, its offset, and the reference pose the overlay marks.
+                    // An NPC's light (docs/design/in-game-editor.md §12): its NPC, its offset, and the reference pose the overlay marks.
                     if (auto const link = NpcLinkOf(actor))
                     {
                         s.SelectedNpcTag = link->Tag;
@@ -6495,7 +6496,7 @@ namespace MeleBridge::Editor
                 }
                 else if (actor->IsA(AEmitter::StaticClass()))
                 {
-                    // Its template, and whether it loops or ends (docs/07 §12): one that ends shows nothing once its 1.5 s ran.
+                    // Its template, and whether it loops or ends (docs/design/in-game-editor.md §12): one that ends shows nothing once its 1.5 s ran.
                     auto const component = static_cast<AEmitter*>(actor)->ParticleSystemComponent;
                     auto const system = TemplateOf(component);
                     s.SelectedEffect = true;
@@ -6559,7 +6560,7 @@ namespace MeleBridge::Editor
                     icon.Metres = metres;
                     s.Lights.push_back(std::move(icon));
                 }
-                // Our NPCs of the visible levels, lights or not, for the Lights tab's sections (docs/07 §12); then the NPC of a
+                // Our NPCs of the visible levels, lights or not, for the Lights tab's sections (docs/design/in-game-editor.md §12); then the NPC of a
                 // listed light whose NPC's level is not visible (Away), or that levels.json no longer lists, so the light still
                 // has a section.
                 for (auto const& level : G.Levels)
@@ -6667,7 +6668,7 @@ namespace MeleBridge::Editor
                 G.PassNow = G.PassWanted = false;
                 if (!G.PassFaulted && PassNeeded()) RunPass(pc);
                 // After each pass, and each time the loaded levels settle: every switched prop, for the props and lights that came,
-                // went or were re-applied (docs/07 §11).
+                // went or were re-applied (docs/design/in-game-editor.md §11).
                 G.TrackedStale = true;
                 G.ReswitchAll = true;
             }
@@ -6685,7 +6686,7 @@ namespace MeleBridge::Editor
                 LEASI_ERROR("editor: the overlay failed, editor closed");
                 SetOpen(pc, false);
             }
-            // npc_place may have rebuilt it meanwhile (docs/07 §12).
+            // npc_place may have rebuilt it meanwhile (docs/design/in-game-editor.md §12).
             if (G.Open) CheckLevels(false);
 
             std::deque<Command> commands;
@@ -6975,7 +6976,7 @@ namespace MeleBridge::Editor
                                    { "ships", orNull(s.SelectedShips) }, { "file", orNull(s.SelectedFile) }, { "light", nullptr },
                                    { "npc", nullptr }, { "propLighting", nullptr }, { "effect", nullptr } };
             if (s.SelectedLight) state["selection"]["light"] = lightJson(s.SelectedLightBlock);
-            // An NPC light's NPC, its offset [forward, right, up] and the reference pose it is measured from (docs/07 §12).
+            // An NPC light's NPC, its offset [forward, right, up] and the reference pose it is measured from (docs/design/in-game-editor.md §12).
             if (!s.SelectedNpcTag.empty())
                 state["selection"]["npc"] = { { "name", orNull(s.SelectedNpcName) }, { "tag", s.SelectedNpcTag }, { "offset", vector(s.SelectedOffset) },
                                               { "pose", s.SelectedHasPose ? json{ { "location", vector(s.SelectedPoseLocation) }, { "yaw", s.SelectedPoseYaw } } : json(nullptr) } };

@@ -20,21 +20,48 @@ public sealed record CatalogMesh(string Path, string Name, string Source, string
     bool Forced, string Curation, string? Category, bool Curated, bool Large);
 
 /// <param name="FilesSkipped">Our own mods' files: they only copy vanilla meshes, and the catalog's own package must not list itself.</param>
+/// <param name="DlcSkipped">The DLC folders whose files were left out (<see cref="CatalogIndex.OwnDlc"/>), each with why.</param>
 /// <param name="Cached">The index of an earlier call, reused: no loaded file changed since (size and time).</param>
 /// <param name="Matches">Meshes the search matched; Meshes holds up to 'limit' of them.</param>
-public sealed record CatalogIndexResult(int FilesScanned, int FilesWithMeshes, IReadOnlyList<string> FilesSkipped, int MeshExports, int UniqueMeshes, int Curated,
+public sealed record CatalogIndexResult(int FilesScanned, int FilesWithMeshes, IReadOnlyList<string> FilesSkipped, IReadOnlyList<SkippedDlc> DlcSkipped, int MeshExports, int UniqueMeshes, int Curated,
     IReadOnlyDictionary<string, int> ByCuration, IReadOnlyDictionary<string, int> CuratedByCategory, double ScanSeconds, bool Cached,
     int Errors, IReadOnlyList<string> ErrorSamples, string? Search, int Matches, IReadOnlyList<CatalogMesh> Meshes);
+
+/// <param name="Folder">A DLC folder of our own mods, e.g. DLC_MOD_MyMod.</param>
+/// <param name="Why">The catalog's own; MELE_OWN_DLC lists it; or, with MELE_OWN_DLC unset, levels.json says level_build built a level into it.</param>
+/// <param name="Files">Its files the game loads, left out.</param>
+public sealed record SkippedDlc(string Folder, string Why, int Files);
 
 /// <summary>
 /// Every StaticMesh of the files the game loads (LE1CP's copy of a file wins over the vanilla one), one row per InstancedFullPath:
 /// the file to copy it from, its size, triangles, how often levels place it, and its category in the editor's prop menu
-/// (docs/07 §3.5). Reads export tables and the meshes' and StaticMeshComponents' data only, on every core: about 3 s warm.
+/// (docs/design/in-game-editor.md §3.5). Reads export tables and the meshes' and StaticMeshComponents' data only, on every core: about 3 s warm.
 /// </summary>
 public sealed class CatalogIndex
 {
-    /// <summary>DLC folders of our own mods, left out: the catalog lists vanilla meshes, never its own copies.</summary>
-    public static readonly string[] OwnDlc = ["DLC_MOD_ClaudeChakwas", "DLC_MOD_MeleCatalog"];
+    /// <summary>Comma-separated DLC folders of the mods you build (e.g. DLC_MOD_MyMod), left out of the index as the catalog's own is.</summary>
+    public const string OwnDlcEnvVar = "MELE_OWN_DLC";
+
+    /// <summary>
+    /// DLC folders of our own mods, left out, with why: the catalog lists vanilla meshes, never its own copies, and a built mod's
+    /// levels copy vanilla meshes (listed, they would count twice, and a small level could become the file a mesh is copied from).
+    /// The catalog's dev mod, and the folders <see cref="OwnDlcEnvVar"/> names; with it unset, the ones levels.json says level_build
+    /// built into (<see cref="LevelBuilder.BuiltDlcFolders"/>).
+    /// </summary>
+    public static List<(string Folder, string Why)> OwnDlc()
+    {
+        var own = new List<(string Folder, string Why)> { (CatalogBuilder.DlcName, "the prop catalog's own mod") };
+        var listed = Environment.GetEnvironmentVariable(OwnDlcEnvVar);
+        if (!string.IsNullOrWhiteSpace(listed))
+        {
+            own.AddRange(listed.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(d => (d, $"{OwnDlcEnvVar} lists it")));
+        }
+        else
+        {
+            own.AddRange(LevelBuilder.BuiltDlcFolders().Select(d => (d, $"{OwnDlcEnvVar} is unset, and levels.json says level_build built a level into it")));
+        }
+        return own.DistinctBy(o => o.Folder, StringComparer.OrdinalIgnoreCase).ToList();
+    }
 
     private static readonly object Gate = new();
     private static (MEGame Game, long Signature, CatalogIndex Index)? last;
@@ -43,6 +70,7 @@ public sealed class CatalogIndex
     public required int FilesScanned { get; init; }
     public required int FilesWithMeshes { get; init; }
     public required IReadOnlyList<string> FilesSkipped { get; init; }
+    public required IReadOnlyList<SkippedDlc> DlcSkipped { get; init; }
     public required int MeshExports { get; init; }
     public required double ScanSeconds { get; init; }
     public required IReadOnlyList<string> Errors { get; init; }
@@ -52,7 +80,7 @@ public sealed class CatalogIndex
 
     public CatalogMesh? Find(string path) => byPath.GetValueOrDefault(path.Trim());
 
-    /// <summary>The index, scanned again only when a file the game loads was added, removed or changed since the last scan.</summary>
+    /// <summary>The index, scanned again only when a file the game loads was added, removed or changed, or the folders left out changed, since the last scan.</summary>
     public static CatalogIndex Load(MEGame game)
     {
         if (!game.IsGame1()) throw new ArgumentException("The prop catalog handles Game 1 (LE1).");
@@ -61,12 +89,13 @@ public sealed class CatalogIndex
             .Where(kv => kv.Key.EndsWith(".pcc", StringComparison.OrdinalIgnoreCase))
             .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        var signature = Signature(files.Select(kv => kv.Value));
+        var own = OwnDlc();
+        var signature = HashCode.Combine(Signature(files.Select(kv => kv.Value)), string.Join(',', own.Select(o => o.Folder.ToLowerInvariant())));
         lock (Gate)
         {
             if (last is { } l && l.Game == game && l.Signature == signature) return l.Index.With(cached: true);
         }
-        var index = Scan(files);
+        var index = Scan(files, own);
         lock (Gate) last = (game, signature, index);
         return index;
     }
@@ -87,7 +116,7 @@ public sealed class CatalogIndex
         var matches = filtered ? found.OrderByDescending(m => m.Curated).ThenByDescending(m => m.Placed).ThenBy(m => m.Path, StringComparer.OrdinalIgnoreCase).ToList() : [];
 
         var curated = index.Meshes.Where(m => m.Curated).ToList();
-        return new CatalogIndexResult(index.FilesScanned, index.FilesWithMeshes, index.FilesSkipped, index.MeshExports, index.Meshes.Count, curated.Count,
+        return new CatalogIndexResult(index.FilesScanned, index.FilesWithMeshes, index.FilesSkipped, index.DlcSkipped, index.MeshExports, index.Meshes.Count, curated.Count,
             CatalogRules.Curations.ToDictionary(c => c, c => index.Meshes.Count(m => m.Curation == c)),
             CatalogRules.Categories.ToDictionary(c => c, c => curated.Count(m => m.Category == c)),
             index.ScanSeconds, index.Cached, index.Errors.Count, index.Errors.Take(10).ToList(),
@@ -96,11 +125,12 @@ public sealed class CatalogIndex
 
     private sealed record Row(string File, string FilePath, long FileBytes, string Path, bool Forced, float[] Dims, int Tris);
 
-    private static CatalogIndex Scan(List<KeyValuePair<string, string>> loaded)
+    private static CatalogIndex Scan(List<KeyValuePair<string, string>> loaded, List<(string Folder, string Why)> own)
     {
         var sw = Stopwatch.StartNew();
-        var skipped = loaded.Where(kv => IsOwn(kv.Value)).Select(kv => kv.Key).ToList();
-        var files = loaded.Where(kv => !IsOwn(kv.Value)).ToList();
+        string? OwnOf(string path) => own.Select(o => o.Folder).FirstOrDefault(d => path.Contains($"\\{d}\\", StringComparison.OrdinalIgnoreCase));
+        var skipped = loaded.Where(kv => OwnOf(kv.Value) is not null).ToList();
+        var files = loaded.Where(kv => OwnOf(kv.Value) is null).ToList();
         var rows = new ConcurrentBag<Row>();
         var placed = new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var errors = new ConcurrentBag<string>();
@@ -170,7 +200,8 @@ public sealed class CatalogIndex
             byPath = meshes.ToDictionary(m => m.Path, StringComparer.OrdinalIgnoreCase),
             FilesScanned = files.Count,
             FilesWithMeshes = withMeshes,
-            FilesSkipped = skipped,
+            FilesSkipped = skipped.Select(kv => kv.Key).ToList(),
+            DlcSkipped = own.Select(o => new SkippedDlc(o.Folder, o.Why, skipped.Count(kv => OwnOf(kv.Value) == o.Folder))).ToList(),
             MeshExports = rows.Count,
             ScanSeconds = Math.Round(sw.Elapsed.TotalSeconds, 2),
             Errors = errors.Order(StringComparer.Ordinal).ToList(),
@@ -179,11 +210,9 @@ public sealed class CatalogIndex
 
     private CatalogIndex With(bool cached) => new()
     {
-        Meshes = Meshes, byPath = byPath, FilesScanned = FilesScanned, FilesWithMeshes = FilesWithMeshes, FilesSkipped = FilesSkipped,
+        Meshes = Meshes, byPath = byPath, FilesScanned = FilesScanned, FilesWithMeshes = FilesWithMeshes, FilesSkipped = FilesSkipped, DlcSkipped = DlcSkipped,
         MeshExports = MeshExports, ScanSeconds = ScanSeconds, Errors = Errors, Cached = cached,
     };
-
-    private static bool IsOwn(string path) => OwnDlc.Any(d => path.Contains($"\\{d}\\", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// The bounds box's full size from the 28 bytes after the properties (BoxSphereBounds: origin, extent, radius), the first

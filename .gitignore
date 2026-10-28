@@ -5,3 +5,4 @@ obj/
 .mcp.json
 .claude/settings.local.json
 dist/
+build.env

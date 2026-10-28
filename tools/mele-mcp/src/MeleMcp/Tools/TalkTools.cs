@@ -55,9 +55,9 @@ public static class TalkTools
                  + "Status, worst first: broken, other-voice (plays a wave named for another line: wrong words), no-vo-track, no-set, "
                  + "no-facefx (no lips, no voice), silent (lips move, no sound: our new lines), unchecked, voiced. Give a mod (all its packages) or one package.")]
     public static ConvAudioResult ConvAudio(
-        [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'Claude Test Chakwas'.")] string? mod = null,
+        [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'My Mod'.")] string? mod = null,
         [Description("One package instead of a mod, e.g. BIOA_NOR10_11_DSG_LOC_FR.pcc. File name or full path.")] string? package = null,
-        [Description("Substring of the conversation name, e.g. ClaudeReyes.")] string? conversation = null,
+        [Description("Substring of the conversation name, e.g. req_officer.")] string? conversation = null,
         [Description("Language of the text and of the _LOC_ packages read (each has its own audio): INT, FR, DE, IT...")] string language = "FR",
         [Description("Also list voiced lines.")] bool includeVoiced = false,
         [Description("Also list lines no link leads to (template leftovers).")] bool includeUnreachable = false,

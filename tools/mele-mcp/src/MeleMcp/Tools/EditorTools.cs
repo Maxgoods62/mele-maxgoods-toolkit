@@ -4,7 +4,7 @@ using ModelContextProtocol.Server;
 
 namespace MeleMcp.Tools;
 
-/// <summary>The in-game editor's saved work (MeleBridge, F8; docs/07-ingame-editor.md) brought into the mod's files. Offline: the game need not run.</summary>
+/// <summary>The in-game editor's saved work (MeleBridge, F8; docs/design/in-game-editor.md) brought into the mod's files. Offline: the game need not run.</summary>
 [McpServerToolType]
 public static class EditorTools
 {

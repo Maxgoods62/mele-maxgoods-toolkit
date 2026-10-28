@@ -11,7 +11,9 @@ public static class PackageWriter
 {
     /// <summary>Backups go outside the mod folder, otherwise M3 would install them into the game.</summary>
     public const string BackupDirEnvVar = "MELE_BACKUP_DIR";
-    private const string DefaultBackupDir = @"D:\MELE\backups\mele-mcp";
+
+    /// <summary>%LOCALAPPDATA%\mele-mcp\backups, when <see cref="BackupDirEnvVar"/> is not set.</summary>
+    private static string DefaultBackupDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "mele-mcp", "backups");
 
     public static (T Result, string BackupPath) Edit<T>(MEGame game, string fileOrPath, Func<IMEPackage, T> mutate)
     {

@@ -8,7 +8,8 @@ namespace MeleMcp.Tools;
 public static class StatusTools
 {
     [McpServerTool(Name = "le_status", ReadOnly = true),
-     Description("Initializes LegendaryExplorerCore if needed and reports its version, the resolved LE1/LE2/LE3 game paths and whether the Oodle decompressor loaded.")]
+     Description("Initializes LegendaryExplorerCore if needed and reports its version, the Legendary Edition folder and where it came from "
+                 + "(MELE_LE_DIR, else the registry), the resolved LE1/LE2/LE3 game paths and whether the Oodle decompressor loaded.")]
     public static LecStatus LeStatus() => ToolErrors.Run(LecHost.EnsureInitialized);
 
     [McpServerTool(Name = "le_refresh_files", Idempotent = true),

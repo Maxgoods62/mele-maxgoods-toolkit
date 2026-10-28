@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace MeleMcp.Core;
 
 /// <summary>
-/// Which StaticMeshes the in-game editor's prop menu lists by default, and under which category (docs/07 §3.5). Name rules,
+/// Which StaticMeshes the in-game editor's prop menu lists by default, and under which category (docs/design/in-game-editor.md §3.5). Name rules,
 /// matched without case and in order; the 2026-10-27 catalog study tuned them on every unique LE1 mesh (5,226).
 /// </summary>
 public static class CatalogRules

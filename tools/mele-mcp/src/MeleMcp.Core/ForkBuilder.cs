@@ -33,8 +33,8 @@ public sealed record BuiltFork(string File, string Fork, string ForkPath, string
     IReadOnlyList<ForkedActor> Actors, IReadOnlyList<ForkLocalized> Localized);
 
 /// <summary>
-/// Forks of vanilla level files (docs/07 §11): a renamed copy of a file the map streams, in which vanilla actors are moved, turned,
-/// scaled or hidden, and the lights of its light collections changed (docs/07 §12.4, <see cref="SlcaLights"/>), and which the map
+/// Forks of vanilla level files (docs/design/in-game-editor.md §11): a renamed copy of a file the map streams, in which vanilla actors are moved, turned,
+/// scaled or hidden, and the lights of its light collections changed (docs/design/in-game-editor.md §12.4, <see cref="SlcaLights"/>), and which the map
 /// streams instead of the file. The copy keeps everything else of the file; only its self
 /// Package export (a forced export named as the file) is renamed, so the game loads it beside, not over, the vanilla one. The file's
 /// localized packages (&lt;file&gt;_LOC_&lt;language&gt;), which the game loads by the streamed package's name, are copied under the fork's. Fork
@@ -104,7 +104,7 @@ public static class ForkBuilder
 
     private static string Bare(string name) => name.StartsWith("BIOA_", StringComparison.OrdinalIgnoreCase) ? name[5..] : name;
 
-    /// <summary>The DLC folder a file lies in (DLC_MOD_ClaudeChakwas); null outside one.</summary>
+    /// <summary>The DLC folder a file lies in (DLC_MOD_MyMod); null outside one.</summary>
     internal static string? DlcOf(string path)
     {
         for (var dir = Path.GetDirectoryName(Path.GetFullPath(path)); !string.IsNullOrEmpty(dir); dir = Path.GetDirectoryName(dir))
@@ -337,7 +337,7 @@ public static class ForkBuilder
     }
 
     /// <summary>
-    /// Applies a light entry to its component of a light collection (docs/07 §12.4): Brightness, LightColor, Radius, FalloffExponent and
+    /// Applies a light entry to its component of a light collection (docs/design/in-game-editor.md §12.4): Brightness, LightColor, Radius, FalloffExponent and
     /// bEnabled as given, and a location as Translation through the collection's binary matrix (<see cref="SlcaLights.Write"/>); null
     /// (with the reason in <paramref name="refusals"/>) when it may not change. Its receipt is one line, with its light type.
     /// </summary>

@@ -103,7 +103,7 @@ public static class LiveTools
         }, timeoutSeconds));
 
     [McpServerTool(Name = "live_editor", ReadOnly = true),
-     Description("The in-game editor's state (MeleBridge ASI, F8 in the game; docs/07-ingame-editor.md): open, free cam, camera, canvas "
+     Description("The in-game editor's state (MeleBridge ASI, F8 in the game; docs/design/in-game-editor.md): open, free cam, camera, canvas "
                  + "and back buffer sizes, the selection, the last click, the projection check (the overlay's arrows against the engine's "
                  + "Canvas.Project, in pixels), which hooks are in, thread ids and input counters. Answers without the game thread, so it "
                  + "works while paused or loading.")]

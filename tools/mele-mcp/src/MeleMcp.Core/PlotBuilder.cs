@@ -58,7 +58,8 @@ public static partial class PlotBuilder
         public readonly Dictionary<int, Dictionary<string, string>> Strings = [];
     }
 
-    public static PlotBuildResult Build(MEGame game, string yamlPath, string? packageOverride)
+    /// <param name="outRoot">mod_build out=: the mod root to build into instead (see <see cref="YamlFiles.Target"/>).</param>
+    public static PlotBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null)
     {
         if (!game.IsGame1()) throw new ArgumentException("plot_build handles Game 1 (LE1) plots.");
         LecHost.EnsureInitialized();
@@ -67,14 +68,12 @@ public static partial class PlotBuilder
         var spec = Parse(File.ReadAllText(file));
         var dir = Path.GetDirectoryName(file)!;
 
-        // A missing package is created, but only from a full path: a bare name could resolve into the game install.
-        var candidate = GamePaths.ToWindowsPath(packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."));
-        var create = Path.IsPathRooted(candidate) && !File.Exists(candidate);
-        var package = create ? Path.GetFullPath(candidate) : Locate(game, candidate, dir);
-        var globals = spec.GlobalTlk.Select(g => Locate(game, g, Path.GetDirectoryName(package)!, dir)).ToList();
-        if (spec.Strings.Count > 0 && globals.Count == 0) throw new ArgumentException("The file gives journal text but no 'globalTlk' to write it to (the journal reads only the GlobalTlk).");
+        // A missing package is created from a full path or one under the mod root, never from a bare name: it could resolve into the game install.
         var notes = new List<string>();
-        var autoload = FindAutoLoad(spec.AutoLoad, package, dir, notes);
+        var (package, create) = Target(game, packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."), dir, outRoot, notes);
+        var globals = spec.GlobalTlk.Select(g => InOut(Locate(game, g, Path.GetDirectoryName(package)!, dir), outRoot, "globalTlk")).ToList();
+        if (spec.Strings.Count > 0 && globals.Count == 0) throw new ArgumentException("The file gives journal text but no 'globalTlk' to write it to (the journal reads only the GlobalTlk).");
+        var autoload = FindAutoLoad(spec.AutoLoad, package, dir, notes) is { } ini ? InOut(ini, outRoot, "autoload") : null;
         foreach (var target in globals.Prepend(package).Concat(autoload is null ? [] : [autoload])) PackageWriter.EnsureWritable(game, target);
 
         if (create)
@@ -226,7 +225,7 @@ public static partial class PlotBuilder
     private static Spec Parse(string yaml)
     {
         var spec = new Spec();
-        foreach (var (key, value) in Entries(Root(yaml), "package", "autoload", "defaultLanguage", "globalTlk", "transitions", "consequences", "quests"))
+        foreach (var (key, value) in TopLevel(Root(yaml), "package", "autoload", "defaultLanguage", "globalTlk", "transitions", "consequences", "quests"))
         {
             switch (key)
             {

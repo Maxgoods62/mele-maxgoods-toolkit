@@ -87,10 +87,10 @@ namespace MeleBridge::Editor
         unsigned long long StatusSeen = 0;
         LARGE_INTEGER StatusSince{};
         /// The Lights or the Effects tab is open this frame: a click near one of that tab's icons selects it, as with Alt held
-        /// (docs/07 §12).
+        /// (docs/design/in-game-editor.md §12).
         bool LightsTabOpen = false;
         bool EffectsTabOpen = false;
-        /// The Lights tab's toggles for the levels' own lights (docs/07 §12, 5b): the other lights of the static light collections,
+        /// The Lights tab's toggles for the levels' own lights (docs/design/in-game-editor.md §12, 5b): the other lights of the static light collections,
         /// and among them the baked ones (B). The map's characterLights copies are always listed.
         bool ShowLevelLights = false;
         bool ShowBaked = false;
@@ -104,7 +104,7 @@ namespace MeleBridge::Editor
         /// Light and effect icons are this big; a click this close to one selects its light or effect.
         constexpr float IconRadius = 7;
         constexpr float IconPickPixels = 12;
-        /// Untouched effects get an icon within 30 m of the camera, at most 50 of them, nearest first (docs/07 §12).
+        /// Untouched effects get an icon within 30 m of the camera, at most 50 of them, nearest first (docs/design/in-game-editor.md §12).
         constexpr float EffectIconReach = 3000;
         constexpr size_t MaxEffectIcons = 50;
         /// Untouched level lights (5b): at most 150, nearest first (the game thread lists those within 30 m).
@@ -339,7 +339,7 @@ namespace MeleBridge::Editor
             return s.SelectedDrawScale <= 0 || s.SelectedDrawScale3D.X <= 0 || s.SelectedDrawScale3D.Y <= 0 || s.SelectedDrawScale3D.Z <= 0;
         }
 
-        /// Why the editor won't change the selection with any tool (a vanilla door, a room shell: docs/07 §11), or empty. Not a
+        /// Why the editor won't change the selection with any tool (a vanilla door, a room shell: docs/design/in-game-editor.md §11), or empty. Not a
         /// reason to keep a tool from being chosen: the next selection may take it.
         std::string ActorRefusal(Snapshot const& s, Tool tool)
         {
@@ -491,7 +491,7 @@ namespace MeleBridge::Editor
             ImGui::End();
         }
 
-        /// A level light's panel header and banner (docs/07 §12, 5b), by its type: what a change of it reaches, here and in the build.
+        /// A level light's panel header and banner (docs/design/in-game-editor.md §12, 5b), by its type: what a change of it reaches, here and in the build.
         /// A baked one's says too what this change leaves the walls with, against its base (what the YAML or the level file holds).
         void DrawLevelLightBanner(Snapshot const& s, LightBlock const& light)
         {
@@ -527,7 +527,7 @@ namespace MeleBridge::Editor
             ImGui::PopTextWrapPos();
         }
 
-        /// The selected light's panel (docs/07 §11): every change sends all of its settings, held to the panel's ranges. A drag
+        /// The selected light's panel (docs/design/in-game-editor.md §11): every change sends all of its settings, held to the panel's ranges. A drag
         /// on a control is one undo step: EndPanel closes it once no control is held. An NPC's light (§12) has no kind control
         /// (it keeps its template's channels) and shows its offset from its NPC. A level light (5b) has none either, and its
         /// type's header and banner. A light the editor won't change now (its NPC fails the pose check, a level light no build
@@ -635,7 +635,7 @@ namespace MeleBridge::Editor
                 // A level light (5b): its collection, which the editor never writes.
                 if (s.SelectedComponent) ImGui::Text("Collection: %s%s", s.SelectedTag.c_str(), s.SelectedRig ? " (characterLights copy)" : "");
                 else ImGui::Text("Tag: %s", s.SelectedTag.c_str());
-                // An effect (docs/07 §12): one that ends shows nothing once the 1.5 s run after a step is over.
+                // An effect (docs/design/in-game-editor.md §12): one that ends shows nothing once the 1.5 s run after a step is over.
                 if (s.SelectedEffect)
                 {
                     ImGui::Text("Template: %s%s", s.SelectedTemplate.c_str(), s.SelectedTemplate == "no template" ? "" : s.SelectedLoops ? " (loops)" : " (ends)");
@@ -643,7 +643,7 @@ namespace MeleBridge::Editor
                         ImGui::SetTooltip("loops: it plays on. ends: it plays once; after a move it shows for the 1.5 s run, then nothing until the "
                                           "game starts it again.");
                 }
-                // A vanilla actor: whether its edits ship (docs/07 §11). An actor the editor won't move: why.
+                // A vanilla actor: whether its edits ship (docs/design/in-game-editor.md §11). An actor the editor won't move: why.
                 if (!s.SelectedShips.empty())
                 {
                     auto const ships = s.SelectedShips.starts_with("ships: ") && !s.SelectedShips.starts_with("ships: unknown");
@@ -664,7 +664,7 @@ namespace MeleBridge::Editor
                     ImGui::Text("DrawScale %g   DrawScale3D %g %g %g", s.SelectedDrawScale, s.SelectedDrawScale3D.X, s.SelectedDrawScale3D.Y,
                                 s.SelectedDrawScale3D.Z);
                 }
-                // A prop the editor switches (docs/07 §11): what prop lights give it (E) against what a fresh Auto light would (T).
+                // A prop the editor switches (docs/design/in-game-editor.md §11): what prop lights give it (E) against what a fresh Auto light would (T).
                 if (s.SelectedProp)
                 {
                     // Too big for one prop light: L would refuse it, so nothing here may offer L (the game thread makes its target
@@ -1227,7 +1227,7 @@ namespace MeleBridge::Editor
 
         ImU32 ColourOf(LightBlock const& light, int alpha = 255) { return IM_COL32(light.Color[0], light.Color[1], light.Color[2], alpha); }
 
-        /// An icon's shape tells its source (docs/07 §12): a disc for ours, a diamond for an NPC's light, a square for a level's, a
+        /// An icon's shape tells its source (docs/design/in-game-editor.md §12): a disc for ours, a diamond for an NPC's light, a square for a level's, a
         /// star for an effect.
         enum class Shape { Disc, Diamond, Square, Star };
 
@@ -1278,7 +1278,7 @@ namespace MeleBridge::Editor
             else draw->AddConvexPolyFilled(points, count, colour);
         }
 
-        /// The icons' legend (docs/07 §12), the shapes drawn as the world has them. The type letters are the level lights' (Phase
+        /// The icons' legend (docs/design/in-game-editor.md §12), the shapes drawn as the world has them. The type letters are the level lights' (Phase
         /// 5b).
         void DrawLegend()
         {
@@ -1304,7 +1304,7 @@ namespace MeleBridge::Editor
 
         bool SameNoCase(std::string const& a, std::string const& b) { return _stricmp(a.c_str(), b.c_str()) == 0; }
 
-        /// One NPC's section of the Lights tab (docs/07 §12): "Dorn (claude_npc_02)" with Add light, then its lights, each a row
+        /// One NPC's section of the Lights tab (docs/design/in-game-editor.md §12): "Dorn (claude_npc_02)" with Add light, then its lights, each a row
         /// that selects it. A light whose NPC's level is not visible has its NPC's section saying so, and one whose NPC levels.json
         /// no longer lists has a section under its NPC's tag; neither offers Add light.
         void DrawNpcSection(Snapshot const& s, NpcSection const& npc)
@@ -1351,7 +1351,7 @@ namespace MeleBridge::Editor
             ImGui::PopID();
         }
 
-        /// A level light's row (docs/07 §12, 5b): its name, type, collection, settings and distance; a click selects it.
+        /// A level light's row (docs/design/in-game-editor.md §12, 5b): its name, type, collection, settings and distance; a click selects it.
         void DrawLevelLightRow(Snapshot const& s, LightIcon const& l, size_t index)
         {
             ImGui::PushID(static_cast<int>(index));
@@ -1364,7 +1364,7 @@ namespace MeleBridge::Editor
             ImGui::PopID();
         }
 
-        /// The levels' own lights in the Lights tab (docs/07 §12, 5b), nearest first: the map's characterLights copies always (they
+        /// The levels' own lights in the Lights tab (docs/design/in-game-editor.md §12, 5b), nearest first: the map's characterLights copies always (they
         /// are ours); then, with Level lights on, the other lights of the static light collections the game thread lists (within
         /// 30 m), the baked ones with Baked too, at most 150. One with an edit is always listed.
         void DrawLevelLights(Snapshot const& s)
@@ -1401,7 +1401,7 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// The Lights tab (docs/07 §11, §12): Prop light and Room light add one over where the view points, NPC light one for the
+        /// The Lights tab (docs/design/in-game-editor.md §11, §12): Prop light and Room light add one over where the view points, NPC light one for the
         /// selected NPC of ours; the list (the editor's lights and the YAMLs' lights: entries, deleted ones left out) selects one,
         /// then a section per NPC of ours (DrawNpcSection), then the levels' own lights (DrawLevelLights). While it is open, a
         /// click near an icon does too.
@@ -1447,7 +1447,7 @@ namespace MeleBridge::Editor
             ImGui::EndChild();
         }
 
-        /// The Effects tab (docs/07 §12): the emitters of the visible levels, nearest first. One the editor leaves alone is greyed
+        /// The Effects tab (docs/design/in-game-editor.md §12): the emitters of the visible levels, nearest first. One the editor leaves alone is greyed
         /// with its reason. A click on a row selects it; while the tab is open, a click near its icon does too.
         void DrawEffects(Snapshot const& s)
         {
@@ -1552,7 +1552,7 @@ namespace MeleBridge::Editor
                 else ImGui::Text("Catalog: not read, or unreadable (see the Props window's Catalog tab)");
                 if (s.Session != nullptr)
                 {
-                    // What the re-apply passes did with the map's session file (docs/07 §10).
+                    // What the re-apply passes did with the map's session file (docs/design/in-game-editor.md §10).
                     auto const& session = *s.Session;
                     ImGui::Text("Session: %s", session.File.empty() ? "-" : session.File.c_str());
                     if (!session.Error.empty()) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "  %s", session.Error.c_str());
@@ -1573,7 +1573,7 @@ namespace MeleBridge::Editor
                 }
                 if (s.OurLevels != nullptr)
                 {
-                    // Which levels are ours (docs/07 §11): read at each map change.
+                    // Which levels are ours (docs/design/in-game-editor.md §11): read at each map change.
                     auto const& levels = *s.OurLevels;
                     if (!levels.Problem.empty())
                     {
@@ -1644,7 +1644,7 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// While one of an NPC's lights is selected, its NPC's reference pose (docs/07 §12), where the light's offset is measured
+        /// While one of an NPC's lights is selected, its NPC's reference pose (docs/design/in-game-editor.md §12), where the light's offset is measured
         /// from: a cross on the floor plane through the pawn's centre, and a tick along its yaw (forward).
         void DrawNpcMarker(Snapshot const& s, float const* view, float const* projection, float width, float height)
         {
@@ -1665,7 +1665,7 @@ namespace MeleBridge::Editor
             line(at, { at.X + std::cos(yaw) * Tick, at.Y + std::sin(yaw) * Tick, at.Z }, colour, 3);
         }
 
-        /// The lights that have an icon, and that a click can pick (docs/07 §12): ours, the NPCs', the map's characterLights copies,
+        /// The lights that have an icon, and that a click can pick (docs/design/in-game-editor.md §12): ours, the NPCs', the map's characterLights copies,
         /// a level light with an edit and the selected one, always; with Level lights on and the Lights tab open or Alt held, the
         /// other level lights the game thread lists (within 30 m), the baked ones with Baked too, at most 150, nearest first.
         std::vector<LightIcon const*> ShownLights(Snapshot const& s)
@@ -1683,7 +1683,7 @@ namespace MeleBridge::Editor
             return shown;
         }
 
-        /// The effects that have an icon (docs/07 §12): each one with an edit, always; with the Effects tab open or Alt held, the
+        /// The effects that have an icon (docs/design/in-game-editor.md §12): each one with an edit, always; with the Effects tab open or Alt held, the
         /// others within 30 m of the camera too, at most 50. The snapshot lists them nearest first.
         std::vector<EffectIcon const*> ShownEffects(Snapshot const& s)
         {
@@ -1748,7 +1748,7 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// What a click picks among the icons within 12 px of it (docs/07 §12): one whose drawn shape is under the cursor beats one
+        /// What a click picks among the icons within 12 px of it (docs/design/in-game-editor.md §12): one whose drawn shape is under the cursor beats one
         /// only near it, then the one nearest the camera, so a light in the next room never wins over the one in front, and a
         /// click on the icon drawn on top (DrawIcons: far to near) picks it. Lights and effects as asked; none: an empty path.
         struct IconPick
@@ -1813,7 +1813,7 @@ namespace MeleBridge::Editor
                 RefusedFor.clear();
                 return;
             }
-            // A light only moves (docs/07 §11): the move gizmo, whatever tool T, R or G chose for props.
+            // A light only moves (docs/design/in-game-editor.md §11): the move gizmo, whatever tool T, R or G chose for props.
             auto const tool = s.SelectedLight ? Tool::Move : Current;
             if (Dragging && DraggedPath != s.SelectedPath) ResetGizmo();
             if (tool != LastTool)
@@ -1945,7 +1945,7 @@ namespace MeleBridge::Editor
         }
 
         /// Clicks and the wheel that no window or arrow took. While the Lights tab is open or Alt is held, a click near a light's
-        /// icon selects that light; any other click traces, so a light never takes a click meant for a prop (docs/07 §11).
+        /// icon selects that light; any other click traces, so a light never takes a click meant for a prop (docs/design/in-game-editor.md §11).
         void HandleWorldInput(Snapshot const& s, float const* view, float const* projection, float width, float height)
         {
             auto const& io = ImGui::GetIO();

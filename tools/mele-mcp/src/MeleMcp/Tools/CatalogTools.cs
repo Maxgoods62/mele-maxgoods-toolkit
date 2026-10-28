@@ -4,12 +4,14 @@ using ModelContextProtocol.Server;
 
 namespace MeleMcp.Tools;
 
-/// <summary>The in-game editor's prop catalog (MeleBridge, F8; docs/07-ingame-editor.md §3.5): which meshes its menu offers, and the package it loads them from. Offline.</summary>
+/// <summary>The in-game editor's prop catalog (MeleBridge, F8; docs/design/in-game-editor.md §3.5): which meshes its menu offers, and the package it loads them from. Offline.</summary>
 [McpServerToolType]
 public static class CatalogTools
 {
     [McpServerTool(Name = "catalog_index", ReadOnly = true),
-     Description("Indexes every StaticMesh of the files LE1 loads (LE1CP's copy of a file wins; our own mods' files are left out), one row per "
+     Description("Indexes every StaticMesh of the files LE1 loads (LE1CP's copy of a file wins; our own mods' files are left out: the "
+                 + "catalog's DLC_MOD_MeleCatalog and the DLC folders the MELE_OWN_DLC variable lists, comma-separated, or with it unset the ones "
+                 + "levels.json says level_build built into; DlcSkipped lists them with why), one row per "
                  + "path: the smallest file that has it (the one to copy it from), its size, triangles, how often the game's levels place it, and "
                  + "what the curation rules make of it (apl, apl-large and levelprop are the editor's default prop list, by category; arch-*, "
                  + "excluded-* and unknown are left out of it). Returns the stats; with search, category or curatedOnly, the matching meshes. "

@@ -88,7 +88,7 @@ public static class GameTools
                  + "BioSaveGame <n> writes where Shepard stands; career saves can't be loaded this way), runs console "
                  + "commands (e.g. 'at BIOA_CLD01 start_cld01'), waits for the map and takes a screenshot to Read. Takes 1–3 minutes.")]
     public static GameCycleResult GameCycle(
-        [Description("Mod to check and install first (as mod_install takes it, e.g. 'Claude Test Chakwas'); omit to only restart.")] string? mod = null,
+        [Description("Mod to check and install first (as mod_install takes it, e.g. 'My Mod'); omit to only restart.")] string? mod = null,
         [Description("Developer save slot to load from the menu: n for BioSaveGame<n>.sav, made once in game with game_console 'BioSaveGame <n>'.")] int? loadSlot = null,
         [Description("Console commands to run after the load, in order.")] string[]? commands = null,
         [Description("Map to wait for (persistent level file name without .pcc, e.g. BIOA_CLD01); default the first one the save loads.")] string? waitForMap = null,
