@@ -51,8 +51,10 @@ public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyL
 /// lights section covers it, else by its light environment. Its lights: point lights on the channels of their kind (props only, or the
 /// room too), switched on or off. Vanilla actors of the files it streams:
 /// moved, turned, scaled or hidden in a fork of the file, which the level streams instead (<see cref="ForkBuilder"/>); an effect (an emitter)
-/// is moved, turned or hidden only. A missing level is created, and the LE1CP Sideloader config that loads it is written. Last, its key of
-/// levels.json, which tells MeleBridge which levels are ours, where its NPCs stand and their lights, and its character lights.
+/// is moved, turned or hidden only; a light of a light collection gets its brightness, colour, radius, falloff, on/off and place
+/// (docs/07 §12.4), in a fork for a file it streams, in the map for its characterLights copies. A missing level is created, and the
+/// LE1CP Sideloader config that loads it is written. Last, its key of levels.json, which tells MeleBridge which levels are ours, where
+/// its NPCs stand and their lights, and its character lights.
 /// </summary>
 public static class LevelBuilder
 {
@@ -251,9 +253,17 @@ public static class LevelBuilder
                 LevelStreams.RenameWaits(pcc, others, levelChanges);
             }
             if (spec.PostProcess is { } post) LevelStreams.SetPostProcess(game, pcc, level, post.Package, post.Line, levelChanges);
+            // The first copy of a name is the one the build keeps (levels.json names it): its lights take the vanilla: entries keyed by its
+            // source file, and the source's own values where they have none (docs/07 §12.4).
+            var copies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var light in spec.CharacterLights)
             {
-                LevelStreams.SetLight(game, pcc, level, light.Package ?? throw new ArgumentException($"line {light.Line}: a character light needs a 'package'."), light.Actor, light.Line, levelChanges);
+                var source = light.Package ?? throw new ArgumentException($"line {light.Line}: a character light needs a 'package'.");
+                var copy = LevelStreams.SetLight(game, pcc, level, source, light.Actor, light.Line, levelChanges);
+                if (!copies.Add(copy.ObjectName.Instanced)) continue;
+                var entries = CopyEntries(spec, source, copy.ObjectName.Instanced);
+                if (copy.ClassName == "StaticLightCollectionActor") SlcaLights.SetCopy(game, copy, source, light.Actor, entries, cache, levels, ForkBuilder.DlcOf(package), levelChanges);
+                else if (entries.Count > 0) throw new ArgumentException($"line {entries[0].Line}: {entries[0].File}.{entries[0].Collection} is a {copy.ClassName} in the level, not a light collection.");
             }
             var template = spec.StartPointTemplate is { } t ? (t.Package ?? throw new ArgumentException($"line {t.Line}: 'startPointTemplate' needs a 'package'."), t.Actor) : ((string, string)?)null;
             foreach (var start in spec.StartPoints) LevelStreams.SetStartPoint(game, pcc, level, start, template, levelChanges);
@@ -306,6 +316,16 @@ public static class LevelBuilder
         return new LevelBuildResult(package, create, levelChanges, npcs, usables, props, lights, spec.Strings.Count, tlkFiles, config, missing, notes, backups, forks, levelsFile);
     }
 
+    /// <summary>The vanilla: light entries of a characterLights copy: keyed by its source file and the copy's name, of a file the map does not stream.</summary>
+    private static List<ForkBuilder.Entry> CopyEntries(Spec spec, string package, string copy) =>
+        spec.Vanilla.Where(v => v.Light is not null && !Streams(spec, v.File) && v.File.Equals(FileOf(package), StringComparison.OrdinalIgnoreCase)
+                                && v.Collection.Equals(copy, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    private static bool Streams(Spec spec, string file) => spec.Streaming?.Levels.Contains(file, StringComparer.OrdinalIgnoreCase) == true;
+
+    /// <summary>A package as a file name without its extension: BIOA_FRE31_00_DSG.pcc → BIOA_FRE31_00_DSG.</summary>
+    private static string FileOf(string package) => Path.GetFileNameWithoutExtension(GamePaths.ToWindowsPath(package));
+
     /// <summary>levels.json: %LOCALAPPDATA%\MeleBridge\LE1\levels.json, or the file <see cref="LevelsFileEnvVar"/> names (tests).</summary>
     internal static string LevelsFilePath()
     {
@@ -356,7 +376,7 @@ public static class LevelBuilder
             }))),
             // The first copy of a name is the one the build keeps (LevelStreams.SetLight finds it again by its name).
             ["characterLights"] = new JsonObject(spec.CharacterLights.Where(c => c.Package is not null).DistinctBy(c => LevelStreams.CopyName(c.Actor), StringComparer.OrdinalIgnoreCase)
-                .Select(c => KeyValuePair.Create(LevelStreams.CopyName(c.Actor), (JsonNode?)JsonValue.Create(Path.GetFileNameWithoutExtension(GamePaths.ToWindowsPath(c.Package!)))))),
+                .Select(c => KeyValuePair.Create(LevelStreams.CopyName(c.Actor), (JsonNode?)JsonValue.Create(FileOf(c.Package!))))),
         };
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + ".build.tmp";
@@ -1600,7 +1620,11 @@ public static class LevelBuilder
                 case "vanilla":
                     // Its last entry deleted (as its comment says to give an actor its vanilla values back): no entry, no fork.
                     if (Null(value)) break;
-                    if (value is not YamlMappingNode vanilla) throw Fail(value, "'vanilla' maps <file>.<actor name> to what changes: {location, rotation or yaw, scale, scale3d, removed}.");
+                    if (value is not YamlMappingNode vanilla)
+                    {
+                        throw Fail(value, "'vanilla' maps <file>.<actor name> to what changes: {location, rotation or yaw, scale, scale3d, removed}, and <file>.<collection>.<light> "
+                                          + "to {location, brightness, color, radius, falloff, enabled}.");
+                    }
                     spec.Vanilla = vanilla.Children.Select(c => VanillaOf(c.Key, c.Value)).ToList();
                     break;
                 case "lights":
@@ -1624,10 +1648,17 @@ public static class LevelBuilder
             throw new ArgumentException($"line {second.Line}: {second.What} has tag '{twice.Key}', as {first.What} at line {first.Line}: tags are unique across npcs (their lights "
                                         + "too), usables, props and lights." + (npcLight ? " NPC lights are edited in their npcs entry: give the other entry its own tag." : ""));
         }
-        // A vanilla actor ships in a fork, which the map streams instead of the file: only a file it streams can be forked.
-        foreach (var entry in spec.Vanilla.Where(v => spec.Streaming?.Levels.Contains(v.File, StringComparer.OrdinalIgnoreCase) != true))
+        // A vanilla actor ships in a fork, which the map streams instead of the file: only a file it streams can be forked. A light of a
+        // light collection may also be a light of a characterLights copy, keyed by its source file: the build writes it into the map.
+        var copied = spec.CharacterLights.Where(c => c.Package is not null).DistinctBy(c => LevelStreams.CopyName(c.Actor), StringComparer.OrdinalIgnoreCase)
+            .Select(c => $"{FileOf(c.Package!)}.{LevelStreams.CopyName(c.Actor)}").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in spec.Vanilla.Where(v => !Streams(spec, v.File)))
         {
-            throw new ArgumentException($"line {entry.Line}: {entry.File} is not in streaming.levels: a vanilla actor ships in a fork of a file the map streams.");
+            if (entry.Light is null) throw new ArgumentException($"line {entry.Line}: {entry.File} is not in streaming.levels: a vanilla actor ships in a fork of a file the map streams.");
+            if (!copied.Contains($"{entry.File}.{entry.Collection}"))
+            {
+                throw new ArgumentException($"line {entry.Line}: {entry.File}.{entry.Collection} is neither in streaming.levels nor a characterLights item");
+            }
         }
         var again = spec.Vanilla.GroupBy(v => v.Key, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
         if (again is not null) throw new ArgumentException($"line {again.Last().Line}: 'vanilla' has {again.Key} twice.");
@@ -1636,15 +1667,17 @@ public static class LevelBuilder
 
     /// <summary>
     /// BIOA_FRE31_00_LAY.StaticMeshActor_69: {location: [x, y, z], rotation: [pitch, yaw, roll] or yaw, scale, scale3d, removed}, as props
-    /// take them; an effect (an Emitter_N) takes no scale.
+    /// take them; an effect (an Emitter_N) takes no scale. A light of a light collection: <see cref="VanillaLightOf"/>.
     /// </summary>
     private static ForkBuilder.Entry VanillaOf(YamlNode key, YamlNode body)
     {
         var name = Scalar(key);
+        if (name.Split('.') is { Length: 3 } parts && parts.All(p => p.Length > 0)) return VanillaLightOf(key, parts, body);
         var dot = name.IndexOf('.');
         if (dot <= 0 || dot == name.Length - 1 || name.IndexOf('.', dot + 1) >= 0)
         {
-            throw Fail(key, $"'{name}': a vanilla key is <file>.<actor name>, e.g. BIOA_FRE31_00_LAY.StaticMeshActor_69.");
+            throw Fail(key, $"'{name}': a vanilla key is <file>.<actor name>, e.g. BIOA_FRE31_00_LAY.StaticMeshActor_69, or <file>.<collection>.<light> for a light of a light "
+                            + "collection, e.g. BIOA_FRE31_00_LAY.StaticLightCollectionActor_127.PointLight_35_LC.");
         }
         if (body is not YamlMappingNode m) throw Fail(body, $"vanilla '{name}' must be a mapping, e.g. {{ location: [x, y, z] }} or {{ removed: true }}.");
         Vector3? location = null, scale3d = null;
@@ -1687,6 +1720,45 @@ public static class LevelBuilder
             throw Fail(turned, $"vanilla '{name}' has 'yaw' and 'rotation': give one ('rotation' is [pitch, yaw, roll] in degrees, 'yaw' keeps the file's pitch and roll).");
         }
         return new ForkBuilder.Entry(name[..dot], name[(dot + 1)..], (int)key.Start.Line, location, yaw, rotation, scale, scale3d, removed);
+    }
+
+    /// <summary>
+    /// BIOA_FRE31_00_LAY.StaticLightCollectionActor_127.PointLight_35_LC: {location: [x, y, z], brightness, color: [r, g, b], radius, falloff,
+    /// enabled} (docs/07 §12.4): a point or spot light of a light collection; a field left out keeps the file's value. It moves and keeps
+    /// its channels: no rotation, scale, removed or kind. Sun and sky lights are not edited.
+    /// </summary>
+    private static ForkBuilder.Entry VanillaLightOf(YamlNode key, string[] parts, YamlNode body)
+    {
+        var light = parts[2];
+        if (light.StartsWith("DirectionalLight", StringComparison.OrdinalIgnoreCase)) throw Fail(key, $"{light} is a sun light: not edited in Phase 5");
+        if (light.StartsWith("SkyLight", StringComparison.OrdinalIgnoreCase)) throw Fail(key, $"{light} is a sky light: not edited in Phase 5");
+        if (body is not YamlMappingNode m) throw Fail(body, $"vanilla '{string.Join('.', parts)}' must be a mapping, e.g. {{ brightness: 1.2 }} or {{ enabled: false }}.");
+        foreach (var k in m.Children.Keys)
+        {
+            if (k is YamlScalarNode { Value: "rotation" or "yaw" or "scale" or "scale3d" or "removed" }) throw Fail(k, "lights move, they don't turn, scale or go: use enabled: false");
+            if (k is YamlScalarNode { Value: "kind" }) throw Fail(k, "level lights keep their channels: a Room light (lights:) lights the walls");
+        }
+        Vector3? location = null;
+        float? radius = null, brightness = null, falloff = null;
+        byte[]? color = null;
+        bool? enabled = null;
+        foreach (var (k, value) in Entries(m, "location", "brightness", "color", "radius", "falloff", "enabled"))
+        {
+            switch (k)
+            {
+                case "location":
+                    var xyz = Numbers(value, 3, 3);
+                    location = new Vector3(xyz[0], xyz[1], xyz[2]);
+                    break;
+                case "brightness": brightness = Number(value) is >= 0 and var b ? b : throw Fail(value, "'brightness' can't be negative."); break;
+                case "color": color = ColorOf(value); break;
+                case "radius": radius = Number(value) is > 0 and var r ? r : throw Fail(value, "'radius' must be over 0."); break;
+                case "falloff": falloff = FalloffOf(value); break;
+                case "enabled": enabled = Bool(value); break;
+            }
+        }
+        return new ForkBuilder.Entry(parts[0], $"{parts[1]}.{light}", (int)key.Start.Line, location, null, null, null, null, false,
+            new SlcaLights.Edit(radius, brightness, color, falloff, enabled));
     }
 
     private static NpcSpec NpcOf(string name, YamlNode body, Dictionary<int, Dictionary<string, string>> strings)

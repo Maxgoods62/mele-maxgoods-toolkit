@@ -10,9 +10,11 @@ using LegendaryExplorerCore.Unreal.ObjectInfo;
 
 namespace MeleMcp.Core;
 
-/// <param name="Key">The YAML's key: &lt;file&gt;.&lt;actor name&gt;.</param>
-/// <param name="Mesh">The StaticMesh it shows, or an effect's ParticleSystem, by its path in the file; null when it shows none.</param>
-/// <param name="Changes">Each value the fork changes, vanilla → fork.</param>
+/// <param name="Key">The YAML's key: &lt;file&gt;.&lt;actor name&gt;, or &lt;file&gt;.&lt;collection&gt;.&lt;light&gt; for a light of a light collection.</param>
+/// <param name="Class">The actor's class, or the light component's (PointLightComponent, SpotLightComponent).</param>
+/// <param name="Mesh">The StaticMesh it shows, or an effect's ParticleSystem, by its path in the file; null when it shows none (a light).</param>
+/// <param name="Changes">Each value the fork changes, vanilla → fork. A light's is one line with its light type: "PointLight_35_LC (U door light):
+/// brightness 0.6 → 1.2, location (…) → (…)".</param>
 public sealed record ForkedActor(string Key, string Class, string? Mesh, IReadOnlyList<string> Changes);
 
 /// <param name="Path">The copy next to the fork: &lt;fork&gt;_LOC_&lt;language&gt;.pcc.</param>
@@ -32,7 +34,8 @@ public sealed record BuiltFork(string File, string Fork, string ForkPath, string
 
 /// <summary>
 /// Forks of vanilla level files (docs/07 §11): a renamed copy of a file the map streams, in which vanilla actors are moved, turned,
-/// scaled or hidden, and which the map streams instead of the file. The copy keeps everything else of the file; only its self
+/// scaled or hidden, and the lights of its light collections changed (docs/07 §12.4, <see cref="SlcaLights"/>), and which the map
+/// streams instead of the file. The copy keeps everything else of the file; only its self
 /// Package export (a forced export named as the file) is renamed, so the game loads it beside, not over, the vanilla one. The file's
 /// localized packages (&lt;file&gt;_LOC_&lt;language&gt;), which the game loads by the streamed package's name, are copied under the fork's. Fork
 /// names follow one rule, shared with editor_import and mirrored in MeleBridge, so nothing has to store the pair.
@@ -52,14 +55,24 @@ public static class ForkBuilder
 
     /// <summary>
     /// The classes a vanilla entry may change: placed meshes, and effects (moved, turned or hidden, not scaled). Doors and usables carry
-    /// Kismet; nodes, volumes and lights must stay.
+    /// Kismet; nodes, volumes and light actors must stay. A light collection's lights are changed one by one, by their component.
     /// </summary>
     private static readonly string[] AllowedClasses = ["StaticMeshActor", "BioInert", "Emitter"];
 
-    /// <summary>A vanilla: entry: the file's actor and what it gives it (degrees for yaw and rotation); a value left out keeps the file's.</summary>
-    internal sealed record Entry(string File, string Actor, int Line, Vector3? Location, float? Yaw, float[]? Rotation, float? Scale, Vector3? Scale3D, bool Removed)
+    /// <summary>
+    /// A vanilla: entry: the file's actor and what it gives it (degrees for yaw and rotation); a value left out keeps the file's. A light
+    /// of a light collection has <see cref="Light"/>, and its <see cref="Actor"/> is &lt;collection&gt;.&lt;light&gt;: a location and its fields.
+    /// </summary>
+    internal sealed record Entry(string File, string Actor, int Line, Vector3? Location, float? Yaw, float[]? Rotation, float? Scale, Vector3? Scale3D, bool Removed,
+        SlcaLights.Edit? Light = null)
     {
         public string Key => $"{File}.{Actor}";
+
+        /// <summary>A light's collection (StaticLightCollectionActor_127); the actor itself for any other entry.</summary>
+        public string Collection => Light is null ? Actor : Actor[..Actor.IndexOf('.')];
+
+        /// <summary>A light's component (PointLight_35_LC); the actor itself for any other entry.</summary>
+        public string Component => Light is null ? Actor : Actor[(Actor.IndexOf('.') + 1)..];
     }
 
     /// <summary>An actor's transform as its file gives it, through its archetypes (rotation in Unreal units).</summary>
@@ -180,7 +193,10 @@ public static class ForkBuilder
         var warnings = new List<string>();
         Level? levelBinary = null;
         Level LevelBinary() => levelBinary ??= ObjectBinary.From<Level>(pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{source} has no {LevelPath}."));
-        var actors = entries.Select(e => Apply(pcc, e, held, LevelBinary, refusals, warnings)).OfType<ForkedActor>().ToList();
+        // A light's archetypes end in Engine's class default objects.
+        using var cache = new PackageCache();
+        var actors = entries.Select(e => e.Light is not null ? ApplyLight(pcc, e, held, cache, refusals) : Apply(pcc, e, held, LevelBinary, refusals, warnings))
+            .OfType<ForkedActor>().ToList();
         var bytes = refusals.Count > 0 ? [] : pcc.SaveToStream(compress: true).ToArray();
         return new PreparedFork(file, fork, forkPath, source, sourceBytes.LongLength, Md5(sourceBytes), bytes, Md5(bytes), actors, warnings, refusals, localized);
     }
@@ -320,6 +336,39 @@ public static class ForkBuilder
         return new ForkedActor(entry.Key, actor.ClassName, MeshOf(actor)?.InstancedFullPath, changes);
     }
 
+    /// <summary>
+    /// Applies a light entry to its component of a light collection (docs/07 §12.4): Brightness, LightColor, Radius, FalloffExponent and
+    /// bEnabled as given, and a location as Translation through the collection's binary matrix (<see cref="SlcaLights.Write"/>); null
+    /// (with the reason in <paramref name="refusals"/>) when it may not change. Its receipt is one line, with its light type.
+    /// </summary>
+    private static ForkedActor? ApplyLight(IMEPackage pcc, Entry entry, IReadOnlyDictionary<int, string> held, PackageCache cache, List<string> refusals)
+    {
+        var where = $"line {entry.Line}: {entry.Key}";
+        var light = pcc.FindExport($"{LevelPath}.{entry.Actor}");
+        if (light is null)
+        {
+            refusals.Add($"{where}: {entry.File} has no light {entry.Component} in {entry.Collection}");
+            return null;
+        }
+        if (Refusal(light, held, removed: false) is { } why)
+        {
+            refusals.Add($"{where}: {why}");
+            return null;
+        }
+        if (SlcaLights.Read(light, cache) is not { } before)
+        {
+            refusals.Add($"{where}: {entry.Collection} has no matrix for it (it is not in its LightComponents)");
+            return null;
+        }
+        if (SlcaLights.Write(light, before, entry.Light!, entry.Location) is { } refused)
+        {
+            refusals.Add($"{where}: {refused}");
+            return null;
+        }
+        var receipt = SlcaLights.Receipt(entry.Component, before, SlcaLights.Read(light, cache)!, () => [pcc]);
+        return new ForkedActor(entry.Key, light.ClassName, null, receipt is null ? [] : [receipt]);
+    }
+
     /// <summary>What a changed actor leaves behind that the fork does not fix: cover, a room shell, a non-uniform scale with no collision cooked for it.</summary>
     private static void Warn(IMEPackage pcc, ExportEntry actor, Entry entry, Pose vanilla, Pose forked, Func<Level> level, List<string> warnings)
     {
@@ -351,10 +400,14 @@ public static class ForkBuilder
     /// <summary>
     /// Why a vanilla actor may not change, or null: only StaticMeshActors, BioInerts and Emitters (by class chain) that no Kismet variable
     /// of the file holds; hidden (<paramref name="removed"/>), none with a primitive that is drawn whatever its owner (bIgnoreOwnerHidden).
-    /// The build and editor_import ask the same.
+    /// A component: only a point or spot light of a light collection (<see cref="SlcaLights.Refusal"/>). The build and editor_import ask the same.
     /// </summary>
     internal static string? Refusal(ExportEntry actor, IReadOnlyDictionary<int, string> held, bool removed)
     {
+        if (actor.IsA("ActorComponent"))
+        {
+            return SlcaLights.Refusal(actor) ?? (held.TryGetValue(actor.UIndex, out var holder) ? $"Kismet holds it ({holder}): its scripts would find it changed" : null);
+        }
         if (!AllowedClasses.Any(c => actor.IsA(c)))
         {
             var why = actor.IsA("BioDoor") ? "doors carry Kismet and door volumes"
@@ -362,7 +415,8 @@ public static class ForkBuilder
                 : actor.IsA("Pawn") || actor.IsA("Controller") ? "pawns are placed by their own entries"
                 : actor.IsA("NavigationPoint") ? "path nodes and cover links must stay where the paths were built"
                 : actor.IsA("Volume") ? "volumes must stay"
-                : actor.IsA("Light") || actor.IsA("StaticLightCollectionActor") ? "lights are baked into the level"
+                : actor.IsA("StaticLightCollectionActor") ? "its lights change one by one (<file>.<collection>.<light>)"
+                : actor.IsA("Light") ? "lights are baked into the level"
                 : "only StaticMeshActors, BioInerts and Emitters may change";
             return $"a {actor.ClassName}: {why}";
         }

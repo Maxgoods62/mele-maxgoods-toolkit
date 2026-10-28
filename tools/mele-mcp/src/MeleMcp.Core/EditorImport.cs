@@ -34,7 +34,9 @@ public sealed record EditorImportResult(string File, string Session, bool Writte
 /// state the YAML held when the editor first changed them (a value changed in the YAML since is kept, both changed is a conflict);
 /// meshes spawned in the editor get a props entry, deleted props 'removed: true' (the build hides their actor). Vanilla actors of the
 /// files the level streams (meshes and effects) get a vanilla entry, keyed by file and actor name, which the build ships in a fork of the
-/// file (docs/07 §11); those of other levels stay dev-only. NPC lights go into their NPC's lights list as offsets from the NPC.
+/// file (docs/07 §11); those of other levels stay dev-only. NPC lights go into their NPC's lights list as offsets from the NPC. Lights of
+/// light collections (docs/07 §12.4) get a vanilla entry too, keyed by file, collection and light: shipped in a fork, or for a light of
+/// the map's characterLights copy, keyed by the copy's source file and written into the map.
 /// </summary>
 public static class EditorImport
 {
@@ -45,11 +47,13 @@ public static class EditorImport
         "Lights placed with the in-game editor (F8, Save, then editor_import). kind props: lights only props (the Gameplay_4\n"
         + "channel); room: walls, vanilla meshes, pawns and props. A light is switched off (enabled: false), never removed.";
 
-    /// <summary>Above a vanilla section the import adds; {0} is a fork's name.</summary>
+    /// <summary>Above a vanilla section the import adds; {0} names the fork of the first entry's file (", here CLD01_FRE31_00_LAY"), or nothing.</summary>
     private const string VanillaComment =
-        "Vanilla actors the map's streamed files change: shipped in a fork, a renamed copy of the file (named after the map and\n"
-        + "the file, here {0}) that the map streams instead. A field left out keeps the file's value: delete a field,\n"
-        + "or the whole entry, to give the actor its vanilla value back.";
+        "Vanilla actors and lights the map's streamed files change (shipped in a fork), and lights of the map's characterLights\n"
+        + "copies (written into the map). A light is <file>.<collection>.<light> (a copy's: keyed by its source file): location,\n"
+        + "brightness, color, radius, falloff, enabled; light types: B baked, C characters only, U special channel, D dynamic.\n"
+        + "A fork is a renamed copy of the file, named after the map and the file{0}, that the map streams instead. A field\n"
+        + "left out keeps the file's value: delete a field, or the whole entry, to give it its vanilla value back.";
 
     /// <summary>Above an NPC's lights list the import adds.</summary>
     private const string NpcLightsComment =
@@ -93,24 +97,30 @@ public static class EditorImport
     private sealed record SessionNpc(string? Tag, double[]? Offset);
 
     /// <summary>
-    /// A light's state in a session entry (docs/07 §11): kind by name (props or room; npc for an NPC light), radius, brightness, colour [r, g, b] (0-255),
-    /// falloff exponent, and whether it is on. A spawned light the editor deleted keeps its 'enabled' and is 'deleted'; it shows
-    /// enabled and not deleted.
+    /// A light's state in a session entry (docs/07 §11): kind by name (props or room; npc for an NPC light, vanilla for a light of a light
+    /// collection), radius, brightness, colour [r, g, b] (0-255), falloff exponent, and whether it is on. A spawned light the editor deleted
+    /// keeps its 'enabled' and is 'deleted'; it shows enabled and not deleted. A vanilla light has its light type (B, C, U or D).
     /// </summary>
-    private sealed record LightBlock(string? Kind, double? Radius, double? Brightness, double[]? Color, double? Falloff, bool? Enabled);
+    private sealed record LightBlock(string? Kind, double? Radius, double? Brightness, double[]? Color, double? Falloff, bool? Enabled, string? Type = null);
 
     /// <summary>A light block with every field, as the import compares and writes it.</summary>
-    private sealed record LightState(string Kind, double Radius, double Brightness, double[] Color, double Falloff, bool Enabled)
+    private sealed record LightState(string Kind, double Radius, double Brightness, double[] Color, double Falloff, bool Enabled, string? Type = null)
     {
         public static LightState? Of(LightBlock? block) =>
-            block is { Kind: "props" or "room" or "npc", Radius: { } radius, Brightness: { } brightness, Color: { Length: 3 } color, Falloff: { } falloff, Enabled: { } enabled }
-                ? new LightState(block.Kind, radius, brightness, color, falloff, enabled)
+            block is { Kind: "props" or "room" or "npc" or "vanilla", Radius: { } radius, Brightness: { } brightness, Color: { Length: 3 } color, Falloff: { } falloff,
+                Enabled: { } enabled }
+                ? new LightState(block.Kind, radius, brightness, color, falloff, enabled, block.Type)
                 : null;
 
-        public JsonObject Json() => new()
+        public JsonObject Json()
         {
-            ["kind"] = Kind, ["radius"] = Radius, ["brightness"] = Brightness, ["color"] = Ints(Color), ["falloff"] = Falloff, ["enabled"] = Enabled,
-        };
+            var json = new JsonObject
+            {
+                ["kind"] = Kind, ["radius"] = Radius, ["brightness"] = Brightness, ["color"] = Ints(Color), ["falloff"] = Falloff, ["enabled"] = Enabled,
+            };
+            if (Type is not null) json["type"] = Type;
+            return json;
+        }
     }
 
     /// <summary>One actor's latest state (version 1: location, rotation and deleted only).</summary>
@@ -191,8 +201,18 @@ public static class EditorImport
             : [];
         var fallbacks = streams.Select(FileOf).Append(own).ToList();
 
+        // The characterLights copies by their name in the map, the first of a name (the one the build keeps), with their source.
+        var copies = Value(root, "characterLights") is YamlSequenceNode copied
+            ? copied.Children.OfType<YamlMappingNode>().Select(c => (Package: Value(c, "package") is { } p ? Scalar(p) : null, Actor: Value(c, "actor") is { } a ? Scalar(a) : null))
+                .Where(c => c.Package is not null && c.Actor is not null)
+                .Select(c => (File: Path.GetFileNameWithoutExtension(GamePaths.ToWindowsPath(c.Package!)), Collection: LevelStreams.CopyName(c.Actor!), Package: c.Package!, Actor: c.Actor!))
+                .DistinctBy(c => c.Collection, StringComparer.OrdinalIgnoreCase).ToList()
+            : [];
+
         using var files = new Files(game);
         var vanillaFiles = new VanillaFiles(game, Path.IsPathRooted(own) ? ForkBuilder.DlcOf(own) : null, files);
+        // A light's archetypes end in Engine's class default objects.
+        using var cache = new PackageCache();
         // MeleBridge may save, or a re-apply pass drop entries, while this runs (the game may be running). The YAML written and the
         // entries marked must come from one session, or the next import sees three different values (a false conflict): when the
         // session changed before it is marked, the merge is done again from the file as it was (replacing this import's own write),
@@ -279,6 +299,26 @@ public static class EditorImport
                 }
                 var actorLevel = actor.Level ?? actor.Path.Split('.')[0];
                 var ours = actorLevel.Equals(level, StringComparison.OrdinalIgnoreCase);
+                if (actor.Light?.Kind == "vanilla")
+                {
+                    // A light of a light collection: by its path (a component has no tag).
+                    if (!ours && !ownMap)
+                    {
+                        results[i] = new ImportedActor(key, "skipped", null, [], $"{actor.Path} is a light of {actorLevel} edited on map {session.Map}, and this file builds {level}: "
+                                                                                  + $"the YAML of {session.Map} ships it, else it stays dev-only there (MeleBridge re-applies it).");
+                    }
+                    else if (MergeVanillaLight(ref text, actor, i, key, level, streams, copies, files, vanillaFiles, cache, vanillaKeys, policy, keepSession, dropFile) is { } light)
+                    {
+                        results[i] = light.Result;
+                        if (light.Update is not null) updates.Add(light.Update);
+                    }
+                    else
+                    {
+                        results[i] = new ImportedActor(key, "skipped", null, [], $"dev-only: {actor.Path} is a light of {actorLevel}, which {level} does not stream (streaming.levels), "
+                                                                                  + "so no fork of it ships: the editor re-applies it from the session.");
+                    }
+                    continue;
+                }
                 var found = tag is null ? null : YamlEdits.Tagged(Root(text), tag);
                 // A spawn gets a base from an import only, and keeps it through a Save (which drops 'imported'): with one, an import
                 // put it in a YAML file already.
@@ -796,7 +836,7 @@ public static class EditorImport
         try
         {
             var edited = YamlEdits.AddEntry(text, Root(text), "vanilla", YamlEdits.Quote(name), keys,
-                string.Format(CultureInfo.InvariantCulture, VanillaComment, ForkBuilder.ForkName(map, file)), was.Count > 0 ? $"{mesh}; vanilla {string.Join(", ", was)}" : mesh);
+                string.Format(CultureInfo.InvariantCulture, VanillaComment, $", here {ForkBuilder.ForkName(map, file)}"), was.Count > 0 ? $"{mesh}; vanilla {string.Join(", ", was)}" : mesh);
             var now = Place(Locate(Reread(edited, entry)));
             text = edited;
             return (new ImportedActor(key, "added", entry, keys.Select(k => $"{k.Key}: {k.Value}").ToList(), reason, conflicts.Count > 0 ? conflicts : null),
@@ -806,6 +846,204 @@ public static class EditorImport
         {
             return (new ImportedActor(key, "failed", entry, [], e.Message), null);
         }
+    }
+
+    /// <summary>
+    /// A light of a light collection (docs/07 §12.4: a session entry of kind vanilla), merged into vanilla.&lt;file&gt;.&lt;collection&gt;.&lt;light&gt;:
+    /// a light of a file the YAML streams (a light of a fork counts as its vanilla file's), which the build ships in the file's fork, or a
+    /// light of the map's own characterLights copy, keyed by the copy's source file (the build writes it into the map). Merged field by
+    /// field as a lights entry is (<see cref="MergeLight"/>: location, radius, brightness, color, falloff, enabled), a value the entry
+    /// leaves out being the file's (through its archetypes: <see cref="SlcaLights.Read"/>); deleted in the editor, it is switched off.
+    /// Rotation and scale are not merged (a light only moves). A new entry holds the fields the editor changed from the file's (against
+    /// the session's base too when that is not the file's: an entry deleted by hand since), with the light type and those vanilla values
+    /// in a comment on its key line. One imported before whose entry is gone was removed by hand, as for an actor (<see cref="MergeVanilla"/>).
+    /// Null when it is neither (dev-only).
+    /// </summary>
+    private static (ImportedActor Result, SessionUpdate? Update)? MergeVanillaLight(ref string text, SessionActor actor, int index, string key, string map,
+        IReadOnlyList<string> streams, IReadOnlyList<(string File, string Collection, string Package, string Actor)> copies, Files files, VanillaFiles vanilla,
+        PackageCache cache, HashSet<string> seen, string policy, bool keepSession, string dropFile)
+    {
+        var parts = actor.Path!.Split('.');
+        if (parts.Length != 5 || parts[1] != "TheWorld" || parts[2] != "PersistentLevel")
+        {
+            return (new ImportedActor(key, "failed", null, [], $"{actor.Path} is not the path of a light of a light collection (<file>.TheWorld.PersistentLevel.<collection>.<light>)."), null);
+        }
+        var level = actor.Level ?? parts[0];
+        var (collection, component) = (parts[3], parts[4]);
+        string file;
+        ExportEntry light;
+        IReadOnlyDictionary<int, string> held = new Dictionary<int, string>();
+        Func<IEnumerable<IMEPackage>> shown;
+        try
+        {
+            if (level.Equals(map, StringComparison.OrdinalIgnoreCase))
+            {
+                // The map's own: a characterLights copy, keyed by the file it is copied from, whose values the build gives back.
+                var copy = copies.FirstOrDefault(c => c.Collection.Equals(collection, StringComparison.OrdinalIgnoreCase));
+                if (copy.File is null)
+                {
+                    return (new ImportedActor(key, "skipped", null, [], $"{actor.Path} is a light of {collection} of {map}, which no characterLights item copies: only the lights of "
+                                                                          + "a copy are imported (keyed by its source file). The editor re-applies it from the session."), null);
+                }
+                file = copy.File;
+                var source = files.Get(copy.Package) ?? throw new FileNotFoundException($"{copy.Package}, the source of the characterLights copy {collection}, could not be read.");
+                var owner = ExportInspector.Resolve(source, copy.Actor.Contains('.') || copy.Actor.StartsWith('#') ? copy.Actor : $"TheWorld.PersistentLevel.{copy.Actor}");
+                light = source.FindExport($"{owner.InstancedFullPath}.{component}") ?? throw new ArgumentException($"{copy.Package} has no light {component} in {owner.ObjectName.Instanced}.");
+                shown = () => streams.Select(vanilla.Package).OfType<IMEPackage>();
+            }
+            else
+            {
+                var streamed = streams.FirstOrDefault(s => s.Equals(level, StringComparison.OrdinalIgnoreCase))
+                               ?? streams.FirstOrDefault(s => s.Equals(ForkBuilder.Canonical(map, level), StringComparison.OrdinalIgnoreCase));
+                if (streamed is null) return null;
+                file = streamed;
+                (light, held) = vanilla.Actor(file, $"{collection}.{component}");
+                var pcc = light.FileRef;
+                shown = () => [pcc];
+            }
+        }
+        catch (Exception e) when (e is FileNotFoundException or ArgumentException)
+        {
+            return (new ImportedActor(key, "failed", null, [], e.Message), null);
+        }
+        var name = $"{file}.{collection}.{component}";
+        var entry = $"vanilla.{name}";
+        if (!seen.Add(name)) return (new ImportedActor(key, "skipped", entry, [], $"an earlier session entry is the same light ({name}): that one was merged."), null);
+        if (ForkBuilder.Refusal(light, held, removed: false) is { } refused)
+        {
+            return (new ImportedActor(key, "refused", entry, [], $"{refused}. Its session entry stays (the editor re-applies it); nothing ships it."), null);
+        }
+        if (SlcaLights.Read(light, cache) is not { } ofFile) return (new ImportedActor(key, "failed", entry, [], $"{collection} of {file} has no matrix for {component}."), null);
+        if (LightState.Of(actor.Light) is not { Kind: "vanilla" } editor)
+        {
+            return (new ImportedActor(key, "failed", entry, [], "the session entry's light block needs kind vanilla, radius, brightness, color [r, g, b], falloff and enabled."), null);
+        }
+
+        // What the build leaves the light with: the entry's values, the file's where it has none.
+        double[] fileLocation = [ofFile.Location.X, ofFile.Location.Y, ofFile.Location.Z];
+        var fileColor = ofFile.Color.Select(c => (double)c).ToArray();
+        YamlLight Filled(YamlLight? y) => new(y?.Location ?? fileLocation, null, y?.Radius ?? ofFile.Radius, y?.Brightness ?? ofFile.Brightness, y?.Color ?? fileColor,
+            y?.Falloff ?? ofFile.Falloff, y?.Enabled ?? ofFile.Enabled);
+        Transform StateOf(YamlLight y) => new(y.Location, actor.Rotation!.Select(u => Math.Round(u)).ToArray(), actor.Scale ?? 1, Of(actor.Scale3D, 3) ?? Unscaled, false,
+            new LightBlock("vanilla", y.Radius, y.Brightness, y.Color, y.Falloff, y.Enabled, ofFile.Type.ToString()));
+        YamlNode Locate(YamlMappingNode root) => ((YamlMappingNode)Value(root, "vanilla")!).Children.First(c => Scalar(c.Key).Equals(name, StringComparison.OrdinalIgnoreCase)).Value;
+        var found = Value(Root(text), "vanilla") is YamlMappingNode section
+            ? section.Children.FirstOrDefault(c => Scalar(c.Key).Equals(name, StringComparison.OrdinalIgnoreCase))
+            : default;
+        var yaml = Filled(found.Key is null ? null : LightOf(found.Value));
+
+        // Marked where the file has it (an import found nothing to write), the YAML had no entry then either: none is gone.
+        var atFile = actor.Base is { } at && Of(at.Location, 3) is { } placed && SameLocation(placed, fileLocation) && LightState.Of(at.Light) is { } was
+                     && SameRadius([was.Radius], [ofFile.Radius]) && SameLight([was.Brightness], [ofFile.Brightness]) && SameColor(was.Color, fileColor)
+                     && SameLight([was.Falloff], [ofFile.Falloff]) && was.Enabled == ofFile.Enabled;
+        if (found.Key is null && !atFile
+            && (actor.Imported is { ValueKind: JsonValueKind.Object } || actor.Installed is { ValueKind: JsonValueKind.Array } installed && installed.GetArrayLength() > 0))
+        {
+            // Imported, and its line is gone since: removed by hand (or the file reverted alone). Added again, it would come back on every import.
+            const string gone = "imported before, and this file has no vanilla entry for it now: removed by hand, or the file reverted alone";
+            if (AsBase(actor))
+            {
+                return (new ImportedActor(key, "skipped", entry, [], keepSession
+                        ? $"{gone}. Unchanged since the import: its session entry would be dropped, so the editor stops applying it (keepSession: left as it is)."
+                        : $"{gone}. Unchanged since the import: its session entry is dropped, so the editor stops applying it, and kept in {Path.GetFileName(dropFile)}."),
+                    new SessionUpdate(index, null, null, [], "a vanilla light entry imported, then removed from the file (by hand, or the file reverted alone), unchanged in the editor since"));
+            }
+            return (new ImportedActor(key, "skipped", entry, [], $"{gone}. Not added again: the editor changed it since the import, so its session entry stays. Add the entry back "
+                                                                 + "by hand to ship it, or undo the edit in the editor."), null);
+        }
+
+        // New: three-way against the file's values when the session's base is not the file's (an entry deleted by hand since).
+        var b = found.Key is null && atFile ? null : actor.Base;
+        var lit = b?.Light;
+        static double[] Flag(bool on) => [on ? 1 : 0];
+        var fields = new List<Field>
+        {
+            new("location", actor.Location!, yaml.Location, Of(b?.Location, 3), SameLocation, WriteLocation),
+            new("radius", [editor.Radius], [yaml.Radius!.Value], Of(lit?.Radius), SameRadius, v => YamlEdits.Radius(v[0])),
+            new("brightness", [editor.Brightness], [yaml.Brightness!.Value], Of(lit?.Brightness), SameLight, v => YamlEdits.Fraction(v[0])),
+            new("color", editor.Color, yaml.Color!, Of(lit?.Color, 3), SameColor, YamlEdits.Color),
+            new("falloff", [editor.Falloff], [yaml.Falloff!.Value], Of(lit?.Falloff), SameLight, v => YamlEdits.Fraction(v[0])),
+            // What the light shows: deleted in the editor, it is switched off.
+            new("enabled", Flag(editor.Enabled && !actor.Deleted), Flag(yaml.Enabled!.Value), lit?.Enabled is { } on ? Flag(on) : null, SameExactly, v => v[0] == 1 ? "true" : "false"),
+        };
+        var sides = fields.Select(field => (Field: field, Side: Pick(field))).ToList();
+        var conflicts = sides.Where(s => s.Side == Side.Conflict)
+            .Select(s => new FieldConflict(s.Field.Name, s.Field.Write(s.Field.Base!), s.Field.Write(s.Field.Yaml!), s.Field.Write(s.Field.Editor), policy == "refuse" ? null : policy))
+            .ToList();
+        var since = found.Key is null ? " since the session's base, and the YAML has no entry for it since (the file's values)" : " since the session's base";
+        if (conflicts.Count > 0 && policy == "refuse")
+        {
+            return (new ImportedActor(key, "conflict", entry, [], $"the editor {(found.Key is null ? "" : "and the YAML both ")}changed {string.Join(", ", conflicts.Select(c => c.Field))}"
+                                                                  + $"{since}: nothing applied (onConflict=editor or yaml picks a side).", conflicts), null);
+        }
+        var taken = sides.Select(s => (s.Field, Side: s.Side != Side.Conflict ? s.Side : policy == "editor" ? Side.Editor : Side.Yaml)).ToList();
+        var writes = taken.Where(t => t.Side == Side.Editor).Select(t => (t.Field.Name, t.Field.Write(t.Field.Editor))).ToList();
+        var kept = taken.Where(t => t.Side == Side.Yaml).Select(t => t.Field).ToList();
+
+        var edited = text;
+        List<string> changes = [];
+        if (found.Key is not null) (edited, changes) = YamlEdits.SetKeys(text, Locate(Root(text)), writes, ["location", "radius", "brightness", "color", "falloff"]);
+        else if (writes.Count > 0)
+        {
+            // The vanilla values of what it changes, as the build's receipt names them; on or off goes in with the light type.
+            var vanillaValues = writes.Select(w => w.Name switch
+            {
+                "location" => $"location {ForkBuilder.Location(ofFile.Location)}",
+                "radius" => $"radius {ForkBuilder.Number(ofFile.Radius)}",
+                "brightness" => $"brightness {ForkBuilder.Number(ofFile.Brightness)}",
+                "color" => $"color {SlcaLights.Colour(ofFile.Color)}",
+                "falloff" => $"falloff {ForkBuilder.Number(ofFile.Falloff)}",
+                _ => null,
+            }).OfType<string>().ToList();
+            var comment = SlcaLights.Comment(ofFile, editor.Enabled && !actor.Deleted, vanillaValues, shown);
+            var fork = streams.Contains(file, StringComparer.OrdinalIgnoreCase) ? $", here {ForkBuilder.ForkName(map, file)}" : "";
+            try
+            {
+                edited = YamlEdits.AddEntry(text, Root(text), "vanilla", YamlEdits.Quote(name), writes, string.Format(CultureInfo.InvariantCulture, VanillaComment, fork), comment);
+            }
+            catch (ArgumentException e)
+            {
+                return (new ImportedActor(key, "failed", entry, [], e.Message), null);
+            }
+            changes = writes.Select(k => $"{k.Name}: {k.Item2}").ToList();
+        }
+        var now = edited == text && found.Key is null ? yaml : Filled(LightOf(Locate(Reread(edited, entry))));
+        text = edited;
+
+        // The YAML's values the merge kept become the editor's too: imported again, the editor then has the base's (see MergeLight).
+        var state = new List<(string Field, JsonNode Value)>();
+        if (kept.FirstOrDefault(k => k.Name == "location") is { } location) state.Add(("location", Doubles(location.Yaml!)));
+        var block = editor.Json();
+        foreach (var field in kept.Where(k => k.Name != "location"))
+        {
+            block[field.Name] = field.Name switch
+            {
+                "color" => Ints(field.Yaml!),
+                "enabled" => field.Yaml![0] == 1,
+                _ => field.Yaml![0],
+            };
+        }
+        if (actor.Deleted && now.Enabled == true)
+        {
+            block["enabled"] = true;
+            state.Add(("deleted", JsonValue.Create(false)));
+        }
+        if (block.ToJsonString() != editor.Json().ToJsonString()) state.Add(("light", block));
+        var update = new SessionUpdate(index, StateOf(now), StateOf(yaml), state);
+
+        var why = new List<string>();
+        var side = policy == "yaml" ? found.Key is null ? "file" : "YAML" : "editor";
+        if (conflicts.Count > 0) why.Add($"the editor {(found.Key is null ? "" : "and the YAML both ")}changed {string.Join(", ", conflicts.Select(c => c.Field))}{since}: took the {side}'s (onConflict={policy})");
+        var keptHere = kept.Where(k => conflicts.All(c => c.Field != k.Name)).Select(k => k.Name).ToList();
+        if (keptHere.Count > 0)
+        {
+            why.Add(found.Key is null
+                ? $"kept the file's {string.Join(", ", keptHere)}: the YAML's entry for it, which had the session's base, is gone since (deleted by hand)"
+                : $"kept the YAML's {string.Join(", ", keptHere)}, changed there since the session's base");
+        }
+        var reason = why.Count > 0 ? string.Join("; ", why) + "." : changes.Count > 0 ? null : found.Key is null ? "where the file has it: nothing to write." : "already as the editor left it.";
+        var action = changes.Count == 0 ? "unchanged" : found.Key is null ? "added" : "updated";
+        return (new ImportedActor(key, action, found.Key is null && changes.Count == 0 ? null : entry, changes, reason, conflicts.Count > 0 ? conflicts : null), update);
     }
 
     /// <summary>
@@ -1489,6 +1727,7 @@ public static class EditorImport
             if (light.Color is { } color) block["color"] = Ints(color);
             if (light.Falloff is { } falloff) block["falloff"] = falloff;
             if (light.Enabled is { } enabled) block["enabled"] = enabled;
+            if (light.Type is { } type) block["type"] = type;
             pose["light"] = block;
         }
         if (transform.Npc is { } npc) pose["npc"] = new JsonObject { ["tag"] = npc.Tag, ["offset"] = npc.Offset is { } offset ? Doubles(offset) : null };
@@ -1548,16 +1787,33 @@ public static class EditorImport
     {
         private readonly Dictionary<string, (IMEPackage Pcc, IReadOnlyDictionary<int, string> Held)> open = new(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>The file's actor of that name; throws when the file or the actor is missing.</summary>
+        /// <summary>The file's actor of that name (a light of a light collection: &lt;collection&gt;.&lt;light&gt;); throws when the file or the actor is missing.</summary>
         public (ExportEntry Actor, IReadOnlyDictionary<int, string> Held) Actor(string file, string name)
         {
-            if (!open.TryGetValue(file, out var vanilla))
+            var vanilla = Open(file);
+            return (vanilla.Pcc.FindExport($"TheWorld.PersistentLevel.{name}") ?? throw new ArgumentException($"{file} has no {(name.Contains('.') ? "light" : "actor")} {name}."),
+                vanilla.Held);
+        }
+
+        /// <summary>The file's vanilla copy; null when there is none.</summary>
+        public IMEPackage? Package(string file)
+        {
+            try
             {
-                var source = ForkBuilder.VanillaSource(game, file, ownDlc);
-                var pcc = files.Get(source) ?? throw new FileNotFoundException($"{source} could not be read.");
-                open[file] = vanilla = (pcc, ForkBuilder.KismetHeld(pcc));
+                return Open(file).Pcc;
             }
-            return (vanilla.Pcc.FindExport($"TheWorld.PersistentLevel.{name}") ?? throw new ArgumentException($"{file} has no actor {name}."), vanilla.Held);
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+        }
+
+        private (IMEPackage Pcc, IReadOnlyDictionary<int, string> Held) Open(string file)
+        {
+            if (open.TryGetValue(file, out var vanilla)) return vanilla;
+            var source = ForkBuilder.VanillaSource(game, file, ownDlc);
+            var pcc = files.Get(source) ?? throw new FileNotFoundException($"{source} could not be read.");
+            return open[file] = (pcc, ForkBuilder.KismetHeld(pcc));
         }
     }
 }

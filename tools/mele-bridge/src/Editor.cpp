@@ -21,9 +21,10 @@
 // The editor's game-thread half: open and close (F8, pause), the free camera, picking, moving, turning, scaling, spawning (a
 // mesh in memory, or one loaded from the catalog package) and deleting (hiding) actors, which vanilla actors it may change
 // (levels.json says which levels are ours, Kismet which ones the story holds), lights (spawned, moved, set, switched off; ours
-// through their own writer, our NPCs' through the kept one, as offsets their NPC carries) and the prop lighting switch, effects
-// (moved, turned, hidden, then run for a moment), undo and redo, saving those edits to a session file and re-applying that file
-// when a map loads, and the snapshot the overlay draws from. Everything here runs inside the ProcessEvent hook, right after
+// through their own writer, our NPCs' through the kept one, as offsets their NPC carries; the levels' own lights, components of
+// their static light collections, through the kept one too, one light at a time) and the prop lighting switch, effects (moved,
+// turned, hidden, then run for a moment), undo and redo, saving those edits to a session file and re-applying that file when a
+// map loads, and the snapshot the overlay draws from. Everything here runs inside the ProcessEvent hook, right after
 // BioHUD.PostRender or Camera.UpdateCamera returned.
 
 // The SDK's C++ layouts must match the engine's offsets (the SDK's own comments) for every field read here directly. Not all
@@ -36,6 +37,14 @@ static_assert(offsetof(USeqVar_ObjectList, ObjList) == 0xB4);
 static_assert(offsetof(UParticleEmitter, LODLevels) == 0x70);
 static_assert(offsetof(UParticleLODLevel, RequiredModule) == 0xE8);
 static_assert(offsetof(UParticleModuleRequired, EmitterLoops) == 0xC4);
+// A level light's place (Phase 5b): the SDK pads PointLightComponent with a "missed offset" before these.
+static_assert(offsetof(UActorComponent, Owner) == 0x78);
+static_assert(offsetof(ULightComponent, LightToWorld) == 0xD0);
+static_assert(offsetof(ULightComponent, LightingChannels) == 0x194);
+static_assert(offsetof(UPointLightComponent, CachedParentToWorld) == 0x210);
+static_assert(offsetof(UPointLightComponent, Translation) == 0x260);
+static_assert(offsetof(UPointLightComponent, Radius) == 0x280);
+static_assert(sizeof(FMatrix) == 0x40);
 
 namespace MeleBridge::Editor
 {
@@ -71,6 +80,17 @@ namespace MeleBridge::Editor
         constexpr int SessionVersion = 2, KeptLightVersion = 3;
         /// After an effect step the paused world runs this long (TickFor), so the effect's particles show where it is now.
         constexpr ULONGLONG EffectRunMs = 1500;
+        /// After a step of a baked or character-only level light, the light environments in its reach are reset and the paused
+        /// world runs this long (docs/07 §12, spike S2): an environment updates only in Tick, fully at most once a second
+        /// (MinTimeBetweenFullUpdates 1.0 on Dorn's), and blends over 0.3 s.
+        constexpr ULONGLONG LightRunMs = 1500;
+        /// An environment is reset when its owner stands within the light's radius plus this (a pawn's own size).
+        constexpr float EnvironmentReach = 100;
+        /// An untouched level light is listed within this of the view (30 m); the overlay draws at most 150 of them.
+        constexpr float LevelLightReach = 3000;
+        /// A level light whose collection's matrix scales it by more than this is not moved (docs/07 §12): its Translation would
+        /// be scaled too. None in the freighter or its rig (spike S0).
+        constexpr float MaxParentScale = 1e-3f;
         /// levels.json is checked for a new write time this often while the editor is open.
         constexpr ULONGLONG LevelsCheckMs = 1000;
         /// A drag command that moves less than this changes nothing: a click on a handle without motion still moves it by the
@@ -150,6 +170,8 @@ namespace MeleBridge::Editor
             UFunction* SetEnvironmentEnabled = nullptr;
             UFunction* KillParticlesForced = nullptr;
             UFunction* ActivateSystem = nullptr;
+            UFunction* SetTranslation = nullptr;
+            UFunction* ForceUpdate = nullptr;
             bool Tried = false;
         } Fn;
 
@@ -271,6 +293,19 @@ namespace MeleBridge::Editor
             /// of that drag: a later drag of the prop takes it along again, and brings it back once the prop fits. A light the
             /// user deleted stays deleted.
             bool DragDeleted = false;
+            /// A light of a level's static light collection (docs/07 §12, 5b): the edit's target is that component (Comp, its slot
+            /// and class), and Actor is its collection, which nothing here ever writes (the hard guard). Component stays set while
+            /// the edit waits for its level. Its collection's object name and its light type (B, C, U, D; 0 unknown) go into its
+            /// session entry. Its path is the component's; it has no tag, a rotation of zeros and scales of 1.
+            UPointLightComponent* Comp = nullptr;
+            int CompIndex = -1;
+            UClass* CompClass = nullptr;
+            bool Component = false;
+            std::string Owner;
+            char Type = 0;
+            /// Where it stood, and its radius, at its last light-environment reset (Reset): the next one resets the environments
+            /// there too, around its old place.
+            std::optional<std::pair<FVector, float>> ResetFrom;
         };
 
         /// An edit's state as an undo step holds it: shown or not, the three flags it has when shown, the transform, a light's
@@ -395,7 +430,10 @@ namespace MeleBridge::Editor
         /// Where a tracked light comes from (docs/07 §12): ours (kind Props or Room by its channels), an NPC's, or a level's.
         enum class LightSource { Ours, Npc, Vanilla };
 
-        /// An actor the props switch, the light lists, the effect list or the NPC list track, as long as its slot holds it.
+        /// An actor the props switch, the light lists, the effect list or the NPC list track, as long as its slot holds it. A level
+        /// light (5b) is its collection (Actor) and its component (Comp, its slot and class), with its light type, its
+        /// collection's object name (Owner), and, for one of the map's characterLights copies (the rig), the vanilla file it was
+        /// copied from (Rig).
         struct Tracked
         {
             AActor* Actor = nullptr;
@@ -413,6 +451,12 @@ namespace MeleBridge::Editor
             std::string Level;
             bool Forked = false;
             std::string Refusal;
+            UPointLightComponent* Comp = nullptr;
+            int CompIndex = -1;
+            UClass* CompClass = nullptr;
+            char Type = 0;
+            std::string Owner;
+            std::string Rig;
         };
 
         /// A light as the prop lighting rule sees it (docs/07 §11): where, its settings as the component has them (on is bEnabled),
@@ -477,6 +521,10 @@ namespace MeleBridge::Editor
             AActor* Selected = nullptr;
             int SelectedIndex = -1;
             UClass* SelectedClass = nullptr;
+            /// A selected level light (docs/07 §12, 5b): the component, its slot and class; Selected is then its collection.
+            UPointLightComponent* SelectedComp = nullptr;
+            int SelectedCompIndex = -1;
+            UClass* SelectedCompClass = nullptr;
             std::string LastPick;
             unsigned long long Frame = 0;
 
@@ -539,7 +587,19 @@ namespace MeleBridge::Editor
             std::vector<Tracked> Effects;
             /// Our NPCs' pawns in the loaded levels (levels.json npcs): the pose check reads them (§12).
             std::vector<Tracked> Pawns;
+            /// The point and spot lights of the loaded levels' static light collections (5b), the map's characterLights copies
+            /// included.
+            std::vector<Tracked> LevelLights;
             bool TrackedStale = true;
+            /// Level lights whose light environments are to be reset at the end of the tick, by edit index (Reset). Set where game
+            /// memory may not be touched (CloseDrag runs in Fail()).
+            std::set<size_t> Resets;
+            /// The selected U light's special channels and the actors on them (the panel's banner), and the light they were
+            /// read for: read once per selection.
+            UObject* ChannelsOf = nullptr;
+            int ChannelsIndex = -1;
+            std::string Channels;
+            std::string ChannelActors;
             /// Add light said once in this game run that a YAML with its own lightTemplate may build another look (§12).
             bool TemplateNoted = false;
             /// Effects whose particles are to be killed and started again at the end of the tick, by edit index (Rerun). Set where
@@ -632,7 +692,8 @@ namespace MeleBridge::Editor
         /// more often than not.
         bool SelectionAlive()
         {
-            return Alive(G.Selected, G.SelectedIndex) && G.Selected->Class == G.SelectedClass;
+            return Alive(G.Selected, G.SelectedIndex) && G.Selected->Class == G.SelectedClass
+                && (G.SelectedComp == nullptr || (Alive(G.SelectedComp, G.SelectedCompIndex) && G.SelectedComp->Class == G.SelectedCompClass));
         }
 
         void Select(AActor* actor)
@@ -640,6 +701,18 @@ namespace MeleBridge::Editor
             G.Selected = actor;
             G.SelectedIndex = actor != nullptr ? actor->ObjectInternalInteger : -1;
             G.SelectedClass = actor != nullptr ? actor->Class : nullptr;
+            G.SelectedComp = nullptr;
+            G.SelectedCompIndex = -1;
+            G.SelectedCompClass = nullptr;
+        }
+
+        /// A level light (docs/07 §12, 5b): its collection is the selected actor, the component the light.
+        void SelectLight(AActor* owner, UPointLightComponent* light)
+        {
+            Select(owner);
+            G.SelectedComp = light;
+            G.SelectedCompIndex = light->ObjectInternalInteger;
+            G.SelectedCompClass = light->Class;
         }
 
         /// A tag that names one actor: not empty, not None and not the class name (an actor's tag is its class name by default).
@@ -1016,10 +1089,19 @@ namespace MeleBridge::Editor
         // ! Lights
         // ========================================
 
-        /// A light actor's point light component; null for any other actor, and for a light of another shape.
+        /// A level's static light collection (docs/07 §12, 5b): a Light actor whose lights are its components. Nothing here writes
+        /// one (Shielded): a reattach of it reattaches its hundred lights.
+        bool IsCollection(UObject* object)
+        {
+            static UClass* const collection = AStaticLightCollectionActor::StaticClass();
+            return object != nullptr && object->IsA(collection);
+        }
+
+        /// A light actor's point light component; null for any other actor (a light collection included), and for a light of
+        /// another shape.
         UPointLightComponent* PointOf(AActor* actor)
         {
-            if (actor == nullptr || !actor->IsA(ALight::StaticClass())) return nullptr;
+            if (actor == nullptr || !actor->IsA(ALight::StaticClass()) || IsCollection(actor)) return nullptr;
             auto const component = static_cast<ALight*>(actor)->LightComponent;
             return Real(component) && component->IsA(UPointLightComponent::StaticClass()) ? static_cast<UPointLightComponent*>(component) : nullptr;
         }
@@ -1052,22 +1134,120 @@ namespace MeleBridge::Editor
             return kind == LightKind::Vanilla ? LightSource::Vanilla : LightSource::Ours;
         }
 
-        /// A light's settings as its component has them; enabled is the component's bEnabled. Its kind is its source's (§12):
-        /// ours by their channels, an NPC's or a level's by where it is, never by its channels.
-        LightBlock LightOf(AActor* actor, LightSource source)
+        /// A point (or spot) light component's settings, with a kind; enabled is its bEnabled.
+        LightBlock FieldsOf(UPointLightComponent const* component, LightKind kind)
         {
             LightBlock light;
-            auto const component = PointOf(actor);
-            if (component == nullptr) return light;
-            light.Kind = source == LightSource::Npc ? LightKind::Npc
-                         : source == LightSource::Vanilla ? LightKind::Vanilla
-                                                           : KindOf(BitsOf(component->LightingChannels));
+            light.Kind = kind;
             light.Radius = component->Radius;
             light.Brightness = component->Brightness;
             light.Color = { component->LightColor.R, component->LightColor.G, component->LightColor.B };
             light.Falloff = component->FalloffExponent;
             light.Enabled = component->bEnabled != 0;
             return light;
+        }
+
+        /// A light's settings as its component has them; enabled is the component's bEnabled. Its kind is its source's (§12):
+        /// ours by their channels, an NPC's or a level's by where it is, never by its channels.
+        LightBlock LightOf(AActor* actor, LightSource source)
+        {
+            auto const component = PointOf(actor);
+            if (component == nullptr) return {};
+            return FieldsOf(component, source == LightSource::Npc       ? LightKind::Npc
+                                       : source == LightSource::Vanilla ? LightKind::Vanilla
+                                                                        : KindOf(BitsOf(component->LightingChannels)));
+        }
+
+        /// A level light's settings (5b): the kind is vanilla.
+        LightBlock LevelLightOf(UPointLightComponent const* light) { return FieldsOf(light, LightKind::Vanilla); }
+
+        /// A level light's type (docs/07 §12, 5b), from its live fields by level_build's rule and in its order: B baked (built into
+        /// the lightmaps, which keep it on the walls whatever the editor does), D dynamic (bForceDynamicLight, or the Dynamic
+        /// channel: drawn live), U on a special channel (Skybox, Unnamed, Cinematic, Gameplay, Crowd: it lights only meshes on
+        /// it), else C (BSP, Static, CompositeDynamic: characters and props through their light environments).
+        char TypeOf(UPointLightComponent const* light)
+        {
+            if (light->bHasLightEverBeenBuiltIntoLightMap && light->UseDirectLightMap) return 'B';
+            auto const bits = BitsOf(light->LightingChannels) & ~ChannelInitialized;
+            if (light->bForceDynamicLight || (bits & ChannelDynamic) != 0) return 'D';
+            if ((bits & ~(ChannelBsp | ChannelStatic | ChannelCompositeDynamic)) != 0) return 'U';
+            return 'C';
+        }
+
+        /// A U light's channels outside the four base ones and bInitialized.
+        DWORD SpecialBits(UPointLightComponent const* light) { return BitsOf(light->LightingChannels) & ~(ChannelInitialized | RoomChannels); }
+
+        /// Channel bits by the names UnrealEd gives them ("Unnamed_6", "Gameplay_4"), comma-separated: FLightingChannelContainer's
+        /// bits 5 to 26 (Engine_structs.hpp: Skybox, Unnamed..Unnamed05, Cinematic..Cinematic09, Gameplay..Gameplay03, Crowd).
+        std::string ChannelNames(DWORD bits)
+        {
+            std::string names;
+            auto const add = [&](std::string name) { names += (names.empty() ? "" : ", ") + name; };
+            for (int bit = 5; bit <= 26; bit++)
+            {
+                if ((bits & (1u << bit)) == 0) continue;
+                if (bit == 5) add("Skybox");
+                else if (bit <= 11) add(std::format("Unnamed_{}", bit - 5));
+                else if (bit <= 21) add(std::format("Cinematic_{}", bit - 11));
+                else if (bit <= 25) add(std::format("Gameplay_{}", bit - 21));
+                else add("Crowd");
+            }
+            return names;
+        }
+
+        /// A matrix row's first three numbers.
+        FVector RowOf(FPlane const& row) { return { row.X, row.Y, row.Z }; }
+
+        /// Where a level light stands (docs/07 §12, 5b): its Translation through the matrix its collection's file gives it at load
+        /// (CachedParentToWorld, row vectors: T.x X + T.y Y + T.z Z + W), which is LightToWorld's origin; read so, it is right while
+        /// its level is loaded but not visible too (no transform update yet). A matrix not set (all zeros) reads LightToWorld.
+        FVector PlaceOfLight(UPointLightComponent const* light)
+        {
+            auto const& m = light->CachedParentToWorld;
+            auto const x = RowOf(m.XPlane), y = RowOf(m.YPlane), z = RowOf(m.ZPlane);
+            if (x.X == 0 && x.Y == 0 && x.Z == 0 && y.X == 0 && y.Y == 0 && y.Z == 0) return RowOf(light->LightToWorld.WPlane);
+            auto const& t = light->Translation;
+            return { t.X * x.X + t.Y * y.X + t.Z * z.X + m.WPlane.X, t.X * x.Y + t.Y * y.Y + t.Z * z.Y + m.WPlane.Y,
+                     t.X * x.Z + t.Y * y.Z + t.Z * z.Z + m.WPlane.Z };
+        }
+
+        /// How far its collection's matrix scales a level light: the largest of each row's length less 1.
+        float ParentScaleOf(UPointLightComponent const* light)
+        {
+            auto const& m = light->CachedParentToWorld;
+            auto most = 0.0;
+            for (auto const row : { &m.XPlane, &m.YPlane, &m.ZPlane })
+                most = std::max(most, std::fabs(std::sqrt(double(row->X) * row->X + double(row->Y) * row->Y + double(row->Z) * row->Z) - 1));
+            return static_cast<float>(most);
+        }
+
+        /// The Translation that puts a level light at a world place: (world - origin) through the inverse of the matrix's 3x3
+        /// (Cramer's rule on its rows X, Y, Z: T = ((d . Y x Z), (X . d x Z), (X . Y x d)) / (X . Y x Z)), the full inverse, as
+        /// level_build computes it from the file's matrix. False when the 3x3 is singular.
+        bool TranslationFor(UPointLightComponent const* light, FVector world, FVector& out)
+        {
+            auto const& m = light->CachedParentToWorld;
+            using V = std::array<double, 3>;
+            auto const row = [](FPlane const& p) { return V{ p.X, p.Y, p.Z }; };
+            auto const cross = [](V const& a, V const& b) { return V{ a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] }; };
+            auto const dot = [](V const& a, V const& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+            auto const x = row(m.XPlane), y = row(m.YPlane), z = row(m.ZPlane);
+            V const d{ double(world.X) - m.WPlane.X, double(world.Y) - m.WPlane.Y, double(world.Z) - m.WPlane.Z };
+            auto const det = dot(x, cross(y, z));
+            if (std::fabs(det) < 1e-9) return false;
+            out = { static_cast<float>(dot(d, cross(y, z)) / det), static_cast<float>(dot(x, cross(d, z)) / det), static_cast<float>(dot(x, cross(y, d)) / det) };
+            return true;
+        }
+
+        /// The hard guard (docs/07 §12, 5b): nothing writes a static light collection, no pose, no flags, no reattach (one
+        /// reattaches all its lights, about a hundred). True for one, said once per collection in the log.
+        bool Shielded(AActor* actor, char const* what)
+        {
+            if (!IsCollection(actor)) return false;
+            static std::unordered_set<std::string> said;
+            if (auto path = ToUtf8(PathOf(actor)); said.insert(path).second)
+                LEASI_WARN("editor: {} is a light collection: {} of it was not written (its lights are edited one by one)", path, what);
+            return true;
         }
 
         bool OurLight(AActor* actor);
@@ -1078,11 +1258,10 @@ namespace MeleBridge::Editor
         /// exactly). A field an entry lacks was filled from the light itself (LightFrom), so it is never written: an untouched
         /// colour from a prefab archetype stays the archetype's, on a first edit, an undo or a pass after a reload. The actor
         /// shows enabled && !deleted, on the component and the actor. The caller reattaches once, unless the actor's level is
-        /// loaded but not visible.
-        void WriteKeptLight(AActor* actor, LightBlock const& light, bool deleted)
+        /// loaded but not visible. A level light (5b) has only the component written (WriteKeptFields): its collection is never
+        /// touched.
+        void WriteKeptFields(UPointLightComponent* component, LightBlock const& light, bool deleted)
         {
-            auto const component = PointOf(actor);
-            if (component == nullptr) return;
             auto const differs = [](float now, float wanted, float within) { return !(std::fabs(now - wanted) <= within); };
             if (differs(component->Radius, light.Radius, 0.01f + 1e-5f)) component->Radius = light.Radius;
             if (differs(component->Brightness, light.Brightness, 0.001f + 1e-6f)) component->Brightness = light.Brightness;
@@ -1097,6 +1276,14 @@ namespace MeleBridge::Editor
             }
             auto const on = light.Enabled && !deleted ? 1u : 0u;
             if (component->bEnabled != on) component->bEnabled = on;
+        }
+
+        void WriteKeptLight(AActor* actor, LightBlock const& light, bool deleted)
+        {
+            auto const component = PointOf(actor);
+            if (component == nullptr) return;
+            WriteKeptFields(component, light, deleted);
+            auto const on = light.Enabled && !deleted ? 1u : 0u;
             if (static_cast<ALight*>(actor)->bEnabled != on) static_cast<ALight*>(actor)->bEnabled = on;
         }
 
@@ -1145,19 +1332,29 @@ namespace MeleBridge::Editor
         /// component's bEnabled as light.enabled && !deleted, each light field within editor_import's tolerances. Its rotation, its
         /// scales and bHidden don't count. A field the state lacks is the light's own. The light is read with the source the
         /// state's kind names (§12), so an npc state compares with the light read as npc; an npc state's location is had within
-        /// 0.05 (NpcLightNoise), since the build places the light from 2-decimal offsets.
+        /// 0.05 (NpcLightNoise), since the build places the light from 2-decimal offsets. A level light (5b) is compared the same
+        /// way, by its component and where its Translation puts it (HasLevelLight).
+        bool ShowsLight(LightBlock const& now, bool on, FVector place, json const& state, bool deleted)
+        {
+            auto const kind = KindIn(state);
+            auto const light = LightFrom(state, now);
+            double v[3];
+            auto const location = Numbers(state, "location", v) ? FVector{ static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]) } : place;
+            auto const placed = kind == LightKind::Npc ? Near(place, location, NpcLightNoise) : SameLocation(place, location);
+            return placed && on == (light.Enabled && !deleted) && SameLightFields(now, light);
+        }
+
         bool HasLight(AActor* actor, json const& state, bool deleted)
         {
             auto const component = PointOf(actor);
             if (component == nullptr) return false;
             auto const kind = KindIn(state);
-            auto const now = LightOf(actor, kind ? SourceOf(*kind) : LightSource::Ours);
-            auto const light = LightFrom(state, now);
-            double v[3];
-            auto const location = Numbers(state, "location", v) ? FVector{ static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]) }
-                                                                : actor->Location;
-            auto const placed = kind == LightKind::Npc ? Near(actor->Location, location, NpcLightNoise) : SameLocation(actor->Location, location);
-            return placed && (component->bEnabled != 0) == (light.Enabled && !deleted) && SameLightFields(now, light);
+            return ShowsLight(LightOf(actor, kind ? SourceOf(*kind) : LightSource::Ours), component->bEnabled != 0, actor->Location, state, deleted);
+        }
+
+        bool HasLevelLight(UPointLightComponent const* light, json const& state, bool deleted)
+        {
+            return ShowsLight(LevelLightOf(light), light->bEnabled != 0, PlaceOfLight(light), state, deleted);
         }
 
         float Distance(FVector a, FVector b)
@@ -1260,8 +1457,17 @@ namespace MeleBridge::Editor
 
         size_t IndexOf(Edit const& edit) { return static_cast<size_t>(&edit - G.Edits.data()); }
 
-        /// Still on the actor it was bound to: not pending, the actor neither destroyed nor replaced.
-        bool Bound(Edit const& e) { return !e.Pending && Alive(e.Actor, e.Index) && e.Actor->Class == e.Class; }
+        /// A level light's pose as an edit holds it (docs/07 §12, 5b): where it stands, a rotation of zeros and scales of 1 (an
+        /// entry needs them, and its aim is not edited).
+        Pose LightPose(UPointLightComponent const* light) { return { PlaceOfLight(light), {}, 1, { 1, 1, 1 } }; }
+
+        /// Still on the actor it was bound to: not pending, the actor neither destroyed nor replaced; a level light's component
+        /// too.
+        bool Bound(Edit const& e)
+        {
+            return !e.Pending && Alive(e.Actor, e.Index) && e.Actor->Class == e.Class
+                && (!e.Component || (Alive(e.Comp, e.CompIndex) && e.Comp->Class == e.CompClass));
+        }
 
         void Detach(Edit& e)
         {
@@ -1270,6 +1476,9 @@ namespace MeleBridge::Editor
             e.Class = nullptr;
             e.LevelObject = nullptr;
             e.LevelIndex = -1;
+            e.Comp = nullptr;
+            e.CompIndex = -1;
+            e.CompClass = nullptr;
         }
 
         float ExtentOf(AActor* actor);
@@ -1297,11 +1506,45 @@ namespace MeleBridge::Editor
             if (auto const extent = Visible(actor) ? ExtentOf(actor) : 0.f; extent > 0) e.FileExtent = extent;
         }
 
-        /// The edit bound to an actor, if any.
+        /// A level light's edit takes its component as it stands (docs/07 §12, 5b), its collection as its actor, which nothing
+        /// writes. Its edit has its settings; one from an entry without them (none should be) takes the light's own. Its last
+        /// reset is where it stands now: the first reset after a change takes the environments there too.
+        void BindLight(Edit& e, AActor* owner, UPointLightComponent* light)
+        {
+            e.Effect = false;
+            e.Actor = owner;
+            e.Index = owner->ObjectInternalInteger;
+            e.Class = owner->Class;
+            e.LevelObject = owner->Outer;
+            e.LevelIndex = owner->Outer != nullptr ? owner->Outer->ObjectInternalInteger : -1;
+            e.Comp = light;
+            e.CompIndex = light->ObjectInternalInteger;
+            e.CompClass = light->Class;
+            e.Component = true;
+            e.Pending = false;
+            e.PendingWhy.clear();
+            e.Deleted = false;
+            e.ShownFlags = {};
+            if (!e.Light) e.Light = LevelLightOf(light);
+            e.Type = TypeOf(light);
+            e.FileExtent.reset();
+            e.ResetFrom = std::pair{ PlaceOfLight(light), light->Radius };
+        }
+
+        /// The edit bound to an actor, if any; never a level light's (its actor is its collection: LightEditOf).
         Edit* EditOf(AActor* actor)
         {
             auto const it = std::find_if(G.Edits.begin(), G.Edits.end(), [&](Edit const& e) {
-                return !e.Pending && e.Actor == actor && e.Index == actor->ObjectInternalInteger && e.Class == actor->Class;
+                return !e.Pending && !e.Component && e.Actor == actor && e.Index == actor->ObjectInternalInteger && e.Class == actor->Class;
+            });
+            return it != G.Edits.end() ? &*it : nullptr;
+        }
+
+        /// The edit bound to a level light (5b), if any.
+        Edit* LightEditOf(UPointLightComponent* light)
+        {
+            auto const it = std::find_if(G.Edits.begin(), G.Edits.end(), [&](Edit const& e) {
+                return !e.Pending && e.Component && e.Comp == light && e.CompIndex == light->ObjectInternalInteger && e.CompClass == light->Class;
             });
             return it != G.Edits.end() ? &*it : nullptr;
         }
@@ -1516,9 +1759,70 @@ namespace MeleBridge::Editor
             return &NewEdit(actor);
         }
 
+        /// A new edit of an untouched level light (docs/07 §12, 5b): its state now, which is also its base (what the level file or
+        /// the YAML holds). Saved under its canonical path (a fork's light by its vanilla file), with its collection's name.
+        Edit& NewLightEdit(AActor* owner, UPointLightComponent* light)
+        {
+            auto& edit = G.Edits.emplace_back();
+            BindLight(edit, owner, light);
+            edit.Map = ToUtf8(MapName());
+            edit.Path = Canonical(ToUtf8(PathOf(light)), edit.Map);
+            edit.Level = edit.Path.substr(0, edit.Path.find('.'));
+            edit.ClassName = ToUtf8(NameOf(light->Class));
+            edit.Owner = ToUtf8(NameOf(owner));
+            edit.Now = LightPose(light);
+            edit.Base = edit.Now;
+            edit.BaseHidden = false;
+            edit.BaseLight = edit.Light;
+            return edit;
+        }
+
+        std::string AwaitingLight(UPointLightComponent* light);
+
+        /// Touch for a level light: its edit, made on first touch, unless a session entry or an edit waiting for its level names it.
+        Edit* TouchLight(AActor* owner, UPointLightComponent* light, char const* verb, void (*say)(std::string) = SayOnce)
+        {
+            if (auto const found = LightEditOf(light)) return found;
+            if (auto const why = AwaitingLight(light); !why.empty())
+            {
+                say(std::format("not {}: {}", verb, why));
+                G.PassNow = true;
+                return nullptr;
+            }
+            return &NewLightEdit(owner, light);
+        }
+
+        /// Moves a level light alone (docs/07 §12, 5b; spike S1): the Translation that puts it there through its collection's matrix,
+        /// through SetTranslation, which updates that one light (a reattach of the collection would redo all of them). Raw while its
+        /// level is loaded but not visible: it takes its place when it attaches. False, writing nothing, when the matrix can't be
+        /// inverted.
+        bool MoveLight(UPointLightComponent* light, FVector to, bool visible)
+        {
+            FVector translation;
+            if (!TranslationFor(light, to, translation)) return false;
+            if (visible && Fn.SetTranslation != nullptr)
+            {
+                UPointLightComponent_execSetTranslation_Parms set;
+                set.NewTranslation = translation;
+                CallProcessEvent(light, Fn.SetTranslation, &set);
+            }
+            else light->Translation = translation;
+            return true;
+        }
+
+        /// The one-light refresh (spike S1): ForceUpdate(false) reattaches this light alone, so its fields show (a raw write shows
+        /// nothing until then).
+        void RefreshLight(UPointLightComponent* light)
+        {
+            if (Fn.ForceUpdate == nullptr) return;
+            UActorComponent_execForceUpdate_Parms update;
+            update.bTransformOnly = 0;
+            CallProcessEvent(light, Fn.ForceUpdate, &update);
+        }
+
         void UpdateComponents(AActor* actor)
         {
-            if (Fn.ForceUpdateComponents == nullptr) return;
+            if (Fn.ForceUpdateComponents == nullptr || Shielded(actor, "a reattach")) return;
             AActor_execForceUpdateComponents_Parms update;
             update.bCollisionUpdate = 1;
             update.bTransformOnly = 0;
@@ -1530,7 +1834,7 @@ namespace MeleBridge::Editor
         void WriteFlags(AActor* actor, HideFlags const& flags, bool visible)
         {
             // A light is bHidden by class default and has no collision: it is switched off instead (WriteLight).
-            if (IsLight(actor)) return;
+            if (IsLight(actor) || Shielded(actor, "bHidden and collision")) return;
             if (visible && Fn.SetHidden != nullptr && Fn.SetCollision != nullptr)
             {
                 AActor_execSetHidden_Parms hide;
@@ -1557,11 +1861,13 @@ namespace MeleBridge::Editor
             if (e.Light)
             {
                 // A spawned light the editor deleted is switched off, not hidden: bEnabled is enabled && !deleted. The caller
-                // reattaches.
+                // reattaches (a level light's: RefreshLight; Delete switches one off through its settings, never this).
                 e.Deleted = deleted;
-                ApplyLight(e.Actor, *e.Light, deleted);
+                if (e.Component) WriteKeptFields(e.Comp, *e.Light, deleted);
+                else ApplyLight(e.Actor, *e.Light, deleted);
                 return;
             }
+            if (Shielded(e.Actor, "a delete")) return;
             if (deleted)
             {
                 e.ShownFlags = FlagsOf(e.Actor);
@@ -1577,11 +1883,25 @@ namespace MeleBridge::Editor
         /// Writes a whole state to an edit's actor and to the edit (undo, redo, re-apply): Location, Rotation, DrawScale and
         /// DrawScale3D raw, hidden or shown, then the components follow, unless the actor's level is loaded but not visible. A
         /// light: its location and its settings (the edit's Light), on as Light->Enabled && !deleted, then one reattach; its
-        /// rotation and scales stay the actor's (only the location counts).
+        /// rotation and scales stay the actor's (only the location counts). A level light (5b): its place through MoveLight, its
+        /// settings through the kept writer, then the one-light refresh; its collection is never written. A place its
+        /// collection's matrix can't reach leaves it where it is.
         void Put(Edit& e, Pose const& pose, bool deleted)
         {
             auto const actor = e.Actor;
             auto const visible = Visible(actor);
+            if (e.Component)
+            {
+                auto place = PlaceOfLight(e.Comp);
+                // The place asked for, not the one read back through the matrix: a float off would read as a change at the next Save.
+                if (Near(place, pose.Location, LocationNoise) || MoveLight(e.Comp, pose.Location, visible)) place = pose.Location;
+                e.Now = { place, {}, 1, { 1, 1, 1 } };
+                e.Deleted = deleted;
+                if (e.Light) WriteKeptFields(e.Comp, *e.Light, deleted);
+                if (visible) RefreshLight(e.Comp);
+                return;
+            }
+            if (Shielded(actor, "a pose")) return;
             if (e.Light)
             {
                 actor->Location = pose.Location;
@@ -1652,13 +1972,15 @@ namespace MeleBridge::Editor
 
         /// The props whose prop lighting an edit's change may change (docs/07 §11): an ours light's change any prop's, a prop's
         /// change its own. An NPC's or a level's light is never on the prop lights' channel (§12). An effect's change kills and
-        /// restarts its particles (§12). Checked at the end of the tick (Reswitch, Rerun): this only takes note, since CloseDrag
-        /// runs in Fail(), which must not touch game memory.
+        /// restarts its particles (§12). A level light's change resets the light environments in its reach (5b). Checked at the
+        /// end of the tick (Reswitch, Rerun, Reset): this only takes note, since CloseDrag runs in Fail(), which must not touch
+        /// game memory.
         void NoteChanged(size_t index)
         {
             if (index >= G.Edits.size()) return;
             auto const& e = G.Edits[index];
-            if (e.Light)
+            if (e.Component) G.Resets.insert(index);
+            else if (e.Light)
             {
                 if (!KeptKind(e.Light->Kind)) G.ReswitchAll = true;
             }
@@ -1818,6 +2140,8 @@ namespace MeleBridge::Editor
             Fn.SetEnvironmentEnabled = find(L"Engine.LightEnvironmentComponent.SetEnabled");
             Fn.KillParticlesForced = find(L"Engine.ParticleSystemComponent.KillParticlesForced");
             Fn.ActivateSystem = find(L"Engine.ParticleSystemComponent.ActivateSystem");
+            Fn.SetTranslation = find(L"Engine.PointLightComponent.SetTranslation");
+            Fn.ForceUpdate = find(L"Engine.ActorComponent.ForceUpdate");
         }
 
         void SetFreeCam(APlayerController* pc, bool on)
@@ -2049,7 +2373,7 @@ namespace MeleBridge::Editor
                         built.push_back(std::move(n));
                     }
                 }
-                // Its characterLights copies (Phase 5b): read, not used yet.
+                // Its characterLights copies (Phase 5b): their lights are listed as the rig's, and ship into this level.
                 if (auto const copies = level.find("characterLights"); copies != level.end() && copies->is_object())
                 {
                     auto& map = ours.CharacterLights[key];
@@ -2230,7 +2554,7 @@ namespace MeleBridge::Editor
             { "BioTriggerStream", "it streams the map's levels" },
             { "Volume", "volumes carry Kismet, streaming and physics" },
             { "Brush", "the level's geometry" },
-            { "StaticLightCollectionActor", "the level's baked lights" },
+            { "StaticLightCollectionActor", "the level's light collection: its lights are edited one by one (Lights tab)" },
             { "Light", "a vanilla light actor; no map of ours streams one, so it can't ship" },
             { "InterpActor", "Kismet moves it" },
             { "SkeletalMeshActor", "Kismet and matinees animate it" },
@@ -2467,6 +2791,8 @@ namespace MeleBridge::Editor
 
         std::string Refusal(AActor* actor, bool deleting)
         {
+            // Never one, in our levels too (the rig's copy is in our map): a pose or a reattach of it moves all its lights (5b).
+            if (IsCollection(actor)) return ClassRefusal(actor->Class);
             if (IsLight(actor))
             {
                 // A light is never hidden nor destroyed: Delete switches it off, so bStatic and bNoDelete don't matter (docs/07
@@ -2546,6 +2872,69 @@ namespace MeleBridge::Editor
             return { false, std::move(text) };
         }
 
+        // ! Level lights
+        // ========================================
+
+        /// A level light's command (docs/07 §12, 5b): the panel's change, a move, or a delete (it switches the light off).
+        enum class LightOp { Change, Move, Delete };
+
+        /// The vanilla file a collection of one of our levels was copied from (levels.json characterLights: the rig); empty for any
+        /// other collection.
+        std::string RigSourceOf(AActor* owner)
+        {
+            auto const level = G.Ours.CharacterLights.find(Lower(LevelOf(owner)));
+            if (level == G.Ours.CharacterLights.end()) return {};
+            auto const it = level->second.find(Lower(ToUtf8(NameOf(owner))));
+            return it != level->second.end() ? it->second : std::string{};
+        }
+
+        /// Why the editor leaves a level light alone for a command (docs/07 §12, 5b), or empty. A collection of one of our levels
+        /// that no characterLights item names: no build writes its lights. A move of one its collection's matrix scales: its
+        /// Translation would be scaled too. A delete of one already off. A light of a file no map of ours streams is edited all the
+        /// same: its ships line says dev-only.
+        std::string LightRefusal(AActor* owner, UPointLightComponent* light, LightOp op)
+        {
+            if (G.Ours.Read && OurLevel(LevelOf(owner), owner->Outer) && RigSourceOf(owner).empty())
+                return std::format("{} is a light collection of {} that no characterLights item names: no build writes its lights",
+                                   ToUtf8(NameOf(owner)), LevelOf(owner));
+            if (op == LightOp::Move && ParentScaleOf(light) > MaxParentScale) return "its light collection scales it";
+            if (op == LightOp::Delete)
+            {
+                auto const edit = LightEditOf(light);
+                if (!(edit != nullptr && edit->Light ? edit->Light->Enabled : light->bEnabled != 0))
+                    return std::format("{} is switched off already (Enabled in the panel switches it on)", ToUtf8(NameOf(light)));
+            }
+            return {};
+        }
+
+        /// Whether a level light's edit ships (docs/07 §12, 5b): a characterLights copy's is built into the map; any other ships as
+        /// an edit of its collection would (ShipsOf: in a fork, or dev-only).
+        std::string LightShips(AActor* owner, AWorldInfo* world)
+        {
+            if (auto const source = RigSourceOf(owner); !source.empty())
+                return std::format("ships: built into {} (characterLights copy of {})", LevelOf(owner), source);
+            return ShipsOf(owner, world).Text;
+        }
+
+        /// A level light's collection and component, as an entry or a pass finds them.
+        struct LevelLight
+        {
+            AActor* Owner = nullptr;
+            UPointLightComponent* Light = nullptr;
+        };
+
+        /// The point and spot lights of a static light collection: its Components (at run time LightComponents is empty, docs/07
+        /// §12). Its sun and sky lights are other classes, so never among them.
+        template <typename Each>
+        void LightsIn(AActor* owner, Each const& each)
+        {
+            static UClass* const point = UPointLightComponent::StaticClass();
+            for (auto const component : owner->Components)
+            {
+                if (Real(component) && component->IsA(point)) each(static_cast<UPointLightComponent*>(component));
+            }
+        }
+
         // ! Prop lighting
         // ========================================
 
@@ -2593,7 +2982,11 @@ namespace MeleBridge::Editor
             return bounds;
         }
 
-        bool StillThere(Tracked const& t) { return Alive(t.Actor, t.Index) && t.Actor->Class == t.Class && !t.Actor->bDeleteMe; }
+        bool StillThere(Tracked const& t)
+        {
+            return Alive(t.Actor, t.Index) && t.Actor->Class == t.Class && !t.Actor->bDeleteMe
+                && (t.Comp == nullptr || (Alive(t.Comp, t.CompIndex) && t.Comp->Class == t.CompClass));
+        }
 
         /// How the status line names an actor with no edit: its tag when it is a real one, else its object name.
         std::string NameFor(AActor* actor)
@@ -2606,7 +2999,8 @@ namespace MeleBridge::Editor
         /// (ListedLight, NpcLightOf, SwitchedProp, NpcOfPawn, docs/07 §12), read again when stale. A level's tag lists are looked
         /// up once per level, so no actor's path is built but a tracked one's, once. An NPC light is one whose edit has the npc
         /// kind, or whose tag levels.json names among its own level's npcs lights: it goes in OtherLights, which the props switch
-        /// never walks.
+        /// never walks. The point and spot lights of each static light collection go in LevelLights (5b), with their type, a
+        /// characterLights copy's with the file it was copied from.
         void RefreshTracked()
         {
             if (!G.TrackedStale) return;
@@ -2616,10 +3010,12 @@ namespace MeleBridge::Editor
             G.Props.clear();
             G.Effects.clear();
             G.Pawns.clear();
+            G.LevelLights.clear();
             std::unordered_map<AActor*, Edit const*> edits;
             for (auto const& e : G.Edits)
             {
-                if (Bound(e)) edits.emplace(e.Actor, &e);
+                // A level light's actor is its collection.
+                if (Bound(e) && !e.Component) edits.emplace(e.Actor, &e);
             }
             auto const tags = [](std::unordered_map<std::string, std::unordered_set<std::string>> const& lists, std::string const& level) {
                 auto const it = lists.find(level);
@@ -2653,7 +3049,25 @@ namespace MeleBridge::Editor
                         auto const it = std::find_if(npcs->second.begin(), npcs->second.end(), [&](BuiltNpc const& n) { return SameText(n.Tag, tag); });
                         return it != npcs->second.end() ? &*it : nullptr;
                     };
-                    if (IsLight(actor))
+                    if (IsCollection(actor))
+                    {
+                        auto const owner = ToUtf8(NameOf(actor));
+                        auto const rig = RigSourceOf(actor);
+                        LightsIn(actor, [&](UPointLightComponent* light) {
+                            Tracked t{ actor, actor->ObjectInternalInteger, actor->Class, ToUtf8(PathOf(light)), LightSource::Vanilla };
+                            t.Name = ToUtf8(NameOf(light));
+                            t.Level = Canonical(file, map);
+                            t.Forked = !VanillaOf(file, map).empty();
+                            t.Comp = light;
+                            t.CompIndex = light->ObjectInternalInteger;
+                            t.CompClass = light->Class;
+                            t.Type = TypeOf(light);
+                            t.Owner = owner;
+                            t.Rig = rig;
+                            G.LevelLights.push_back(std::move(t));
+                        });
+                    }
+                    else if (IsLight(actor))
                     {
                         // Its NPC, when levels.json names it among its level's npcs lights.
                         BuiltNpc const* npc = nullptr;
@@ -3046,6 +3460,16 @@ namespace MeleBridge::Editor
             return false;
         }
 
+        /// What the world's run after a step shows (Rerun, Reset): added to the status line of what the step said this tick (a
+        /// delete, an undo), and only it logged (the step's line is), or said on its own (the end of a drag). Nothing when empty.
+        void SayAfter(std::string what)
+        {
+            if (what.empty()) return;
+            if (G.StatusFrame != G.Frame || G.Status.empty()) return Say(std::move(what));
+            LEASI_INFO("editor: {}", what);
+            G.Status += "; " + what;
+        }
+
         /// At the end of the tick: each effect a step changed (NoteChanged: a move, a turn, a delete, an undo or redo, a pass that
         /// applied one) kills its particles and starts again where it is now (docs/07 §12), then the paused world runs 1.5 s
         /// (TickFor) so they show. Without the kill, the old particles stay where they were (spike S4). A deleted (hidden) one is
@@ -3075,15 +3499,68 @@ namespace MeleBridge::Editor
             }
             if (count == 0) return;
             // TickFor refuses while the game had its own pause when F8 opened: the particles show once the editor closes.
-            std::string const what = TickFor(EffectRunMs) ? "effects run 1.5 s"
-                                     : G.WasPlayersOnly ? "effects not run: the game had paused the world when F8 opened"
-                                                        : "";
-            if (what.empty()) return;
-            // After what the step said this tick (a delete, an undo): added to its status line, and only it logged (the step's
-            // line is). Or on its own (the end of a drag).
-            if (G.StatusFrame != G.Frame || G.Status.empty()) return Say(what);
-            LEASI_INFO("editor: {}", what);
-            G.Status += "; " + what;
+            SayAfter(TickFor(EffectRunMs) ? "effects run 1.5 s"
+                     : G.WasPlayersOnly   ? "effects not run: the game had paused the world when F8 opened"
+                                          : "");
+        }
+
+        /// At the end of the tick (docs/07 §12, 5b): after a step of a baked or character light (B, C: NoteChanged), each enabled
+        /// light environment whose owner stands within the light's reach before or after the step is reset (SetEnabled false,
+        /// then true), then the paused world runs 1.5 s (TickFor): an environment takes in a light only while the world ticks
+        /// (spike S2). A U or D light has a proxy, which its refresh updated. One switched to prop lights (§11) is off: left so.
+        /// Live only: nothing of it ships.
+        void Reset()
+        {
+            if (G.Resets.empty()) return;
+            auto const which = std::exchange(G.Resets, {});
+            std::vector<std::pair<FVector, float>> spheres;
+            for (auto const i : which)
+            {
+                if (i >= G.Edits.size() || !G.Edits[i].Component || !Bound(G.Edits[i])) continue;
+                auto& e = G.Edits[i];
+                auto const now = std::pair{ PlaceOfLight(e.Comp), e.Comp->Radius };
+                auto const was = std::exchange(e.ResetFrom, now);
+                if ((e.Type != 'B' && e.Type != 'C') || !Visible(e.Actor)) continue;
+                spheres.push_back(now);
+                if (was && (!Near(was->first, now.first, LocationNoise) || was->second != now.second)) spheres.push_back(*was);
+            }
+            if (spheres.empty()) return;
+            auto& objects = *UObject::GObjObjects;
+            auto const environmentClass = UDynamicLightEnvironmentComponent::StaticClass();
+            auto count = 0;
+            for (UINT i = 0; i < objects.Count(); i++)
+            {
+                auto const object = objects.GetData()[i];
+                if (!Real(object) || !object->IsA(environmentClass)) continue;
+                auto const environment = static_cast<ULightEnvironmentComponent*>(object);
+                auto const owner = environment->Owner;
+                if (!environment->bEnabled || !Real(owner) || owner->bDeleteMe || !Visible(owner)) continue;
+                auto const reached = std::any_of(spheres.begin(), spheres.end(), [&](auto const& sphere) {
+                    return Distance(owner->Location, sphere.first) <= sphere.second + EnvironmentReach;
+                });
+                if (!reached) continue;
+                SetEnvironment(environment, false);
+                SetEnvironment(environment, true);
+                count++;
+            }
+            LEASI_INFO("editor: {} light environment{} reset after a level light step", count, count == 1 ? "" : "s");
+            if (count == 0 || !G.Open) return;
+            SayAfter(TickFor(LightRunMs) ? std::format("characters lit again: {} light environment{} reset, the world runs 1.5 s", count, count == 1 ? "" : "s")
+                     : G.WasPlayersOnly  ? "characters not updated: the game had paused the world when F8 opened (they update once it runs)"
+                                         : "");
+        }
+
+        /// Reset, guarded on its own: a fault drops the resets it had to do.
+        void ResetEntry(UObject*)
+        {
+            try
+            {
+                Reset();
+            }
+            catch (std::exception const& e)
+            {
+                LEASI_ERROR("editor: light environments: {}", e.what());
+            }
         }
 
         /// Rerun, guarded on its own: a fault drops the effects it had to run.
@@ -3261,9 +3738,108 @@ namespace MeleBridge::Editor
             return G.Selected;
         }
 
+        /// A panel command's settings held to the panel's ranges against the light's now: a field the command changes is clamped,
+        /// one it sends back as the light has it passes as it is.
+        LightBlock Held(LightBlock wanted, LightBlock const& now)
+        {
+            auto const held = [](float value, float low, float high, float was) {
+                if (value == was) return value;
+                return std::isfinite(value) ? std::clamp(value, low, high) : was;
+            };
+            wanted.Radius = held(wanted.Radius, MinLightRadius, MaxLightRadius, now.Radius);
+            wanted.Brightness = held(wanted.Brightness, 0, MaxBrightness, now.Brightness);
+            wanted.Falloff = held(wanted.Falloff, MinFalloff, MaxFalloff, now.Falloff);
+            for (auto& c : wanted.Color) c = std::clamp(c, 0, 255);
+            return wanted;
+        }
+
+        /// The selected level light, for a command (docs/07 §12, 5b): none when no level light is selected, or when the editor
+        /// refuses it this command (said once, or with say).
+        UPointLightComponent* LightTarget(char const* verb, LightOp op, void (*say)(std::string) = SayOnce)
+        {
+            if (!SelectionAlive() || G.SelectedComp == nullptr) return nullptr;
+            if (auto const why = LightRefusal(G.Selected, G.SelectedComp, op); !why.empty())
+            {
+                say(std::format("not {}: {}", verb, why));
+                return nullptr;
+            }
+            return G.SelectedComp;
+        }
+
+        /// A move of a level light (docs/07 §12, 5b): each drag command moves that light alone (MoveLight); the light environments
+        /// in its reach are reset once the drag ends (CloseDrag, Reset).
+        void MoveLevelLight(FVector to)
+        {
+            auto const light = LightTarget("moved", LightOp::Move);
+            if (light == nullptr || Near(PlaceOfLight(light), to, LocationNoise)) return;
+            if (Fn.SetTranslation == nullptr)
+            {
+                SayOnce("not moved: PointLightComponent.SetTranslation was not found");
+                return;
+            }
+            FVector translation;
+            if (!TranslationFor(light, to, translation))
+            {
+                SayOnce("not moved: its light collection's matrix can't be inverted");
+                return;
+            }
+            auto const owner = G.Selected;
+            auto const edit = TouchLight(owner, light, "moved");
+            if (edit == nullptr) return;
+            OpenDrag(*edit, StepKind::Move);
+            MoveLight(light, to, Visible(owner));
+            edit->Now.Location = to;
+            edit->Saved = false;
+        }
+
+        /// The panel on a level light (docs/07 §12, 5b): the kept writer, then the one-light refresh (a U or D light shows it at
+        /// once; a B or C one has no proxy, and characters take it when the drag ends: Reset). Its kind stays vanilla.
+        void SetLevelLight(LightBlock wanted)
+        {
+            auto const light = LightTarget("changed", LightOp::Change);
+            if (light == nullptr) return;
+            auto const owner = G.Selected;
+            auto const existing = LightEditOf(light);
+            auto const now = existing != nullptr && existing->Light ? *existing->Light : LevelLightOf(light);
+            wanted = Held(wanted, now);
+            wanted.Kind = LightKind::Vanilla;
+            if (wanted == now) return;
+            auto const edit = TouchLight(owner, light, "changed");
+            if (edit == nullptr || !edit->Light || wanted == *edit->Light) return;
+            OpenDrag(*edit, StepKind::Light);
+            edit->Light = wanted;
+            WriteKeptFields(light, wanted, edit->Deleted);
+            if (Visible(owner)) RefreshLight(light);
+            edit->Saved = false;
+        }
+
+        /// Delete of a level light (docs/07 §12, 5b): switched off, a light step, never hidden nor destroyed; a baked one for
+        /// characters and props only (the walls keep their lightmaps). LightRefusal turns down one already off.
+        void DeleteLevelLight()
+        {
+            auto const light = LightTarget("deleted", LightOp::Delete, Say);
+            if (light == nullptr) return;
+            auto const owner = G.Selected;
+            auto const touched = TouchLight(owner, light, "deleted", Say);
+            if (touched == nullptr || !touched->Light) return;
+            auto& edit = *touched;
+            auto const before = StateOf(edit);
+            edit.Light->Enabled = false;
+            WriteKeptFields(light, *edit.Light, edit.Deleted);
+            if (Visible(owner)) RefreshLight(light);
+            edit.Saved = false;
+            PushStep({ IndexOf(edit), StepKind::Light, before, StateOf(edit) });
+            NoteChanged(IndexOf(edit));
+            Select(nullptr);
+            auto text = std::format("switched {} off (Ctrl+Z switches it on)", Called(edit));
+            if (edit.Type == 'B') text += "; switched off for characters and props only: the walls stay lit";
+            Say(std::move(text));
+        }
+
         /// The overlay sends only the field its tool changes, and only that field is written: raw, then the components follow.
         void Move(FVector to)
         {
+            if (G.SelectedComp != nullptr) return MoveLevelLight(to);
             auto const actor = DragTarget("moved");
             // A click on an arrow without motion changes nothing, and makes no edit.
             if (actor == nullptr || Near(actor->Location, to, LocationNoise)) return;
@@ -3290,6 +3866,13 @@ namespace MeleBridge::Editor
 
         void Rotate(FRotator to)
         {
+            if (G.SelectedComp != nullptr)
+            {
+                if (SelectionAlive())
+                    SayOnce(G.SelectedComp->IsA(USpotLightComponent::StaticClass()) ? "not turned: a spot light's aim is not edited (its cone stays as built)"
+                                                                                    : "not turned: a light only moves (a point light shines all ways)");
+                return;
+            }
             auto const actor = DragTarget("turned");
             if (actor == nullptr) return;
             if (IsLight(actor))
@@ -3319,6 +3902,11 @@ namespace MeleBridge::Editor
         /// DrawScale3D only: DrawScale is never changed by the editor.
         void Rescale(FVector to)
         {
+            if (G.SelectedComp != nullptr)
+            {
+                if (SelectionAlive()) SayOnce("not scaled: a light only moves (its radius is in the panel)");
+                return;
+            }
             auto const actor = DragTarget("scaled");
             if (actor == nullptr) return;
             if (IsLight(actor))
@@ -3358,21 +3946,15 @@ namespace MeleBridge::Editor
         /// lights: entry built outside the ranges (a radius of 6000) keeps it when another control moves. A command that changes
         /// nothing makes no edit. A prop light's brightness and colour seed the next prop light of the map. The kind is the
         /// light's source's (docs/07 §12): only ours switch between prop and room lights, and an NPC's or a level's light keeps
-        /// its kind whatever the command says.
+        /// its kind whatever the command says. A level light's goes to SetLevelLight.
         void SetLight(LightBlock wanted)
         {
+            if (G.SelectedComp != nullptr) return SetLevelLight(wanted);
             auto const actor = DragTarget("changed");
             if (actor == nullptr || !IsLight(actor)) return;
             auto const existing = EditOf(actor);
             auto const now = existing != nullptr && existing->Light ? *existing->Light : LightOf(actor, SourceOf(actor));
-            auto const held = [](float value, float low, float high, float was) {
-                if (value == was) return value;
-                return std::isfinite(value) ? std::clamp(value, low, high) : was;
-            };
-            wanted.Radius = held(wanted.Radius, MinLightRadius, MaxLightRadius, now.Radius);
-            wanted.Brightness = held(wanted.Brightness, 0, MaxBrightness, now.Brightness);
-            wanted.Falloff = held(wanted.Falloff, MinFalloff, MaxFalloff, now.Falloff);
-            for (auto& c : wanted.Color) c = std::clamp(c, 0, 255);
+            wanted = Held(wanted, now);
             if (KeptKind(now.Kind) || KeptKind(wanted.Kind)) wanted.Kind = now.Kind;
             if (wanted == now) return;
             auto const edit = Touch(actor, "changed");
@@ -3427,6 +4009,7 @@ namespace MeleBridge::Editor
         void Delete(AWorldInfo* world)
         {
             if (!SelectionAlive() || Fn.ForceUpdateComponents == nullptr) return;
+            if (G.SelectedComp != nullptr) return DeleteLevelLight();
             auto const actor = G.Selected;
             if (auto const why = Refusal(actor, true); !why.empty())
             {
@@ -3537,7 +4120,9 @@ namespace MeleBridge::Editor
             }
             // The lights a move or a turn of an NPC carried (docs/07 §12), where the step found or left them.
             for (auto const& c : step.Carried) PutCarried(c, redo ? c.After : c.Before);
-            Select(state.Shown ? edit.Actor : nullptr);
+            // A level light is switched off, never hidden: it stays selectable.
+            if (edit.Component) SelectLight(edit.Actor, edit.Comp);
+            else Select(state.Shown ? edit.Actor : nullptr);
             TickOnce();
             Say(std::format("{} {}", redo ? "redid" : "undid", label));
             to.push_back(std::move(step));
@@ -4040,7 +4625,8 @@ namespace MeleBridge::Editor
             Say(text);
         }
 
-        /// A click on a light's icon, or on its row in the Lights tab: the light the editor tracks at that path (ours, or an NPC's).
+        /// A click on a light's icon, or on its row in the Lights tab: the light the editor tracks at that path (ours, an NPC's, or
+        /// a level's: its component, its collection the selected actor).
         void PickLight(std::string const& path)
         {
             RefreshTracked();
@@ -4053,6 +4639,13 @@ namespace MeleBridge::Editor
                     G.LastPick = std::format("{} (light)", path);
                     return;
                 }
+            }
+            for (auto const& t : G.LevelLights)
+            {
+                if (!StillThere(t) || !SameText(t.Path, path)) continue;
+                SelectLight(t.Actor, t.Comp);
+                G.LastPick = std::format("{} (level light, {})", path, t.Type);
+                return;
             }
             G.LastPick = std::format("{}: not a light the editor lists any more", path);
         }
@@ -4160,7 +4753,8 @@ namespace MeleBridge::Editor
         /// A session entry, version 2 or 3 (docs/07 §10, §12). imported is left out: a saved edit is a new state. What an install
         /// may still show goes into installed instead, and the base keeps whether the YAML removes the actor when an import said
         /// so. A light's entry (§11) has no mesh, and a light block beside its pose and in its base; its rotation and scales are
-        /// the actor's. An NPC light's (§12) also has an npc block (the pawn's tag and the offset), in its base too.
+        /// the actor's. An NPC light's (§12) also has an npc block (the pawn's tag and the offset), in its base too. A level
+        /// light's (5b) has no tag, its component's path and class, its collection as owner, a zero rotation and scale 1.
         json EntryOf(Edit const& e)
         {
             auto const orNull = [](std::string const& text) { return text.empty() ? json(nullptr) : json(text); };
@@ -4190,6 +4784,14 @@ namespace MeleBridge::Editor
             };
             if (e.Light) entry["light"] = LightJson(*e.Light);
             if (e.Npc) entry["npc"] = NpcJson(*e.Npc);
+            // A level light's (5b): its collection's name, and its type in its light blocks, for editor_import to say what ships.
+            if (e.Component)
+            {
+                entry["owner"] = e.Owner;
+                auto const type = std::string(1, e.Type != 0 ? e.Type : 'C');
+                if (entry.contains("light")) entry["light"]["type"] = type;
+                if (base.is_object() && base.contains("light")) entry["base"]["light"]["type"] = type;
+            }
             if (!e.Installed.empty()) entry["installed"] = e.Installed;
             return entry;
         }
@@ -4697,7 +5299,10 @@ namespace MeleBridge::Editor
                 if (was == before.end()) continue;
                 for (auto const& e : G.Edits)
                 {
-                    if (Bound(e) && e.LevelObject == level.Level && e.LevelIndex == level.Index) UpdateComponents(e.Actor);
+                    if (!Bound(e) || e.LevelObject != level.Level || e.LevelIndex != level.Index) continue;
+                    // A level light alone: a reattach of its collection would redo all of its lights (docs/07 §12, 5b).
+                    if (e.Component) RefreshLight(e.Comp);
+                    else UpdateComponents(e.Actor);
                 }
             }
         }
@@ -4715,6 +5320,10 @@ namespace MeleBridge::Editor
             std::set<std::string> Levels;
             /// Actors an edit has.
             std::unordered_set<AActor*> Taken;
+            /// The point and spot lights of the loaded collections by lower-case path (5b), filled on first use; those an edit has.
+            std::unordered_map<std::string, LevelLight> LightsByPath;
+            bool LightPathsRead = false;
+            std::unordered_set<UPointLightComponent*> TakenLights;
 
             std::vector<AActor*> const& Tagged(std::string const& tag) const
             {
@@ -4733,6 +5342,21 @@ namespace MeleBridge::Editor
                 auto const it = ByPath.find(Lower(path));
                 return it != ByPath.end() ? it->second : nullptr;
             }
+
+            LevelLight LightAt(std::string const& path)
+            {
+                if (!LightPathsRead)
+                {
+                    LightPathsRead = true;
+                    for (auto const actor : All)
+                    {
+                        if (!IsCollection(actor)) continue;
+                        LightsIn(actor, [&](UPointLightComponent* light) { LightsByPath.emplace(Lower(ToUtf8(PathOf(light))), LevelLight{ actor, light }); });
+                    }
+                }
+                auto const it = LightsByPath.find(Lower(path));
+                return it != LightsByPath.end() ? it->second : LevelLight{};
+            }
         };
 
         LoadedActors ReadLoadedActors()
@@ -4750,7 +5374,10 @@ namespace MeleBridge::Editor
             }
             for (auto const& e : G.Edits)
             {
-                if (Bound(e)) loaded.Taken.insert(e.Actor);
+                if (!Bound(e)) continue;
+                // A level light's actor is its collection, which other lights of it share.
+                if (e.Component) loaded.TakenLights.insert(e.Comp);
+                else loaded.Taken.insert(e.Actor);
             }
             return loaded;
         }
@@ -4806,6 +5433,31 @@ namespace MeleBridge::Editor
             return nullptr;
         }
 
+        /// The loaded level light an entry or a detached edit names (5b): by path with the same class, then the same path in the
+        /// running map's fork of its level. None, with why, when there is none or another edit has it.
+        LevelLight MatchLight(LoadedActors& loaded, std::string const& path, std::string const& className, std::string& why)
+        {
+            auto const map = ToUtf8(MapName());
+            auto const level = path.substr(0, path.find('.'));
+            auto const fork = ForkName(map, level);
+            auto found = loaded.LightAt(path);
+            if (found.Light == nullptr) found = loaded.LightAt(ForkPath(path, map));
+            auto const lightClass = found.Light != nullptr ? ToUtf8(NameOf(found.Light->Class)) : std::string{};
+            if (found.Light != nullptr && SameText(lightClass, className))
+            {
+                if (!loaded.TakenLights.contains(found.Light)) return found;
+                why = "the light at its path has another edit";
+                return {};
+            }
+            if (!loaded.Levels.contains(Lower(level)) && !loaded.Levels.contains(Lower(fork))) why = std::format("{} is not loaded", level);
+            else if (found.Light != nullptr) why = std::format("the light at its path is a {}, not a {}", lightClass, className);
+            else why = "no loaded light at its path";
+            return {};
+        }
+
+        /// A level light's entry (5b): it names its collection.
+        bool LevelLightEntry(json const& entry) { return !Text(entry, "owner").empty(); }
+
         /// An entry a pass can apply: one with a path, a location and a rotation.
         bool Valid(json const& entry)
         {
@@ -4855,20 +5507,30 @@ namespace MeleBridge::Editor
             return {};
         }
 
+        /// Awaiting for a level light (5b): a session entry or a waiting edit with its canonical path, which only it can match.
+        std::string AwaitingLight(UPointLightComponent* light)
+        {
+            auto const map = ToUtf8(MapName());
+            auto const path = Canonical(ToUtf8(PathOf(light)), map);
+            auto const names = [&](std::string const& p) { return SameText(Canonical(p, map), path); };
+            auto const waits = std::any_of(G.Entries.begin(), G.Entries.end(), [&](Entry const& entry) {
+                return !entry.Done && Valid(entry.Data) && LevelLightEntry(entry.Data) && names(Text(entry.Data, "path"));
+            }) || std::any_of(G.Edits.begin(), G.Edits.end(), [&](Edit const& e) { return e.Map == G.SessionMap && e.Pending && e.Component && names(e.Path); });
+            if (!waits) return {};
+            auto const name = ToUtf8(NameOf(light));
+            return G.PassFaulted ? std::format("{}'s session entry is not applied yet, and the last re-apply pass failed (tried again when the loaded levels change)", name)
+                                 : std::format("{}'s session entry is still being applied, try again in a moment", name);
+        }
+
         enum class Verdict { Apply, Drop };
 
         /// Rules 1 and 2 of docs/07 §10, for an entry and the actor it matched (null: a spawn no loaded actor has the tag of).
         /// builtHidden: the actor is hidden, and the YAML's state it was judged by says the YAML removes it (the build hid it, not
         /// the game): an entry that shows it shows it again. A light is compared by HasLight, and is never built hidden: every
         /// light is bHidden by class default (§11).
-        Verdict Judge(json const& entry, AActor* actor, std::string& why, bool& builtHidden)
+        template <typename Has, typename Hid>
+        Verdict JudgeBy(json const& entry, bool target, Has const& has, Hid const& hid, std::string& why, bool& builtHidden)
         {
-            auto const light = IsLight(actor);
-            auto const has = [&](json const& state) {
-                if (actor == nullptr) return false;
-                return light ? HasLight(actor, state, Flag(state, "deleted")) : Has(actor, PoseFrom(state, PoseOf(actor)), Flag(state, "deleted"));
-            };
-            auto const hid = [&](json const& state) { return actor != nullptr && !light && actor->bHidden && state.is_object() && Flag(state, "deleted"); };
             // The base says whether the YAML removes it (rule 3: an entry saved since an import keeps it).
             auto const base = entry.find("base");
             builtHidden = base != entry.end() && hid(*base);
@@ -4882,7 +5544,7 @@ namespace MeleBridge::Editor
                     why = "installed: the level has it";
                     return Verdict::Drop;
                 }
-                if (actor == nullptr) return Verdict::Apply;
+                if (!target) return Verdict::Apply;
                 for (auto const& state : Candidates(entry))
                 {
                     if (!has(state)) continue;
@@ -4899,6 +5561,25 @@ namespace MeleBridge::Editor
                 return Verdict::Drop;
             }
             return Verdict::Apply;
+        }
+
+        Verdict Judge(json const& entry, AActor* actor, std::string& why, bool& builtHidden)
+        {
+            auto const light = IsLight(actor);
+            auto const has = [&](json const& state) {
+                if (actor == nullptr) return false;
+                return light ? HasLight(actor, state, Flag(state, "deleted")) : Has(actor, PoseFrom(state, PoseOf(actor)), Flag(state, "deleted"));
+            };
+            auto const hid = [&](json const& state) { return actor != nullptr && !light && actor->bHidden && state.is_object() && Flag(state, "deleted"); };
+            return JudgeBy(entry, actor != nullptr, has, hid, why, builtHidden);
+        }
+
+        /// Judge for a level light's entry (5b): compared by HasLevelLight; never built hidden (it is switched off, never hidden).
+        Verdict JudgeLight(json const& entry, UPointLightComponent const* light, std::string& why)
+        {
+            auto builtHidden = false;
+            auto const has = [&](json const& state) { return HasLevelLight(light, state, Flag(state, "deleted")); };
+            return JudgeBy(entry, true, has, [](json const&) { return false; }, why, builtHidden);
         }
 
         /// An edit from a session entry, as the file has it: saved, and saved once (editor_import may have imported it). It keeps
@@ -4923,12 +5604,28 @@ namespace MeleBridge::Editor
             // A light's settings (docs/07 §11); a field the block lacks is a fresh light's. An NPC light's NPC and offset (§12).
             if (HasLightBlock(entry)) e.Light = LightFrom(entry, LightBlock{});
             if (e.Light) e.Npc = NpcFrom(entry, std::nullopt);
+            // A level light's collection and type (5b); BindLight reads the type again from the light.
+            if (LevelLightEntry(entry))
+            {
+                e.Component = true;
+                e.Owner = Text(entry, "owner");
+                e.Npc.reset();
+                if (e.Light)
+                {
+                    e.Light->Kind = LightKind::Vanilla;
+                    if (auto const type = Text(entry.at("light"), "type"); type.size() == 1) e.Type = type[0];
+                }
+            }
             if (auto const base = entry.find("base"); base != entry.end() && base->is_object())
             {
                 // As Save reads it: the base's deleted, else what an import's entry wrote into the YAML.
                 if (base->contains("deleted")) e.BaseHidden = Flag(*base, "deleted");
                 else if (entry.contains("imported")) e.BaseHidden = Flag(entry, "deleted");
-                if (e.Light && HasLightBlock(*base)) e.BaseLight = LightFrom(*base, *e.Light);
+                if (e.Light && HasLightBlock(*base))
+                {
+                    e.BaseLight = LightFrom(*base, *e.Light);
+                    if (e.Component) e.BaseLight->Kind = LightKind::Vanilla;
+                }
                 if (e.Npc)
                 {
                     if (auto const npc = NpcFrom(*base, std::nullopt)) e.BaseOffset = npc->Offset;
@@ -5164,6 +5861,42 @@ namespace MeleBridge::Editor
             return true;
         }
 
+        /// TakeBase for a level light (5b): where it stands and its settings, as its level file has it.
+        void TakeLightBase(Edit& e, UPointLightComponent* light)
+        {
+            e.Base = LightPose(light);
+            e.BaseLight = LevelLightOf(light);
+            e.BaseHidden = false;
+        }
+
+        /// TakeOver for a level light whose level came back (5b): judged first while it is still its session entry; dropped, the
+        /// edit takes the light as its level built it, without writing it; else the edit's state is written. Returns whether it
+        /// was written.
+        bool TakeOverLight(Edit& e, LevelLight found, LoadedActors& loaded, std::vector<json>& dropped)
+        {
+            auto verdict = Verdict::Apply;
+            std::string why;
+            if (e.Saved && !e.Source.is_null()) verdict = JudgeLight(e.Source, found.Light, why);
+            auto const source = std::exchange(e.Source, nullptr);
+            auto const pose = e.Now;
+            BindLight(e, found.Owner, found.Light);
+            loaded.TakenLights.insert(found.Light);
+            if (verdict == Verdict::Drop)
+            {
+                LEASI_INFO("editor: session entry {} dropped on {}: {}", KeyOf(e), ToUtf8(PathOf(found.Light)), why);
+                e.Light = LevelLightOf(found.Light);
+                TakeLightBase(e, found.Light);
+                e.Now = *e.Base;
+                e.Installed = json::array();
+                e.SavedState.reset();
+                dropped.push_back(source);
+                return false;
+            }
+            if (!e.Base) TakeLightBase(e, found.Light);
+            Put(e, pose, false);
+            return true;
+        }
+
         /// Removes the entries a pass dropped from the map's session file, each only if the file still has it as it was read (a
         /// save or an import since leaves it alone). Same temp-file write as Save. A version 2 or 3 file's version follows what
         /// is left (VersionFor, docs/07 §12); a version 1 file stays 1.
@@ -5203,6 +5936,45 @@ namespace MeleBridge::Editor
             {
                 LEASI_WARN("editor: dropped entries not removed from {}'s session: {}", map, e.what());
             }
+        }
+
+        /// A level light's session entry in a pass (5b): matched by path, judged, then dropped, or applied as an edit bound to the
+        /// light (its fields the entry's, any it lacks the light's own); waits while its level is not loaded. Returns whether it
+        /// was applied.
+        bool ApplyLightEntry(Entry& entry, LoadedActors& loaded, std::vector<json>& dropped, std::string& why)
+        {
+            auto const& a = entry.Data;
+            auto const found = MatchLight(loaded, Text(a, "path"), Text(a, "class"), why);
+            if (found.Light == nullptr)
+            {
+                entry.Why = why;
+                return false;
+            }
+            auto const verdict = JudgeLight(a, found.Light, why);
+            entry.Done = true;
+            if (verdict == Verdict::Drop)
+            {
+                LEASI_INFO("editor: session entry {} dropped: {}", entry.Key, why);
+                dropped.push_back(a);
+                return false;
+            }
+            auto& e = G.Edits.emplace_back(EditFrom(a));
+            auto const pose = PoseFrom(a, LightPose(found.Light));
+            if (e.Light)
+            {
+                e.Light = LightFrom(a, LevelLightOf(found.Light));
+                e.Light->Kind = LightKind::Vanilla;
+            }
+            e.SavedState = EntryState{ pose, e.Light, false, std::nullopt };
+            if (auto const base = a.find("base"); base != a.end() && base->is_object()) e.Base = PoseFrom(*base, LightPose(found.Light));
+            else TakeLightBase(e, found.Light);
+            e.Source = nullptr;
+            BindLight(e, found.Owner, found.Light);
+            loaded.TakenLights.insert(found.Light);
+            Put(e, pose, false);
+            NoteChanged(IndexOf(e));
+            LEASI_INFO("editor: re-applied {} to {}", entry.Key, ToUtf8(PathOf(found.Light)));
+            return true;
         }
 
         /// One re-apply pass (docs/07 §10): built copies take over spawned-again spawns, detached edits find their actor again,
@@ -5251,6 +6023,17 @@ namespace MeleBridge::Editor
                 auto& e = G.Edits[i];
                 if (e.Map != G.SessionMap || !e.Pending) continue;
                 std::string why;
+                if (e.Component)
+                {
+                    auto const found = MatchLight(loaded, e.Path, e.ClassName, why);
+                    if (found.Light == nullptr) e.PendingWhy = why;
+                    else if (TakeOverLight(e, found, loaded, dropped))
+                    {
+                        applied++;
+                        NoteChanged(i);
+                    }
+                    continue;
+                }
                 auto const actor = Match(loaded, e.Spawned, e.Tag, e.Path, e.ClassName, why);
                 auto const wait = e.Npc ? PoseRefusal(e.Npc->Tag) : std::string{};
                 if (actor == nullptr && e.Spawned && !loaded.Tagged(e.Tag).empty())
@@ -5299,8 +6082,13 @@ namespace MeleBridge::Editor
                     entry.Why = "malformed: an entry needs a path, a location [x, y, z] and a rotation [pitch, yaw, roll]";
                     continue;
                 }
-                auto const spawned = Flag(a, "spawned");
                 std::string why;
+                if (LevelLightEntry(a))
+                {
+                    if (ApplyLightEntry(entry, loaded, dropped, why)) applied++;
+                    continue;
+                }
+                auto const spawned = Flag(a, "spawned");
                 auto const tag = Text(a, "tag");
                 auto const actor = Match(loaded, spawned, tag, Text(a, "path"), Text(a, "class"), why);
                 // A level actor not loaded waits; so does a spawn that more than one loaded actor has the tag of.
@@ -5471,6 +6259,9 @@ namespace MeleBridge::Editor
                 G.Drag.reset();
                 G.Reswitch.clear();
                 G.Rerun.clear();
+                G.Resets.clear();
+                G.LevelLights.clear();
+                G.ChannelsOf = nullptr;
                 G.DragWarn.reset();
                 G.DragShare = -1;
                 if (!saved.Problems.empty())
@@ -5567,6 +6358,89 @@ namespace MeleBridge::Editor
             return state;
         }
 
+        /// The actors of the visible levels with a part on one of these channels, for a U light's banner (5b): "BioDoor_0 …
+        /// BioDoor_7 (8)", or up to three by name; empty for none.
+        std::string ActorsOnChannels(DWORD bits)
+        {
+            std::vector<std::string> names;
+            for (auto const& level : G.Levels)
+            {
+                if (!level.Visible) continue;
+                for (auto const actor : static_cast<ULevelBase*>(level.Level)->Actors)
+                {
+                    if (!Real(actor) || actor->bDeleteMe || IsCollection(actor)) continue;
+                    auto const parts = PrimitivesOf(actor);
+                    if (std::any_of(parts.begin(), parts.end(), [&](UPrimitiveComponent* p) { return (BitsOf(p->LightingChannels) & bits) != 0; }))
+                        names.push_back(ToUtf8(NameOf(actor)));
+                }
+            }
+            if (names.empty()) return {};
+            std::sort(names.begin(), names.end(), [](std::string const& a, std::string const& b) {
+                return a.size() != b.size() ? a.size() < b.size() : _stricmp(a.c_str(), b.c_str()) < 0;
+            });
+            if (names.size() > 3) return std::format("{} … {} ({})", names.front(), names.back(), names.size());
+            std::string text;
+            for (auto const& name : names) text += (text.empty() ? "" : ", ") + name;
+            return text;
+        }
+
+        /// A selected level light, for the Selection window and the panel (docs/07 §12, 5b): the component where its Translation
+        /// puts it, with no rotation and scale 1, its collection as its tag, its type, its refusals per command, its ships line
+        /// when the panel edits it, its base when it has an edit, and a U light's channels (read once per selection).
+        void PublishLevelLight(Snapshot& s, AWorldInfo* world, UCanvas* canvas)
+        {
+            auto const owner = G.Selected;
+            auto const light = G.SelectedComp;
+            auto const edit = LightEditOf(light);
+            auto const place = PlaceOfLight(light);
+            s.Selected = true;
+            s.SelectedLocation = place;
+            s.SelectedRotation = {};
+            s.SelectedDrawScale = 1;
+            s.SelectedDrawScale3D = { 1, 1, 1 };
+            s.SelectedStatic = true;
+            s.SelectedPath = ToUtf8(PathOf(light));
+            s.SelectedClass = ToUtf8(NameOf(light->Class));
+            s.SelectedTag = ToUtf8(NameOf(owner));
+            s.SelectedComponent = true;
+            s.SelectedType = TypeOf(light);
+            s.SelectedSpot = light->IsA(USpotLightComponent::StaticClass());
+            s.SelectedRig = !RigSourceOf(owner).empty();
+            s.SelectedUnmovable = LightRefusal(owner, light, LightOp::Move);
+            s.SelectedUndeletable = LightRefusal(owner, light, LightOp::Delete);
+            s.SelectedUnchangeable = LightRefusal(owner, light, LightOp::Change);
+            if (s.SelectedUnchangeable.empty()) s.SelectedShips = LightShips(owner, world);
+            s.SelectedFile = FileOf(owner->Outer);
+            s.SelectedLight = true;
+            s.SelectedLightBlock = edit != nullptr && edit->Light ? *edit->Light : LevelLightOf(light);
+            if (edit != nullptr && edit->Base && edit->BaseLight)
+            {
+                s.SelectedHasBase = true;
+                s.SelectedBaseLight = *edit->BaseLight;
+                s.SelectedBaseLocation = edit->Base->Location;
+            }
+            if (s.SelectedType == 'U')
+            {
+                if (G.ChannelsOf != light || G.ChannelsIndex != light->ObjectInternalInteger)
+                {
+                    G.ChannelsOf = light;
+                    G.ChannelsIndex = light->ObjectInternalInteger;
+                    G.Channels = ChannelNames(SpecialBits(light));
+                    G.ChannelActors = ActorsOnChannels(SpecialBits(light));
+                }
+                s.SelectedChannel = G.Channels;
+                s.SelectedChannelActors = G.ChannelActors;
+            }
+            if (Fn.Project != nullptr)
+            {
+                UCanvas_execProject_Parms project;
+                project.Location = place;
+                CallProcessEvent(canvas, Fn.Project, &project);
+                s.Projected = true;
+                s.Projection = project.ReturnValue;
+            }
+        }
+
         void Publish(APlayerController* pc, UCanvas* canvas)
         {
             Snapshot s;
@@ -5579,7 +6453,8 @@ namespace MeleBridge::Editor
             s.CanvasHeight = static_cast<float>(canvas->SizeY);
             // The icons and the selection's E/T only while the overlay draws them.
             auto const lights = G.Open ? CoverLights() : std::vector<LightSeen>{};
-            if (SelectionAlive())
+            if (SelectionAlive() && G.SelectedComp != nullptr) PublishLevelLight(s, pc->WorldInfo, canvas);
+            else if (SelectionAlive())
             {
                 auto const actor = G.Selected;
                 auto const edit = EditOf(actor);
@@ -5667,6 +6542,22 @@ namespace MeleBridge::Editor
                                              edit != nullptr && edit->Light ? *edit->Light : LightOf(t.Actor, t.Source), t.Npc, edit != nullptr,
                                              edit != nullptr && !edit->Saved });
                     }
+                }
+                // The level lights of the visible levels (5b): the rig's and edited ones always, others within 30 m of the view.
+                for (auto const& t : G.LevelLights)
+                {
+                    if (!StillThere(t) || !Visible(t.Actor)) continue;
+                    auto const edit = LightEditOf(t.Comp);
+                    auto const place = PlaceOfLight(t.Comp);
+                    auto const metres = Distance(place, G.ViewLocation) / 100;
+                    if (t.Rig.empty() && edit == nullptr && metres * 100 > LevelLightReach) continue;
+                    LightIcon icon{ t.Path, t.Name, place, edit != nullptr && edit->Light ? *edit->Light : LevelLightOf(t.Comp), {}, edit != nullptr,
+                                    edit != nullptr && !edit->Saved };
+                    icon.Type = t.Type;
+                    icon.Rig = !t.Rig.empty();
+                    icon.Collection = t.Owner;
+                    icon.Metres = metres;
+                    s.Lights.push_back(std::move(icon));
                 }
                 // Our NPCs of the visible levels, lights or not, for the Lights tab's sections (docs/07 §12); then the NPC of a
                 // listed light whose NPC's level is not visible (Away), or that levels.json no longer lists, so the light still
@@ -5824,6 +6715,12 @@ namespace MeleBridge::Editor
                 G.Rerun.clear();
                 LEASI_ERROR("editor: access violation while restarting effects ({})", FaultText());
                 Say("effects not restarted: access violation");
+            }
+            if (!G.Resets.empty() && !Guarded(ResetEntry, pc))
+            {
+                G.Resets.clear();
+                LEASI_ERROR("editor: access violation while resetting light environments ({})", FaultText());
+                Say("characters not updated: access violation");
             }
             Publish(pc, canvas);
         }
@@ -6046,8 +6943,17 @@ namespace MeleBridge::Editor
         };
         for (auto const& l : s.Lights)
         {
-            state["lights"].push_back({ { "path", l.Path }, { "tag", l.Tag }, { "location", vector(l.Location) }, { "light", lightJson(l.Light) },
-                                        { "npc", orNull(l.Npc) }, { "edited", l.Edited }, { "unsaved", l.Unsaved } });
+            json light{ { "path", l.Path }, { "tag", l.Tag }, { "location", vector(l.Location) }, { "light", lightJson(l.Light) },
+                        { "npc", orNull(l.Npc) }, { "edited", l.Edited }, { "unsaved", l.Unsaved } };
+            // A level light's type, rig, collection and distance (5b).
+            if (l.Type != 0)
+            {
+                light["type"] = std::string(1, l.Type);
+                light["rig"] = l.Rig;
+                light["collection"] = l.Collection;
+                light["metres"] = l.Metres;
+            }
+            state["lights"].push_back(std::move(light));
         }
         for (auto const& n : s.Npcs)
             state["npcs"].push_back({ { "name", orNull(n.Name) }, { "tag", n.Tag }, { "level", orNull(n.Level) }, { "away", n.Away } });
@@ -6074,6 +6980,14 @@ namespace MeleBridge::Editor
                 state["selection"]["npc"] = { { "name", orNull(s.SelectedNpcName) }, { "tag", s.SelectedNpcTag }, { "offset", vector(s.SelectedOffset) },
                                               { "pose", s.SelectedHasPose ? json{ { "location", vector(s.SelectedPoseLocation) }, { "yaw", s.SelectedPoseYaw } } : json(nullptr) } };
             if (s.SelectedEffect) state["selection"]["effect"] = { { "template", s.SelectedTemplate }, { "loops", s.SelectedLoops } };
+            // A level light (5b): the selection is its component; its collection is the tag.
+            if (s.SelectedComponent)
+            {
+                state["selection"]["levelLight"] = { { "type", std::string(1, s.SelectedType) }, { "spot", s.SelectedSpot }, { "rig", s.SelectedRig },
+                                                     { "unchangeable", orNull(s.SelectedUnchangeable) },
+                                                     { "base", s.SelectedHasBase ? json{ { "location", vector(s.SelectedBaseLocation) }, { "light", lightJson(s.SelectedBaseLight) } } : json(nullptr) },
+                                                     { "channels", orNull(s.SelectedChannel) }, { "channelActors", orNull(s.SelectedChannelActors) } };
+            }
             if (s.SelectedProp)
                 state["selection"]["propLighting"] = { { "covered", s.SelectedCovered }, { "received", s.SelectedReceived }, { "target", s.SelectedTarget },
                                                         { "autoRadius", s.SelectedAutoRadius }, { "coveringOff", s.SelectedCoveringOff } };

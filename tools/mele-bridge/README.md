@@ -35,7 +35,8 @@ prop where the view points, from one of two tabs:
   search. A tooltip gives the size, triangles, how often the game's levels place it and the file it comes from.
 - **In this level:** the meshes in memory, as a list (Phase 1's).
 - **Lights:** Prop light and Room light add a light over where the view points; the list selects one. Below it, a section
-  per NPC of ours with its lights and an **Add light** button ([NPC lights](#npc-lights)).
+  per NPC of ours with its lights and an **Add light** button ([NPC lights](#npc-lights)), then the map's character lights
+  and, behind the **Level lights** toggle, the levels' own lights ([Level lights](#level-lights)).
 - **Effects:** the emitters of the loaded levels, nearest first; the list selects one ([effects](#effects)).
 
 It is Phase 3 of [docs/07](../../docs/07-ingame-editor.md#10-phase-3-the-save-loop): saved edits come back when the map
@@ -47,7 +48,9 @@ adds one for a fresh spawn that needs it, and Alt+click picks a light by its ico
 [Prop lighting and lights](#prop-lighting-and-lights). Phase 5a ([§12](../../docs/07-ingame-editor.md)) adds the levels'
 effects (moved, turned, hidden, then run for 1.5 s: [Effects](#effects)), a gate on actors the loaded Kismet holds, light
 kinds by source with a writer that keeps an NPC's or a level's light as built, session version 3, and our NPCs' lights:
-edited as offsets from their NPC, carried by its moves and turns, and added per NPC ([NPC lights](#npc-lights)).
+edited as offsets from their NPC, carried by its moves and turns, and added per NPC ([NPC lights](#npc-lights)). Phase 5b
+adds the lights of the levels' static light collections: moved one by one, set, and switched off, baked ones for characters
+and props only ([Level lights](#level-lights)).
 
 | Key | Tool | What the gizmo does |
 |---|---|---|
@@ -112,7 +115,10 @@ edited as offsets from their NPC, carried by its moves and turns, and added per 
   the last pass saw), `levelsJson` (file, problem, DLC folder, levels, how many props and lights tags, npcs, NPC lights and
   characterLights copies it lists), `autoLight`, `lights` (the tracked lights of the visible levels while the editor is
   open, ours and our NPCs': path, tag, location, settings with `kind` `props`, `room`, `npc` or `vanilla`, `npc` (the
-  pawn's tag, or null), `edited`, `unsaved`), `npcs` (the Lights tab's NPC sections: `name`, `tag`, `level`, `away` (a
+  pawn's tag, or null), `edited`, `unsaved`; a level light's also `type` (`B`, `C`, `U`, `D`), `rig`, `collection` and
+  `metres` from the view, and its tag is its object name), a selected level light's `levelLight` (`type`, `spot`, `rig`,
+  `unchangeable`, its `base` (`location`, `light`) once it has an edit, a U light's `channels` and `channelActors`; its
+  `tag` is its collection), `npcs` (the Lights tab's NPC sections: `name`, `tag`, `level`, `away` (a
   light's NPC whose level is not visible); a light's NPC that `levels.json` no longer lists has null for both), `effects`
   (the emitters of the visible levels while the editor is open, nearest first: path, name, template, level (a fork's
   vanilla file), location, `metres` from the view, `refusal` (or null), `deleted`, `hidden`, `forked`, `edited`,
@@ -131,7 +137,8 @@ Version 2 or 3 (UTF-8). The bridge reads versions 1 to 3. It writes 3 when an en
 light with its own writer (channels and shadows included), and it refuses a version 3 file instead. A pass that drops
 entries rewrites the version for what is left (a version 1 file stays 1). A file of another version is left as it is, and
 one that can't be parsed is moved aside (`<map>.json.bad-<tick>`) at the next Save. An effect's entry is a vanilla entry
-of class `Emitter` (version 2).
+of class `Emitter` (version 2). A level light's entry ([Level lights](#level-lights)) has no tag, its component's path
+and class, its collection as `owner`, and `light.type` (version 3).
 
 ```json
 { "version": 2, "map": "BIOA_CLD01", "saved": "2026-10-27T04:00:00Z",
@@ -153,6 +160,7 @@ of class `Emitter` (version 2).
 | `location`, `rotation`, `scale`, `scale3d` | The actor's state: rotation in Unreal units (65536 = 360°), `scale` is `DrawScale`, `scale3d` is `DrawScale3D`. |
 | `deleted` | Hidden by Delete. A spawn deleted before it was ever saved is not written. On a light, only a spawned light the editor deleted (switched off). |
 | `light` | Lights only: `kind`, `radius`, `brightness`, `color` (0-255), `falloff` (`FalloffExponent`) and `enabled`, its on/off. The same block in `base`, `imported.before` and `installed`. A light's `rotation` and scales are the actor's: only its location counts. The kind is the light's source, read once when the editor first tracks it and stored: `props` or `room` for ours (by their channels), `npc` for a light `levels.json` names among its level's `npcs` lights, `vanilla` for a level's (Phase 5b). |
+| `owner` | Level lights only (Phase 5b): the name of the `StaticLightCollectionActor` the light belongs to. `path` is the component's (`BIOA_FRE31_00_LAY.TheWorld.PersistentLevel.StaticLightCollectionActor_127.PointLight_35_LC`), `class` `PointLightComponent` or `SpotLightComponent`, `tag` empty, `rotation` zero and the scales 1; `light.type` (in `base` too) is its type when saved. `deleted` stays false: Delete writes `light.enabled` false. |
 | `npc` | NPC lights only: `{ "tag": <the pawn's tag>, "offset": [forward, right, up] }`, the light's offset from the NPC's reference pose, turned by its yaw (`forward = dx cos t + dy sin t`, `right = -dx sin t + dy cos t`, `up = dz`, `t = yaw · 2π / 65536`). `location` stays absolute. The same block in `base` (`levels.json`'s offset for a built light), `imported.before` and `installed`. |
 | `mesh` | Spawned props only (`null` otherwise, lights too): the vanilla mesh and a vanilla file with it, and `load`, the catalog package's copy (`null` for a mesh from the In this level list). |
 | `base` | What the level YAML holds, for `editor_import`'s three-way merge: the actor before the editor first changed it, `null` for a spawn never imported. Save keeps the file's `base` when the entry has one (an import moves it on), with its `deleted` (whether the YAML removes the actor) when an import gave it. A base the editor takes from a shown actor has `deleted: false` (the build that made it did not remove it); one of a version 1 entry taken from a hidden actor has none (the game may have hidden it). |
@@ -263,7 +271,7 @@ tracks the lights, props and effects again:
 | `props` | The tags of the level's built props: the bridge switches them between prop lights and their light environment, as it does its own spawns. |
 | `lights` | The tags of the level's `lights:` entries: the editor lists them, and they may be selected, moved, set and switched off. |
 | `npcs` | Every NPC of the level's YAML, by the pawn's tag (lights or not): `name` (the YAML key), the built `location` (the pawn's `Location`) and `yaw`, and its `lights` by tag, each an offset `[forward, right, up]` from that pose. A light whose tag is listed here is an NPC light (kind `npc`): it is tracked apart from ours and written only by the kept writer. An NPC without a name, a location or a yaw is skipped, and so is a light without three numbers. |
-| `characterLights` | The `StaticLightCollectionActor`s copied into the level for its characters, by object name, with the vanilla file each came from (Phase 5b; read and counted, not used yet). |
+| `characterLights` | The `StaticLightCollectionActor`s copied into the level for its characters, by object name, with the vanilla file each came from: their lights are listed as the map's character lights, and their edits ship in the map ([Level lights](#level-lights)). A collection of our levels that no item names is refused: no build writes its lights. |
 
 A missing or broken file reads as no file; a missing key, or one of another type, as empty; an unknown key is skipped. A
 version other than 1 is not read.
@@ -442,6 +450,50 @@ them: in our levels through the YAML, in a vanilla level through its fork ([§12
   the kill show at once, paused. Like the one-tick release, that release is the editor's own: the pause is taken back once
   the deadline passes, not counted as the game's. It is skipped when the game had its own pause when the editor opened
   (the status line adds "effects not run: the game had paused the world when F8 opened"). Live only: nothing of it ships.
+
+### Level lights
+
+The point and spot lights of each `StaticLightCollectionActor` in the loaded levels (walked through its `Components`; sun
+and sky lights are never listed), edited one by one ([§12](../../docs/07-ingame-editor.md), Phase 5b). The selection is
+the light's component; its collection is never written: as a hard guard, `Put`, `SetDeleted`, `WriteFlags` and the
+reattach return (logged once per collection) on a collection.
+
+- **Types**, read from the live fields by level_build's rule: **B** baked (`bHasLightEverBeenBuiltIntoLightMap` and
+  `UseDirectLightMap`: the walls keep its light, a change reaches characters and props only), **D** dynamic
+  (`bForceDynamicLight` or the Dynamic channel), **U** special channel (any channel but BSP, Static, CompositeDynamic: it
+  lights only meshes on it), else **C** (characters and props through their light environments, never the walls).
+- **Lights tab:** after the NPC sections, **Character lights (characterLights)** lists the lights of the map's
+  `characterLights` copies, always; **Level lights** (off by default) lists the other lights within 30 m of the view, and
+  **Baked too** adds the B ones; nearest first, at most 150 untouched. A row: `PointLight_35_LC · U ·
+  StaticLightCollectionActor_127 · radius 300 · brightness 0.6 · 4.2 m`. One with an edit is always listed and drawn.
+- **Icons:** a square in the light's colour, its type letter beside it (white with a dark outline). Untouched level lights
+  are drawn while Level lights is on and the Lights tab is open or Alt is held; the rig's, edited ones and the selected one
+  always. Picking is a light icon's (the nearest the camera among those under the cursor).
+- **Move:** the move gizmo only. Each drag frame writes the `Translation` that puts the light there through its
+  collection's `CachedParentToWorld` (a full 3×3 inverse), through `PointLightComponent.SetTranslation`, which updates that
+  one light (raw in a level loaded but not visible). A collection whose matrix scales the light (a row length off 1 by more
+  than 0.001) refuses: "not moved: its light collection scales it"; the panel still works.
+- **Panel:** the type's header and banner ("Baked light (B)" … "Dynamic light (D)"), no kind radio; a U light's banner names
+  its channels and the actors of the visible levels on them ("BioDoor_0 … BioDoor_7 (8)"). A B light's banner adds what the
+  change leaves against its base (off, moved, brighter). Fields go through the kept writer, then `ActorComponent.ForceUpdate
+  (false)`, which refreshes that one light.
+- **Characters:** a B or C light has no render proxy; light environments take a change only while the world ticks. When a
+  B or C light's step closes (a drag or panel release, a delete, an undo or redo, a pass), every enabled
+  `DynamicLightEnvironmentComponent` whose owner stands within the light's radius (before or after) plus 100 is reset
+  (`SetEnabled` false, then true), and the paused world runs 1.5 s (`TickFor`; the status line adds "characters lit again:
+  N light environments reset, the world runs 1.5 s"). Not while the game had its own pause when the editor opened
+  ("characters not updated: the game had paused the world when F8 opened"). A prop the switch put on prop lights has its environment off: left so.
+- **Refusals:** R on a spot: "not turned: a spot light's aim is not edited (its cone stays as built)"; on a point light and
+  G: Phase 4's texts. Delete of one already off: "PointLight_0_LC is switched off already (Enabled in the panel switches it
+  on)". A collection of our levels that no `characterLights` item names: "… is a light collection of BIOA_CLD01 that no
+  characterLights item names: no build writes its lights".
+- **Delete** switches the light off (a light step; Ctrl+Z switches it on); a B light's adds "switched off for characters
+  and props only: the walls stay lit".
+- **Ships:** a `characterLights` copy's light: "ships: built into BIOA_CLD01 (characterLights copy of
+  BIOA_FRE31_00_DSG)"; any other as its collection would (in a fork of its file, or dev-only).
+- **Session:** an entry per light, by its canonical path (a fork's light under its vanilla file), with `owner` and
+  `light.type`, version 3. A pass matches it by path (then the same path in the map's fork), with the same class, judges
+  it by the light's place and fields, and applies it with `SetTranslation` and the kept writer.
 
 ### The prop catalog
 

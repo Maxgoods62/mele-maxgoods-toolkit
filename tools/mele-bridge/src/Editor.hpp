@@ -93,12 +93,14 @@ namespace MeleBridge::Editor
         bool operator==(LightBlock const&) const = default;
     };
 
-    /// A light the editor tracks (its own spawns, the YAMLs' lights: entries, our NPCs' lights), for the icons and the Lights
-    /// tab. Its icon's shape is its kind's (docs/07 §12): a disc for ours, a diamond for an NPC's, a square for a level's.
+    /// A light the editor tracks (its own spawns, the YAMLs' lights: entries, our NPCs' lights, the lights of the levels' static
+    /// light collections), for the icons and the Lights tab. Its icon's shape is its kind's (docs/07 §12): a disc for ours, a
+    /// diamond for an NPC's, a square for a level's.
     struct LightIcon
     {
         /// Its path: what a click on the icon or its row sends back.
         std::string Path;
+        /// Its tag; a level light's object name ("PointLight_35_LC").
         std::string Tag;
         FVector Location{};
         LightBlock Light;
@@ -107,6 +109,14 @@ namespace MeleBridge::Editor
         /// It has an edit (Edited), and that edit changed since the last Save (Unsaved).
         bool Edited = false;
         bool Unsaved = false;
+        /// A level light (Phase 5b): its light type ('B' baked, 'C' characters only, 'U' special channel, 'D' dynamic; 0 for any
+        /// other light), whether it is one of the map's characterLights copies (the rig), its collection's object name, and how
+        /// far it is from the view, in metres. An untouched one is listed only within 30 m of the view; the rig's and edited ones
+        /// always.
+        char Type = 0;
+        bool Rig = false;
+        std::string Collection;
+        float Metres = 0;
     };
 
     /// An NPC of our visible levels (levels.json npcs, docs/07 §12), for its section of the Lights tab: its name as the section
@@ -191,6 +201,22 @@ namespace MeleBridge::Editor
         bool SelectedHasPose = false;
         FVector SelectedPoseLocation{};
         int SelectedPoseYaw = 0;
+        /// A light of a level's static light collection (docs/07 §12, 5b): the selection is that component, Path and Class its own,
+        /// Tag its collection's name. Its light type (as LightIcon's), whether it is a spot (its aim is not edited) and one of the
+        /// map's characterLights copies. Unmovable says why it doesn't move (its collection scales it), Unchangeable why the panel
+        /// is off too (empty when it edits it). Its base (what the YAML or the level file holds): the panel's banner says what a
+        /// change of a baked light does. A U light's special channels ("Unnamed_6") and the actors of the visible levels with a
+        /// part on them ("BioDoor_0 … BioDoor_7 (8)", empty for none).
+        bool SelectedComponent = false;
+        char SelectedType = 0;
+        bool SelectedSpot = false;
+        bool SelectedRig = false;
+        std::string SelectedUnchangeable;
+        bool SelectedHasBase = false;
+        LightBlock SelectedBaseLight;
+        FVector SelectedBaseLocation{};
+        std::string SelectedChannel;
+        std::string SelectedChannelActors;
         /// An effect (an Emitter, docs/07 §12): its template's name, and whether the template loops (an emitter of it repeats
         /// for ever) or ends. It moves and turns, never scales.
         bool SelectedEffect = false;
@@ -215,7 +241,8 @@ namespace MeleBridge::Editor
         /// StaticMeshes in memory, for the Props list. Built when the list is opened or refreshed, then shared, not copied.
         std::shared_ptr<std::vector<std::string> const> Meshes;
 
-        /// The lights the editor tracks in visible levels, deleted ones left out.
+        /// The lights the editor tracks in visible levels, deleted ones left out; the levels' own lights within 30 m of the view,
+        /// the rig's and edited ones wherever they are.
         std::vector<LightIcon> Lights;
         /// Our NPCs of the visible levels, lights or not, for the Lights tab's sections (docs/07 §12).
         std::vector<NpcSection> Npcs;

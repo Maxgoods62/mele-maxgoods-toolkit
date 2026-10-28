@@ -123,22 +123,23 @@ internal static class LevelStreams
     /// <summary>
     /// A light actor copied from another level, e.g. the character lights a vanilla map keeps in its _DSG file: lights of
     /// the dynamic channels only, which light pawns and not the walls. A level that shows the map's _LAY file but not its
-    /// _DSG (scripts, enemies) has none.
+    /// _DSG (scripts, enemies) has none. Returns the copy, found or made (its lights' vanilla: entries go into it next).
     /// </summary>
-    internal static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, string package, string actor, int line, List<string> changes)
+    internal static ExportEntry SetLight(MEGame game, IMEPackage pcc, ExportEntry level, string package, string actor, int line, List<string> changes)
     {
         // Found again by its name: an import keeps the source's.
         var name = CopyName(actor);
         if (pcc.FindExport($"{LevelPath}.{name}") is { } existing)
         {
             if (!existing.ClassName.Contains("Light")) throw new ArgumentException($"line {line}: the level's {existing.InstancedFullPath} is a {existing.ClassName}, not a light.");
-            return;
+            return existing;
         }
         using var source = PackageInspector.Open(game, package);
         var original = Resolve(source, actor, line);
         if (!original.ClassName.Contains("Light")) throw new ArgumentException($"line {line}: {original.InstancedFullPath} is a {original.ClassName}, not a light.");
-        Import(pcc, level, original);
+        var copy = Import(pcc, level, original);
         changes.Add($"lights (copy of {package} {original.ObjectName.Instanced})");
+        return copy;
     }
 
     /// <summary>The name a light copied by <see cref="SetLight"/> has in the level: the source actor's own (the last part of its path).</summary>
