@@ -25,8 +25,9 @@ public static partial class ConversationBuilder
     [GeneratedRegex(@"^(?:(?<not>not)\s+)?bool\s+(?<id>\d+)(?:\s+(?<value>true|false))?$", RegexOptions.IgnoreCase)]
     private static partial Regex BoolCondition();
 
+    /// <summary>"conditional &lt;id&gt; [param &lt;n&gt;]": also a level's <c>goTo</c> step (<see cref="LevelBuilder"/>).</summary>
     [GeneratedRegex(@"^conditional\s+(?<id>\d+)(?:\s+param\s+(?<param>-?\d+))?$", RegexOptions.IgnoreCase)]
-    private static partial Regex FunctionCondition();
+    internal static partial Regex FunctionCondition();
 
     [GeneratedRegex(@"^[ER]\d+$", RegexOptions.IgnoreCase)]
     private static partial Regex NodeLabel();

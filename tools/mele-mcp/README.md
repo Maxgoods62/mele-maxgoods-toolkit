@@ -269,6 +269,10 @@ usables:
     yaw: -94.2                 # this mesh's front is its +Y: (direction to the player) - 90
     name: { strref: 74210060, fr: "Cabine (copie)", en: "Cabin (copy)" }   # shown when Shepard aims at it (GlobalTlk)
     goTo: { map: BIOA_CLD00, startPoint: start_cld00 }                     # Shepard uses it → that map, at that start point
+  # goTo can also pick the map by plot (a list: the first entry whose `if` passes; the last has no `if`):
+  # goTo:
+  #   - { if: conditional 812, map: BIOA_STA00, startPoint: start_nor10_06 }   # conditional <id> [param <n>]
+  #   - { map: BIOA_NOR00, startPoint: start_nor10_06 }
 ```
 
 Every value given is enforced; a value left out stays as it is. Only values that differ are written, so a rebuild changes nothing. Errors name the YAML line.
@@ -281,7 +285,7 @@ A copy of `propTemplate` lit by its light environment is far brighter than the v
 
 Last, unless `package` was given, the build writes its key of MeleBridge's `levels.json` (`%LOCALAPPDATA%\MeleBridge\LE1\levels.json`, or `MELE_LEVELS_JSON`): the files the level streams, by their vanilla names, the tags of its props not removed, the tags of its `lights` entries (switched off ones too), `npcs` (every NPC of the YAML by its tag: `name` its YAML key, `location` and `yaw` (Unreal units) as built, `lights` its lights' offsets `[forward, right, up]`, `{}` when none) and `characterLights` (each copy's name in the level, e.g. `StaticLightCollectionActor_68`, with the file it is copied from, `BIOA_FRE31_00_DSG`). It describes the last build, not the install. Version 1 still (a bridge ignores keys it doesn't know). Other keys stay; the file is written beside it, then moved over it (an unreadable one is kept aside as `.bad-<ticks>`). The bridge reads it on each map change to map forks back to their vanilla files.
 
-A usable is made targetable (its behavior's `m_bTargetable` override: vanilla terminals wait for their story's Kismet). `goTo` Kismet in `Main_Sequence`: `BioSeqEvt_ArtPlaceableUsed` (Originator = the usable) → `BioSeqAct_AreaTransition`.
+A usable is made targetable (its behavior's `m_bTargetable` override: vanilla terminals wait for their story's Kismet). `goTo` Kismet in `Main_Sequence`: `BioSeqEvt_ArtPlaceableUsed` (Originator = the usable) → `BioSeqAct_AreaTransition`. A `goTo` list chains a `BioSeqAct_PMCheckConditional` per `if` (`m_nIndex`, `Param`), as vanilla's galaxy map does: its `True` → that entry's transition, its `False` → the next check, the last `False` → the last entry's transition. Only a conditional can pick (an `if` of another kind is an error, with its line), and every entry but the last needs one. A rebuild of the same shape only writes what differs; another shape (a list grown or shrunk, a list back to one map) trashes the old checks and transitions and links new ones. The result: "Kismet: use → 3 plot checks → 4 area transitions", then "if conditional 812: goes to BIOA_STA00 start_nor10_06", …, "otherwise goes to BIOA_NOR00 start_nor10_06".
 
 `streaming` gives the volume one `Default` state whose `VisibleChunkNames` are the `levels`: they show while the player is inside it, including when spawned there. Its `InChunkName` is the first level: without one, pawns that touch the volume stay in stasis (no AI, no light update). The volume is found again by its source name; a start point by its tag, and it is put on the level's navigation list, blocked (`bBlocked`): it has no paths, so it must not be where AI paths start. The level's `BioWorldInfo` says it has a path network (`bPathsRebuilt`, `bHasPathNodes`), as vanilla persistent levels do.
 

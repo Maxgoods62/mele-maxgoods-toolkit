@@ -134,7 +134,13 @@ public static class LevelBuilder
         public List<LightSpec> Lights = [];
     }
 
-    /// <summary>A placeable Shepard uses, e.g. a terminal; using it loads <see cref="GoTo"/>.</summary>
+    /// <summary>
+    /// One way out of a usable: the map it loads when plot conditional <see cref="Conditional"/> (a <c>BioAutoConditionals</c> function,
+    /// with <see cref="Param"/>) is true, or always when it is null: the last step of a <c>goTo</c> list, or its only one.
+    /// </summary>
+    private sealed record GoToStep(int? Conditional, int Param, string Map, string? StartPoint, int Line);
+
+    /// <summary>A placeable Shepard uses, e.g. a terminal; using it loads the map of the first step of <see cref="GoTo"/> that applies.</summary>
     private sealed class UsableSpec
     {
         public required string Name;
@@ -144,7 +150,7 @@ public static class LevelBuilder
         public Vector3? Location;
         public float? Yaw;
         public int? NameStrRef;
-        public (string Map, string? StartPoint)? GoTo;
+        public List<GoToStep>? GoTo;
     }
 
     /// <summary>Any actor copied from a template and placed, e.g. a mesh of another level; or a mesh shown on a copy of the prop template.</summary>
@@ -450,7 +456,7 @@ public static class LevelBuilder
         }
         if (behaviorDirty) behavior.WriteProperties(behaviorProps);
 
-        if (usable.GoTo is { } go) LinkAreaTransition(pcc, actor, go.Map, go.StartPoint, usable.Line, cache, changes);
+        if (usable.GoTo is { } steps) LinkGoTo(pcc, actor, steps, usable.Line, cache, changes);
         return new BuiltUsable(usable.Name, ExportInspector.Row(actor), action, changes);
     }
 
@@ -825,7 +831,17 @@ public static class LevelBuilder
     internal static int Units(float degrees) => (int)Math.Round(degrees * 65536 / 360);
 
     /// <summary>Main_Sequence: Shepard uses the placeable (BioSeqEvt_ArtPlaceableUsed) → BioSeqAct_AreaTransition to the map and start point.</summary>
-    private static void LinkAreaTransition(IMEPackage pcc, ExportEntry usable, string map, string? startPoint, int line, PackageCache cache, List<string> changes)
+    private const string AreaTransition = "BioSeqAct_AreaTransition";
+    private const string CheckConditional = "BioSeqAct_PMCheckConditional";
+
+    /// <summary>
+    /// The usable's Kismet in <c>Main_Sequence</c>: <c>BioSeqEvt_ArtPlaceableUsed</c> (Originator = the usable) → an area transition, or a
+    /// chain of plot checks (<c>BioSeqAct_PMCheckConditional</c>), each with its transition on <c>True</c> and the next check on
+    /// <c>False</c>, ending in the unconditional step's transition: vanilla's own pattern (the galaxy map's <c>To_LOS00</c>). A chain of
+    /// the same shape gets its values written where they differ; any other (one more step, one less, a step that gained or lost its
+    /// condition) is trashed and made again, so no old transition stays linked to fire beside the new ones.
+    /// </summary>
+    private static void LinkGoTo(IMEPackage pcc, ExportEntry usable, List<GoToStep> steps, int line, PackageCache cache, List<string> changes)
     {
         var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {line}: the level has no {MainSequence}.");
         var objects = KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().ToList();
@@ -836,24 +852,90 @@ public static class LevelBuilder
             KismetHelper.WriteOriginator(used, usable);
             changes.Add("Kismet: use event");
         }
-        var outIndex = KismetHelper.GetOutputLinkNames(used).IndexOf("Out");
-        if (outIndex < 0) throw new InvalidOperationException($"#{used.UIndex} has no 'Out' link.");
-        var transition = KismetHelper.GetOutputLinksOfNode(used)[outIndex].Select(o => o.LinkedOp).OfType<ExportEntry>().FirstOrDefault(o => o.ClassName == "BioSeqAct_AreaTransition");
-        if (transition is null)
+
+        var built = BuiltGoTo(used);
+        var sameShape = built.Count == steps.Count
+                        && built.Zip(steps).All(b => b.First.Transition is not null && (b.First.Check is null) == (b.Second.Conditional is null));
+        if (!sameShape)
         {
-            transition = SequenceObjectCreator.CreateSequenceObject(sequence, "BioSeqAct_AreaTransition", cache);
-            KismetHelper.CreateOutputLink(used, "Out", transition, 0);
-            changes.Add("Kismet: use → area transition");
+            foreach (var (check, transition) in built)
+            {
+                if (check is not null) KismetHelper.RemoveFromSequence(check, trash: true);
+                if (transition is not null) KismetHelper.RemoveFromSequence(transition, trash: true);
+            }
+            built = [];
+            ExportEntry from = used;
+            var output = "Out";
+            foreach (var step in steps)
+            {
+                var transition = SequenceObjectCreator.CreateSequenceObject(sequence, AreaTransition, cache);
+                ExportEntry? check = null;
+                if (step.Conditional is not null)
+                {
+                    check = SequenceObjectCreator.CreateSequenceObject(sequence, CheckConditional, cache);
+                    KismetHelper.CreateOutputLink(from, output, check, 0);
+                    KismetHelper.CreateOutputLink(check, "True", transition, 0);
+                    from = check;
+                    output = "False";
+                }
+                else KismetHelper.CreateOutputLink(from, output, transition, 0);
+                built.Add((check, transition));
+            }
+            changes.Add(steps.Count == 1 ? "Kismet: use → area transition" : $"Kismet: use → {steps.Count - 1} plot checks → {steps.Count} area transitions");
         }
 
-        var props = transition.GetProperties();
-        var dirty = Put(props, new NameProperty(map, "AreaName"));
-        dirty |= startPoint is null ? props.RemoveNamedProperty("StartPoint") : Put(props, new NameProperty(startPoint, "StartPoint"));
-        if (dirty)
+        foreach (var ((check, transition), step) in built.Zip(steps))
         {
-            transition.WriteProperties(props);
-            changes.Add($"goes to {map}{(startPoint is null ? "" : $" {startPoint}")}");
+            var dirty = false;
+            if (check is not null)
+            {
+                var checkProps = check.GetProperties();
+                var checkDirty = Put(checkProps, new IntProperty(step.Conditional!.Value, "m_nIndex"));
+                checkDirty |= step.Param == 0 ? checkProps.RemoveNamedProperty("Param") : Put(checkProps, new IntProperty(step.Param, "Param"));
+                // What kismet_read and LEX's sequence editor show beside it, as vanilla's "Player was just at Noveria?".
+                var comment = new ArrayProperty<StrProperty>([new StrProperty($"{step.Map}{(step.StartPoint is null ? "" : $" {step.StartPoint}")}?")], "m_aObjComment");
+                checkDirty |= Put(checkProps, comment);
+                if (checkDirty) check.WriteProperties(checkProps);
+                dirty |= checkDirty;
+            }
+            var props = transition!.GetProperties();
+            var transitionDirty = Put(props, new NameProperty(step.Map, "AreaName"));
+            transitionDirty |= step.StartPoint is null ? props.RemoveNamedProperty("StartPoint") : Put(props, new NameProperty(step.StartPoint, "StartPoint"));
+            if (transitionDirty) transition.WriteProperties(props);
+            dirty |= transitionDirty;
+            if (dirty) changes.Add(GoToText(step, steps.Count));
         }
+    }
+
+    /// <summary>The usable's chain as built: from its event's <c>Out</c>, each plot check with the transition on its <c>True</c>, along <c>False</c>, then the last transition.</summary>
+    private static List<(ExportEntry? Check, ExportEntry? Transition)> BuiltGoTo(ExportEntry used)
+    {
+        var chain = new List<(ExportEntry? Check, ExportEntry? Transition)>();
+        var seen = new HashSet<int>();
+        var node = NextOfGoTo(used, "Out");
+        while (node is not null && seen.Add(node.UIndex))
+        {
+            if (node.ClassName == AreaTransition)
+            {
+                chain.Add((null, node));
+                break;
+            }
+            // A transition already in the chain (linked twice by hand) is no step's own: the shape differs, and it is trashed once.
+            var transition = KismetPrefabs.Next(node, "True", AreaTransition);
+            chain.Add((node, transition is not null && seen.Add(transition.UIndex) ? transition : null));
+            node = NextOfGoTo(node, "False");
+        }
+        return chain;
+    }
+
+    private static ExportEntry? NextOfGoTo(ExportEntry from, string output) =>
+        KismetPrefabs.Next(from, output, CheckConditional) ?? KismetPrefabs.Next(from, output, AreaTransition);
+
+    private static string GoToText(GoToStep step, int count)
+    {
+        var where = $"goes to {step.Map}{(step.StartPoint is null ? "" : $" {step.StartPoint}")}";
+        if (step.Conditional is not { } id) return count == 1 ? where : $"otherwise {where}";
+        return $"if conditional {id}{(step.Param == 0 ? "" : $" param {step.Param}")}: {where}";
     }
 
     /// <summary>The template's actor imported with everything it references, or an actor of this level cloned; added to the level's actors.</summary>
@@ -1429,6 +1511,8 @@ public static class LevelBuilder
         (ByteProperty x, ByteProperty y) => x.Value == y.Value,
         (NameProperty x, NameProperty y) => x.Value == y.Value,
         (StringRefProperty x, StringRefProperty y) => x.Value == y.Value,
+        (StrProperty x, StrProperty y) => x.Value == y.Value,
+        (ArrayProperty<StrProperty> x, ArrayProperty<StrProperty> y) => x.Select(e => e.Value).SequenceEqual(y.Select(e => e.Value)),
         (ObjectProperty x, ObjectProperty y) => x.Value == y.Value,
         (StructProperty x, StructProperty y) => x.StructType == y.StructType
             && y.Properties.Where(p => p is not NoneProperty).All(p => x.Properties.FirstOrDefault(q => q.Name == p.Name) is { } q && Same(q, p)),
@@ -1726,17 +1810,48 @@ public static class LevelBuilder
         return strRef.Value;
     }
 
-    /// <summary>{map: BIOA_CLD00, startPoint: start_cld00}.</summary>
-    private static (string Map, string? StartPoint) GoToOf(YamlNode value)
+    /// <summary>
+    /// <c>{map, startPoint}</c>, or a list of them, each but the last with <c>if: conditional &lt;id&gt; [param &lt;n&gt;]</c>: the first whose
+    /// conditional is true, else the last.
+    /// </summary>
+    private static List<GoToStep> GoToOf(YamlNode value)
     {
-        if (value is not YamlMappingNode m) throw Fail(value, "'goTo' is {map: <level file name>, startPoint: <start point tag>}.");
-        string? map = null, startPoint = null;
-        foreach (var (key, v) in Entries(m, "map", "startPoint"))
+        if (value is YamlMappingNode single) return [GoToStepOf(single, allowIf: false)];
+        if (value is not YamlSequenceNode list)
+            throw Fail(value, "'goTo' is {map: <level file name>, startPoint: <start point tag>}, or a list of them, each but the last with 'if: conditional <id>'.");
+        var steps = list.Children.Select(item => GoToStepOf(item as YamlMappingNode ?? throw Fail(item, "a 'goTo' entry is {if, map, startPoint}."), allowIf: true)).ToList();
+        if (steps.Count == 0) throw Fail(value, "'goTo' has no entry.");
+        for (var i = 0; i < steps.Count; i++)
         {
-            if (key == "map") map = Path.GetFileNameWithoutExtension(Scalar(v));
-            else startPoint = Scalar(v);
+            var last = i == steps.Count - 1;
+            if (last && steps[i].Conditional is not null)
+                throw new ArgumentException($"line {steps[i].Line}: the last 'goTo' entry needs no 'if': it is where the usable goes when no other applies.");
+            if (!last && steps[i].Conditional is null)
+                throw new ArgumentException($"line {steps[i].Line}: a 'goTo' entry without 'if' must be the last: the entries after it could never apply.");
         }
-        return (map ?? throw Fail(value, "'goTo' needs 'map'."), startPoint);
+        return steps;
+    }
+
+    private static GoToStep GoToStepOf(YamlMappingNode m, bool allowIf)
+    {
+        string? map = null, startPoint = null;
+        int? conditional = null;
+        var param = 0;
+        foreach (var (key, v) in allowIf ? Entries(m, "if", "map", "startPoint") : Entries(m, "map", "startPoint"))
+        {
+            switch (key)
+            {
+                case "map": map = Path.GetFileNameWithoutExtension(Scalar(v)); break;
+                case "startPoint": startPoint = Scalar(v); break;
+                case "if":
+                    var match = ConversationBuilder.FunctionCondition().Match(Scalar(v).Trim());
+                    if (!match.Success) throw Fail(v, "'if' is 'conditional <id>' or 'conditional <id> param <n>' (a plot conditional function).");
+                    conditional = int.Parse(match.Groups["id"].Value, CultureInfo.InvariantCulture);
+                    if (match.Groups["param"].Success) param = int.Parse(match.Groups["param"].Value, CultureInfo.InvariantCulture);
+                    break;
+            }
+        }
+        return new GoToStep(conditional, param, map ?? throw Fail(m, "'goTo' needs 'map'."), startPoint, (int)m.Start.Line);
     }
 
     /// <summary>{package: BIONPC_Chakwas.pcc, actor: BioPawn_3}, or an actor of this level to clone.</summary>
