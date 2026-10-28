@@ -20,8 +20,9 @@ only handles whole classes (`getall`), and commands queued together run in rever
   `D:\MELE\asi-build\LExASIs`, pinned to `aaad03a`. The script clones it if missing.
   - The checkout provides the SDK (LExSDKv2), the ASI loader interface (SPI), spdlog and the `asi_target` CMake helper.
   - `src/` is copied in as one more project and built LE1-only, with that tree's flags (`/W4 /WX`).
-- **Install rule:** `MeleBridge.asi` in the ASI folder is the only file this repo may write inside the game install. It is
-  written only while `MassEffect1.exe` is closed. The game check counts a failed `tasklist` as "running".
+- **Install rule:** `MeleBridge.asi` and [`MelePause.asi`](../mele-pause/README.md) in the ASI folder are the only files this
+  repo may write inside the game install. Each is written only while `MassEffect1.exe` is closed. The game check counts a
+  failed `tasklist` as "running".
 - **Log:** `Binaries\Win64\Logs\MeleBridge.log`, rewritten at each start.
 
 ## In-game editor

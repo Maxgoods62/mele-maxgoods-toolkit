@@ -4,7 +4,8 @@
 #   ./build.sh              build and stage
 #   ./build.sh --install    also copy it to the game's ASI folder (the game must be closed)
 #   ./build.sh --uninstall  remove it from the ASI folder (the game must be closed)
-# MeleBridge.asi in Game\ME1\Binaries\Win64\ASI is the only file this repo may write inside the game install.
+# MeleBridge.asi and MelePause.asi (tools/mele-pause) in Game\ME1\Binaries\Win64\ASI are the only files this repo may write
+# inside the game install.
 set -euo pipefail
 
 LEXASIS="${MELE_LEXASIS:-/mnt/d/MELE/asi-build/LExASIs}"
@@ -55,6 +56,11 @@ fetch_pinned() {
 }
 fetch_pinned https://github.com/ocornut/imgui.git "$THIRD_PARTY/imgui" "$IMGUI_COMMIT"
 fetch_pinned https://github.com/CedricGuillemet/ImGuizmo.git "$THIRD_PARTY/ImGuizmo" "$IMGUIZMO_COMMIT"
+
+# One build of the tree at a time (mele-pause's build.sh takes the same lock): two configures and two MSBuilds would
+# write the same Common-LE1/LESDK-LE1 objects and PDB. Held until the script exits.
+exec 9> "$(dirname "$LEXASIS")/.lexasis-build.lock"
+flock -n 9 || { echo "another build of $LEXASIS is running (mele-bridge or mele-pause): waiting for it" >&2; flock 9; }
 
 # Our sources become one more ASI project of that tree.
 mkdir -p "$LEXASIS/MeleBridge"
