@@ -11,7 +11,7 @@ using LegendaryExplorerCore.Unreal.ObjectInfo;
 namespace MeleMcp.Core;
 
 /// <param name="Key">The YAML's key: &lt;file&gt;.&lt;actor name&gt;.</param>
-/// <param name="Mesh">The StaticMesh it shows, by its path in the file; null when it shows none.</param>
+/// <param name="Mesh">The StaticMesh it shows, or an effect's ParticleSystem, by its path in the file; null when it shows none.</param>
 /// <param name="Changes">Each value the fork changes, vanilla → fork.</param>
 public sealed record ForkedActor(string Key, string Class, string? Mesh, IReadOnlyList<string> Changes);
 
@@ -50,8 +50,11 @@ public static class ForkBuilder
     /// <summary>Total scales this close are one (the cooked collision maps key on them).</summary>
     private const float ScaleNear = 1e-4f;
 
-    /// <summary>The classes a vanilla entry may change: placed meshes. Doors and usables carry Kismet; nodes, volumes and lights must stay.</summary>
-    private static readonly string[] AllowedClasses = ["StaticMeshActor", "BioInert"];
+    /// <summary>
+    /// The classes a vanilla entry may change: placed meshes, and effects (moved, turned or hidden, not scaled). Doors and usables carry
+    /// Kismet; nodes, volumes and lights must stay.
+    /// </summary>
+    private static readonly string[] AllowedClasses = ["StaticMeshActor", "BioInert", "Emitter"];
 
     /// <summary>A vanilla: entry: the file's actor and what it gives it (degrees for yaw and rotation); a value left out keeps the file's.</summary>
     internal sealed record Entry(string File, string Actor, int Line, Vector3? Location, float? Yaw, float[]? Rotation, float? Scale, Vector3? Scale3D, bool Removed)
@@ -260,6 +263,13 @@ public static class ForkBuilder
             refusals.Add($"{where}: {why}");
             return null;
         }
+        // How its particles follow a scale is unchecked.
+        var effect = actor.IsA("Emitter");
+        if (effect && (entry.Scale is not null || entry.Scale3D is not null))
+        {
+            refusals.Add($"line {entry.Line}: {entry.Actor} is an effect: location, rotation (or yaw) and removed only");
+            return null;
+        }
 
         var vanilla = PoseOf(actor);
         var rotation = entry.Rotation is { } pyr ? new Rotator(LevelBuilder.Units(pyr[0]), LevelBuilder.Units(pyr[1]), LevelBuilder.Units(pyr[2]))
@@ -278,6 +288,16 @@ public static class ForkBuilder
         if (forked.Rotation != vanilla.Rotation) changes.Add($"rotation {Rotation(vanilla.Rotation)} → {Rotation(forked.Rotation)}");
         if (forked.Scale != vanilla.Scale) changes.Add($"scale {Number(vanilla.Scale)} → {Number(forked.Scale)}");
         if (forked.Scale3D != vanilla.Scale3D) changes.Add($"scale3d {Scale3D(vanilla.Scale3D)} → {Scale3D(forked.Scale3D)}");
+        if (effect && forked.Location != vanilla.Location)
+        {
+            // Where its particles were last tick: in UE3 it only feeds their system's velocity, so set where the effect now is.
+            foreach (var component in actor.GetChildren().OfType<ExportEntry>().Where(c => c.IsA("ParticleSystemComponent")))
+            {
+                var c = component.GetProperties();
+                c.AddOrReplaceProp(CommonStructs.Vector3Prop(forked.Location, "OldPosition"));
+                component.WriteProperties(c);
+            }
+        }
         if (entry.Removed)
         {
             // As removed: true hides a prop. Its physics body is made at level start from the component's BlockRigidBody (on the actor it is transient).
@@ -290,11 +310,13 @@ public static class ForkBuilder
                 c.AddOrReplaceProp(new BoolProperty(false, "BlockRigidBody"));
                 component.WriteProperties(c);
             }
-            changes.Add("shown → hidden, no collision (BlockRigidBody false)");
+            // An effect has nothing to collide with: hidden, it makes no particles.
+            changes.Add(effect ? "shown → hidden" : "shown → hidden, no collision (BlockRigidBody false)");
         }
         actor.WriteProperties(props);
 
-        if (changes.Count > 0) Warn(pcc, actor, entry, vanilla, forked, level, warnings);
+        // An effect stands on no cover and opens no room.
+        if (changes.Count > 0 && !effect) Warn(pcc, actor, entry, vanilla, forked, level, warnings);
         return new ForkedActor(entry.Key, actor.ClassName, MeshOf(actor)?.InstancedFullPath, changes);
     }
 
@@ -327,8 +349,8 @@ public static class ForkBuilder
     }
 
     /// <summary>
-    /// Why a vanilla actor may not change, or null: only StaticMeshActors and BioInerts (by class chain) that no Kismet variable of
-    /// the file holds; hidden (<paramref name="removed"/>), none with a primitive that is drawn whatever its owner (bIgnoreOwnerHidden).
+    /// Why a vanilla actor may not change, or null: only StaticMeshActors, BioInerts and Emitters (by class chain) that no Kismet variable
+    /// of the file holds; hidden (<paramref name="removed"/>), none with a primitive that is drawn whatever its owner (bIgnoreOwnerHidden).
     /// The build and editor_import ask the same.
     /// </summary>
     internal static string? Refusal(ExportEntry actor, IReadOnlyDictionary<int, string> held, bool removed)
@@ -341,8 +363,7 @@ public static class ForkBuilder
                 : actor.IsA("NavigationPoint") ? "path nodes and cover links must stay where the paths were built"
                 : actor.IsA("Volume") ? "volumes must stay"
                 : actor.IsA("Light") || actor.IsA("StaticLightCollectionActor") ? "lights are baked into the level"
-                : actor.IsA("Emitter") ? "emitters wait (no collision, so the editor can't pick them)"
-                : "only StaticMeshActors and BioInerts may change";
+                : "only StaticMeshActors, BioInerts and Emitters may change";
             return $"a {actor.ClassName}: {why}";
         }
         if (held.TryGetValue(actor.UIndex, out var variable)) return $"Kismet holds it ({variable}): its scripts would find it changed";
@@ -385,9 +406,11 @@ public static class ForkBuilder
             props.GetProp<StructProperty>("DrawScale3D") is { } s ? CommonStructs.GetVector3(s) : Vector3.One);
     }
 
-    /// <summary>The StaticMesh the actor shows (a StaticMeshActor's, a BioInert's placeable mesh); null when none.</summary>
+    /// <summary>The StaticMesh the actor shows (a StaticMeshActor's, a BioInert's placeable mesh), or an emitter's ParticleSystem (its template); null when none.</summary>
     internal static IEntry? MeshOf(ExportEntry actor) =>
-        Primitives(actor).Where(c => c.IsA("StaticMeshComponent")).Select(c => LevelBuilder.Effective(c).GetProp<ObjectProperty>("StaticMesh")?.ResolveToEntry(actor.FileRef))
+        Primitives(actor).Select(c => c.IsA("StaticMeshComponent") ? LevelBuilder.Effective(c).GetProp<ObjectProperty>("StaticMesh")?.ResolveToEntry(actor.FileRef)
+                : c.IsA("ParticleSystemComponent") ? LevelBuilder.Effective(c).GetProp<ObjectProperty>("Template")?.ResolveToEntry(actor.FileRef)
+                : null)
             .FirstOrDefault(m => m is not null);
 
     /// <summary>The actor's components that draw or collide (its subobjects).</summary>

@@ -36,6 +36,10 @@ namespace MeleBridge
     /// Every property of an object, or one: "Location", "Location.X", "Array[2]", "Struct.Array[0].Member".
     json GetProperty(UObject* object, std::wstring const& path, int depth);
 
+    /// A property's offset as the engine laid its class out, or -1 when the class has no property of that name. For fields the
+    /// SDK's C++ layout puts elsewhere (Editor.cpp lists the ones checked).
+    int PropertyOffset(UStruct const* scope, std::wstring_view name);
+
     /// Sets one property (same paths as GetProperty) and returns its new value.
     json SetProperty(UObject* object, std::wstring const& path, json const& value);
 

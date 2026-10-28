@@ -536,6 +536,13 @@ namespace MeleBridge
         return t.WholeStaticArray ? ExportStaticArray(t.Property, t.Address, depth) : ExportValue(t.Property, t.Address, depth);
     }
 
+    int PropertyOffset(UStruct const* scope, std::wstring_view name)
+    {
+        int offset = -1;
+        ForEachProperty(scope, [&](UProperty* p) { if (offset < 0 && EqualsNoCase(NameOf(p), name)) offset = p->Offset; });
+        return offset;
+    }
+
     json SetProperty(UObject* object, std::wstring const& path, json const& value)
     {
         auto const t = Walk(object->Class, reinterpret_cast<BYTE*>(object), path);

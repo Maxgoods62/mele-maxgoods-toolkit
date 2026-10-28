@@ -23,7 +23,7 @@
 // The editor's render-thread half: Dear ImGui and ImGuizmo drawn into the game's back buffer from a hooked
 // IDXGISwapChain::Present. It never touches game objects: it draws from the game thread's snapshot and posts commands back.
 // It also reads the prop catalog mele-mcp builds (catalog.json and its thumbnail PNGs) for the Props window's grid, and draws
-// the lights the editor lists (icons, the selected one's radius, its panel).
+// the lights and the effects the editor lists (icons, the selected light's radius, its panel).
 namespace MeleBridge::Editor
 {
     namespace
@@ -86,8 +86,10 @@ namespace MeleBridge::Editor
         /// When the game thread's last status line arrived, to show it for a few seconds.
         unsigned long long StatusSeen = 0;
         LARGE_INTEGER StatusSince{};
-        /// The Lights tab is open this frame: a click near a light's icon selects that light, as with Alt held.
+        /// The Lights or the Effects tab is open this frame: a click near one of that tab's icons selects it, as with Alt held
+        /// (docs/07 §12).
         bool LightsTabOpen = false;
+        bool EffectsTabOpen = false;
         /// The light panel's settings while a control is held, and for two game frames after the last change: the game thread
         /// applies a change a frame or two later, and the snapshot would pull the control back meanwhile.
         LightBlock PanelLight;
@@ -95,9 +97,12 @@ namespace MeleBridge::Editor
         bool PanelEditing = false;
         unsigned long long PanelFrame = 0;
 
-        /// Light icons are this big; a click this close to one selects its light.
+        /// Light and effect icons are this big; a click this close to one selects its light or effect.
         constexpr float IconRadius = 7;
         constexpr float IconPickPixels = 12;
+        /// Untouched effects get an icon within 30 m of the camera, at most 50 of them, nearest first (docs/07 §12).
+        constexpr float EffectIconReach = 3000;
+        constexpr size_t MaxEffectIcons = 50;
         /// The panel's ranges, as the game thread holds a Light command to them.
         constexpr float MinRadius = 16, MaxRadius = 4096, MaxBrightness = 10, MinFalloff = 1, MaxFalloff = 8;
 
@@ -341,8 +346,10 @@ namespace MeleBridge::Editor
         {
             if (!s.Selected || tool == Tool::Move) return {};
             auto const verb = tool == Tool::Turn ? "turned" : "scaled";
-            if (s.SelectedLight) return std::format("not {}: a light only moves (its radius is in the panel)", verb);
+            if (s.SelectedLight)
+                return tool == Tool::Turn ? "not turned: a light only moves (a point light shines all ways)" : "not scaled: a light only moves (its radius is in the panel)";
             if (tool == Tool::Scale && s.SelectedPawn) return "not scaled: npcs keep a yaw and no scale";
+            if (tool == Tool::Scale && s.SelectedEffect) return "not scaled: an effect moves and turns (how its particles follow a scale is unchecked)";
             if (Mirrored(s))
                 return std::format("not {}: {} is mirrored (DrawScale {:g}, DrawScale3D {:g} {:g} {:g}); move it, or fix its scale in the YAML",
                                    verb, s.SelectedPath.substr(s.SelectedPath.rfind('.') + 1), s.SelectedDrawScale, s.SelectedDrawScale3D.X,
@@ -452,7 +459,8 @@ namespace MeleBridge::Editor
                 else
                     ImGui::TextDisabled("Left click: select   T/R/G: move, turn, scale   Ctrl: snap from where the drag started (10 units, 15 "
                                         "degrees, scale by 0.1)   Del: delete   Ctrl+Z/Y: undo/redo");
-                ImGui::TextDisabled("L: a prop light for the selected prop   Alt+click (or the Lights tab open): a light's icon");
+                ImGui::TextDisabled("L: a prop light for the selected prop   Alt+click: the icon of a light or an effect nearest the camera "
+                                    "(the Lights or Effects tab open: that tab's)");
                 if (!s.SaveProblem.empty()) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Last save: %s", s.SaveProblem.c_str());
 
                 // The last word, the game thread's or the overlay's own, for a few seconds.
@@ -477,7 +485,9 @@ namespace MeleBridge::Editor
         }
 
         /// The selected light's panel (docs/07 §11): every change sends all of its settings, held to the panel's ranges. A drag
-        /// on a control is one undo step: EndPanel closes it once no control is held.
+        /// on a control is one undo step: EndPanel closes it once no control is held. An NPC's light (§12) has no kind control
+        /// (it keeps its template's channels) and shows its offset from its NPC. A light the editor won't change now (its NPC
+        /// fails the pose check) shows its settings greyed.
         void DrawLightPanel(Snapshot const& s)
         {
             if (PanelPath != s.SelectedPath || (!PanelEditing && s.Frame > PanelFrame + 1))
@@ -488,24 +498,43 @@ namespace MeleBridge::Editor
             auto light = PanelLight;
             auto changed = false;
             auto const clamped = ImGuiSliderFlags_AlwaysClamp;
+            auto const npc = light.Kind == LightKind::Npc;
             // The controls are the selected light's own: a selection that changes while one is held (an undo, a pass) ends its drag
             // instead of carrying it to the next light.
             ImGui::PushID(s.SelectedPath.c_str());
-            ImGui::SeparatorText(light.Kind == LightKind::Room ? "Room light" : "Prop light");
-            if (ImGui::RadioButton("Prop light", light.Kind == LightKind::Props))
+            ImGui::BeginDisabled(!s.SelectedUnmovable.empty());
+            if (npc)
             {
-                light.Kind = LightKind::Props;
-                changed = true;
+                ImGui::SeparatorText(std::format("NPC light: {}", s.SelectedNpcName.empty() ? s.SelectedNpcTag : s.SelectedNpcName).c_str());
+                // Rounded as the YAML writes it: the offset is computed in floats. Adding 0 turns a -0 into 0.
+                auto const shown = [](float v) { return std::round(v * 100.f) / 100.f + 0.f; };
+                ImGui::Text("Offset [forward, right, up]: [%g, %g, %g]", shown(s.SelectedOffset.X), shown(s.SelectedOffset.Y), shown(s.SelectedOffset.Z));
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("From %s's centre (the pawn's Location), turned by its yaw: move the light to change it. Moving or turning "
+                                      "the NPC takes its lights along.",
+                                      s.SelectedNpcName.empty() ? s.SelectedNpcTag.c_str() : s.SelectedNpcName.c_str());
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 360);
+                ImGui::TextDisabled("It keeps its template's channels (Dynamic: characters and props on their light environment, not the walls).");
+                ImGui::PopTextWrapPos();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gameplay_4 only: lights our props, never walls, pawns or vanilla meshes.");
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Room light", light.Kind == LightKind::Room))
+            else
             {
-                light.Kind = LightKind::Room;
-                changed = true;
+                ImGui::SeparatorText(light.Kind == LightKind::Room ? "Room light" : "Prop light");
+                if (ImGui::RadioButton("Prop light", light.Kind == LightKind::Props))
+                {
+                    light.Kind = LightKind::Props;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gameplay_4 only: lights our props, never walls, pawns or vanilla meshes.");
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Room light", light.Kind == LightKind::Room))
+                {
+                    light.Kind = LightKind::Room;
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Walls, vanilla meshes, pawns and props alike: a match made with a prop light survives it.");
+                ImGui::SameLine();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Walls, vanilla meshes, pawns and props alike: a match made with a prop light survives it.");
-            ImGui::SameLine();
             changed |= ImGui::Checkbox("Enabled", &light.Enabled);
             ImGui::SetNextItemWidth(240);
             changed |= ImGui::SliderFloat("Radius", &light.Radius, MinRadius, MaxRadius, "%.0f", ImGuiSliderFlags_Logarithmic | clamped);
@@ -520,7 +549,11 @@ namespace MeleBridge::Editor
             }
             ImGui::SetNextItemWidth(240);
             changed |= ImGui::SliderFloat("Falloff", &light.Falloff, MinFalloff, MaxFalloff, "%.2f", clamped);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("FalloffExponent: 2 is a point light's usual. A prop is covered where (1 - (d/R)^2)^falloff >= 0.25.");
+            // The prop-coverage rule is for prop lights only: an NPC light is never on their channel.
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", npc ? "FalloffExponent: 2 is a point light's usual."
+                                            : "FalloffExponent: 2 is a point light's usual. A prop is covered where (1 - (d/R)^2)^falloff >= 0.25.");
+            ImGui::EndDisabled();
             ImGui::PopID();
             if (changed && !(light == PanelLight))
             {
@@ -551,6 +584,14 @@ namespace MeleBridge::Editor
                 ImGui::TextUnformatted(s.SelectedPath.c_str());
                 ImGui::Text("Class: %s%s%s", s.SelectedClass.c_str(), s.SelectedStatic ? " (static)" : "", s.SelectedSpawned ? " (spawned)" : "");
                 ImGui::Text("Tag: %s", s.SelectedTag.c_str());
+                // An effect (docs/07 §12): one that ends shows nothing once the 1.5 s run after a step is over.
+                if (s.SelectedEffect)
+                {
+                    ImGui::Text("Template: %s%s", s.SelectedTemplate.c_str(), s.SelectedTemplate == "no template" ? "" : s.SelectedLoops ? " (loops)" : " (ends)");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("loops: it plays on. ends: it plays once; after a move it shows for the 1.5 s run, then nothing until the "
+                                          "game starts it again.");
+                }
                 // A vanilla actor: whether its edits ship (docs/07 §11). An actor the editor won't move: why.
                 if (!s.SelectedShips.empty())
                 {
@@ -1128,8 +1169,134 @@ namespace MeleBridge::Editor
 
         ImU32 ColourOf(LightBlock const& light, int alpha = 255) { return IM_COL32(light.Color[0], light.Color[1], light.Color[2], alpha); }
 
-        /// The Lights tab (docs/07 §11): Prop light and Room light add one over where the view points; the list (the editor's lights
-        /// and the YAMLs' lights: entries, deleted ones left out) selects one. While it is open, a click near an icon does too.
+        /// An icon's shape tells its source (docs/07 §12): a disc for ours, a diamond for an NPC's light, a square for a level's, a
+        /// star for an effect.
+        enum class Shape { Disc, Diamond, Square, Star };
+
+        Shape ShapeOf(LightBlock const& light)
+        {
+            return light.Kind == LightKind::Npc ? Shape::Diamond : light.Kind == LightKind::Vanilla ? Shape::Square : Shape::Disc;
+        }
+
+        /// A shape about a centre, about as far out as a disc of that radius, filled or as an outline. The star's points reach a
+        /// little further: its arms are thin.
+        void DrawShape(ImDrawList* draw, ImVec2 centre, float radius, Shape shape, ImU32 colour, bool filled, float thickness = 2)
+        {
+            if (shape == Shape::Disc)
+            {
+                if (filled) draw->AddCircleFilled(centre, radius, colour);
+                else draw->AddCircle(centre, radius, colour, 0, thickness);
+                return;
+            }
+            ImVec2 points[10];
+            auto count = 4;
+            if (shape == Shape::Diamond)
+            {
+                points[0] = { centre.x, centre.y - radius };
+                points[1] = { centre.x + radius, centre.y };
+                points[2] = { centre.x, centre.y + radius };
+                points[3] = { centre.x - radius, centre.y };
+            }
+            else if (shape == Shape::Square)
+            {
+                auto const half = radius * 0.85f;
+                points[0] = { centre.x - half, centre.y - half };
+                points[1] = { centre.x + half, centre.y - half };
+                points[2] = { centre.x + half, centre.y + half };
+                points[3] = { centre.x - half, centre.y + half };
+            }
+            else
+            {
+                count = 10;
+                for (int i = 0; i < count; i++)
+                {
+                    auto const angle = -1.5707963f + static_cast<float>(i) * 3.14159265f / 5;
+                    auto const reach = i % 2 == 0 ? radius * 1.2f : radius * 0.5f;
+                    points[i] = { centre.x + std::cos(angle) * reach, centre.y + std::sin(angle) * reach };
+                }
+            }
+            if (!filled) draw->AddPolyline(points, count, colour, ImDrawFlags_Closed, thickness);
+            else if (shape == Shape::Star) draw->AddConcavePolyFilled(points, count, colour);
+            else draw->AddConvexPolyFilled(points, count, colour);
+        }
+
+        /// The icons' legend (docs/07 §12), the shapes drawn as the world has them. The type letters are the level lights' (Phase
+        /// 5b).
+        void DrawLegend()
+        {
+            auto const draw = ImGui::GetWindowDrawList();
+            auto const size = ImGui::GetTextLineHeight();
+            auto const item = [&](Shape shape, char const* text) {
+                auto const at = ImGui::GetCursorScreenPos();
+                ImGui::Dummy({ size, size });
+                DrawShape(draw, { at.x + size * 0.5f, at.y + size * 0.5f }, size * 0.32f, shape, ImGui::GetColorU32(ImGuiCol_TextDisabled), false, 1.5f);
+                ImGui::SameLine(0, 2);
+                ImGui::TextDisabled("%s", text);
+                ImGui::SameLine();
+            };
+            item(Shape::Disc, "ours");
+            item(Shape::Diamond, "NPC");
+            item(Shape::Square, "level light");
+            item(Shape::Star, "effect");
+            ImGui::TextDisabled("\u00b7 B baked, C characters only, U special channel, D dynamic");
+        }
+
+        /// A row's marks: a light or an effect with an edit, saved or not.
+        std::string EditMark(bool edited, bool unsaved) { return unsaved ? "   (unsaved)" : edited ? "   (edited)" : ""; }
+
+        bool SameNoCase(std::string const& a, std::string const& b) { return _stricmp(a.c_str(), b.c_str()) == 0; }
+
+        /// One NPC's section of the Lights tab (docs/07 §12): "Dorn (claude_npc_02)" with Add light, then its lights, each a row
+        /// that selects it. A light whose NPC's level is not visible has its NPC's section saying so, and one whose NPC levels.json
+        /// no longer lists has a section under its NPC's tag; neither offers Add light.
+        void DrawNpcSection(Snapshot const& s, NpcSection const& npc)
+        {
+            ImGui::PushID(npc.Tag.c_str());
+            ImGui::Separator();
+            if (npc.Away)
+            {
+                ImGui::Text("%s (%s)", npc.Name.c_str(), npc.Tag.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%s is not visible here: its lights wait for it)", npc.Level.c_str());
+            }
+            else if (npc.Name.empty())
+            {
+                ImGui::TextUnformatted(npc.Tag.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("(levels.json no longer lists this NPC: run mod_build)");
+            }
+            else
+            {
+                ImGui::Text("%s (%s)", npc.Name.c_str(), npc.Tag.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Add light")) Post({ .Type = Command::Kind::AddNpcLight, .Text = npc.Tag });
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A face light at [60, 0, 80] from %s's centre, radius 100, brightness 1.2: it goes where %s goes.", npc.Name.c_str(),
+                                      npc.Name.c_str());
+            }
+            auto any = false;
+            for (size_t i = 0; i < s.Lights.size(); i++)
+            {
+                auto const& l = s.Lights[i];
+                if (l.Light.Kind != LightKind::Npc || !SameNoCase(l.Npc, npc.Tag)) continue;
+                any = true;
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::ColorButton("##colour", ImGui::ColorConvertU32ToFloat4(ColourOf(l.Light)), ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker,
+                                   { ImGui::GetTextLineHeight(), ImGui::GetTextLineHeight() });
+                ImGui::SameLine();
+                auto const row = std::format("{} \u00b7 NPC \u00b7 radius {:.0f} \u00b7 brightness {:.3g}{}{}", l.Tag, l.Light.Radius, l.Light.Brightness,
+                                             l.Light.Enabled ? "" : "   (off)", EditMark(l.Edited, l.Unsaved));
+                if (ImGui::Selectable(row.c_str(), s.Selected && s.SelectedPath == l.Path)) Post({ .Type = Command::Kind::PickLight, .Text = l.Path });
+                ImGui::PopID();
+            }
+            if (!any) ImGui::TextDisabled("no lights");
+            ImGui::PopID();
+        }
+
+        /// The Lights tab (docs/07 §11, §12): Prop light and Room light add one over where the view points, NPC light one for the
+        /// selected NPC of ours; the list (the editor's lights and the YAMLs' lights: entries, deleted ones left out) selects one,
+        /// then a section per NPC of ours (DrawNpcSection). While it is open, a click near an icon does too. The levels' lights
+        /// have icons of their own shapes (the legend), not rows here.
         void DrawLights(Snapshot const& s)
         {
             if (ImGui::Button("Prop light")) Post({ .Type = Command::Kind::AddLight, .On = false });
@@ -1139,29 +1306,78 @@ namespace MeleBridge::Editor
             ImGui::SameLine();
             if (ImGui::Button("Room light")) Post({ .Type = Command::Kind::AddLight, .On = true });
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lights walls, vanilla meshes, pawns and props alike.");
-            ImGui::TextDisabled("%d lights. Click one here, or near its icon in the world, to select it.", static_cast<int>(s.Lights.size()));
+            ImGui::SameLine();
+            // The game thread says why when the selected pawn is not one of ours.
+            ImGui::BeginDisabled(!s.Selected || !s.SelectedPawn);
+            if (ImGui::Button("NPC light")) Post({ .Type = Command::Kind::AddNpcLight });
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", s.Selected && s.SelectedPawn ? "A face light for the selected NPC of ours (npcs: in a level YAML): it goes where the NPC goes."
+                                                                     : "Select one of our NPCs first, or use Add light on its section below.");
+            auto const ours = [](LightIcon const& l) { return l.Light.Kind == LightKind::Props || l.Light.Kind == LightKind::Room; };
+            ImGui::TextDisabled("%d lights. Click one here, or near its icon in the world, to select it.",
+                                static_cast<int>(std::count_if(s.Lights.begin(), s.Lights.end(), ours)));
+            DrawLegend();
             if (ImGui::BeginChild("##lights"))
             {
                 for (size_t i = 0; i < s.Lights.size(); i++)
                 {
                     auto const& l = s.Lights[i];
+                    if (!ours(l)) continue;
                     ImGui::PushID(static_cast<int>(i));
                     ImGui::ColorButton("##colour", ImGui::ColorConvertU32ToFloat4(ColourOf(l.Light)), ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker,
                                        { ImGui::GetTextLineHeight(), ImGui::GetTextLineHeight() });
                     ImGui::SameLine();
-                    auto const row = std::format("{}   {}   radius {:.0f}   brightness {:.3g}{}", l.Tag, l.Light.Kind == LightKind::Room ? "room" : "props",
-                                                 l.Light.Radius, l.Light.Brightness, l.Light.Enabled ? "" : "   (off)");
+                    auto const row = std::format("{}   {}   radius {:.0f}   brightness {:.3g}{}{}", l.Tag, l.Light.Kind == LightKind::Room ? "room" : "props",
+                                                 l.Light.Radius, l.Light.Brightness, l.Light.Enabled ? "" : "   (off)", EditMark(l.Edited, l.Unsaved));
                     if (ImGui::Selectable(row.c_str(), s.Selected && s.SelectedPath == l.Path)) Post({ .Type = Command::Kind::PickLight, .Text = l.Path });
                     ImGui::PopID();
+                }
+                for (auto const& npc : s.Npcs) DrawNpcSection(s, npc);
+            }
+            ImGui::EndChild();
+        }
+
+        /// The Effects tab (docs/07 §12): the emitters of the visible levels, nearest first. One the editor leaves alone is greyed
+        /// with its reason. A click on a row selects it; while the tab is open, a click near its icon does too.
+        void DrawEffects(Snapshot const& s)
+        {
+            ImGui::TextDisabled("%d effects, nearest first. Click one here, or near its icon in the world, to select it.", static_cast<int>(s.Effects.size()));
+            if (ImGui::BeginChild("##effects"))
+            {
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(s.Effects.size()));
+                while (clipper.Step())
+                {
+                    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                    {
+                        auto const& e = s.Effects[static_cast<size_t>(i)];
+                        auto row = std::format("{} \u00b7 {} \u00b7 {} \u00b7 {:.1f} m", e.Name, e.Template, e.Level, e.Metres);
+                        if (e.Deleted) row += "   (deleted)";
+                        else if (e.Hidden) row += e.Forked ? "   (hidden: removed in the YAML)" : "   (hidden)";
+                        row += EditMark(e.Edited, e.Unsaved);
+                        if (!e.Refusal.empty()) row += "   not edited: " + e.Refusal;
+                        ImGui::PushID(i);
+                        if (!e.Refusal.empty()) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                        if (ImGui::Selectable(row.c_str(), s.Selected && s.SelectedPath == e.Path)) Post({ .Type = Command::Kind::PickEffect, .Text = e.Path });
+                        if (!e.Refusal.empty())
+                        {
+                            ImGui::PopStyleColor();
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("not edited: %s", e.Refusal.c_str());
+                        }
+                        ImGui::PopID();
+                    }
                 }
             }
             ImGui::EndChild();
         }
 
-        /// Props: the catalog as a grid of thumbnails, and the meshes in memory as a list. Lights: the editor's lights.
+        /// Props: the catalog as a grid of thumbnails, and the meshes in memory as a list. Lights: the editor's lights. Effects: the
+        /// levels' emitters.
         void DrawProps(Snapshot const& s, float height)
         {
             LightsTabOpen = false;
+            EffectsTabOpen = false;
             if (!ShowProps) return;
             // Asked once per list: a map change drops the list, and the new map's is asked for.
             if (s.Meshes != nullptr) MeshesAsked = false;
@@ -1192,6 +1408,12 @@ namespace MeleBridge::Editor
                     {
                         LightsTabOpen = true;
                         DrawLights(s);
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Effects"))
+                    {
+                        EffectsTabOpen = true;
+                        DrawEffects(s);
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();
@@ -1291,40 +1513,142 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// Every listed light as an icon in its colour, hollow when off, a room light with a second ring; the selected one also
-        /// shows its radius.
-        void DrawLightIcons(Snapshot const& s, float const* view, float const* projection, float width, float height)
+        /// A listed light's icon, in its colour and its source's shape, hollow when off, a room light with a second ring.
+        void DrawLightIcon(ImDrawList* draw, LightIcon const& l, float const* view, float const* projection, float width, float height)
         {
+            float x = 0, y = 0;
+            if (!ProjectPoint(view, projection, l.Location, width, height, x, y)) return;
+            auto const shape = ShapeOf(l.Light);
+            // A dark rim: a white light's icon on a bright wall.
+            DrawShape(draw, { x, y }, IconRadius + 1.5f, shape, IM_COL32(0, 0, 0, 200), false, 3);
+            if (l.Light.Enabled) DrawShape(draw, { x, y }, IconRadius, shape, ColourOf(l.Light), true);
+            else DrawShape(draw, { x, y }, IconRadius - 1, shape, ColourOf(l.Light), false, 2);
+            if (l.Light.Kind == LightKind::Room) draw->AddCircle({ x, y }, IconRadius + 4, ColourOf(l.Light, 200), 0, 1.5f);
+        }
+
+        /// While one of an NPC's lights is selected, its NPC's reference pose (docs/07 §12), where the light's offset is measured
+        /// from: a cross on the floor plane through the pawn's centre, and a tick along its yaw (forward).
+        void DrawNpcMarker(Snapshot const& s, float const* view, float const* projection, float width, float height)
+        {
+            if (!s.Selected || !s.SelectedLight || !s.SelectedHasPose) return;
+            constexpr float Arm = 16, Tick = 48;
             auto const draw = ImGui::GetBackgroundDrawList();
+            auto const& at = s.SelectedPoseLocation;
+            auto const yaw = static_cast<float>(s.SelectedPoseYaw) * UnitsToRadians;
+            auto const line = [&](FVector a, FVector b, ImU32 colour, float thickness) {
+                float ax = 0, ay = 0, bx = 0, by = 0;
+                if (!ProjectPoint(view, projection, a, width, height, ax, ay) || !ProjectPoint(view, projection, b, width, height, bx, by)) return;
+                draw->AddLine({ ax, ay }, { bx, by }, IM_COL32(0, 0, 0, 200), thickness + 2);
+                draw->AddLine({ ax, ay }, { bx, by }, colour, thickness);
+            };
+            auto const colour = IM_COL32(255, 200, 60, 255);
+            line({ at.X - Arm, at.Y, at.Z }, { at.X + Arm, at.Y, at.Z }, colour, 2);
+            line({ at.X, at.Y - Arm, at.Z }, { at.X, at.Y + Arm, at.Z }, colour, 2);
+            line(at, { at.X + std::cos(yaw) * Tick, at.Y + std::sin(yaw) * Tick, at.Z }, colour, 3);
+        }
+
+        /// The effects that have an icon (docs/07 §12): each one with an edit, always; with the Effects tab open or Alt held, the
+        /// others within 30 m of the camera too, at most 50. The snapshot lists them nearest first.
+        std::vector<EffectIcon const*> ShownEffects(Snapshot const& s)
+        {
+            auto const all = EffectsTabOpen || ImGui::GetIO().KeyAlt;
+            std::vector<EffectIcon const*> shown;
+            size_t untouched = 0;
+            for (auto const& e : s.Effects)
+            {
+                if (e.Edited)
+                {
+                    shown.push_back(&e);
+                }
+                else if (all && e.Metres * 100 <= EffectIconReach && untouched < MaxEffectIcons)
+                {
+                    shown.push_back(&e);
+                    untouched++;
+                }
+            }
+            return shown;
+        }
+
+        /// An effect's icon: a star, amber, grey when the editor leaves it alone, hollow while it is hidden (deleted, or hidden by
+        /// the build or the game).
+        void DrawEffectIcon(ImDrawList* draw, EffectIcon const& e, float const* view, float const* projection, float width, float height)
+        {
+            float x = 0, y = 0;
+            if (!ProjectPoint(view, projection, e.Location, width, height, x, y)) return;
+            auto const colour = e.Refusal.empty() ? IM_COL32(255, 190, 70, 255) : IM_COL32(150, 150, 150, 255);
+            DrawShape(draw, { x, y }, IconRadius + 1.5f, Shape::Star, IM_COL32(0, 0, 0, 200), false, 3);
+            if (e.Deleted || e.Hidden) DrawShape(draw, { x, y }, IconRadius - 1, Shape::Star, colour, false, 2);
+            else DrawShape(draw, { x, y }, IconRadius, Shape::Star, colour, true);
+        }
+
+        float CameraDistance(Snapshot const& s, FVector location)
+        {
+            return std::hypot(location.X - s.Pov.Location.X, location.Y - s.Pov.Location.Y, location.Z - s.Pov.Location.Z);
+        }
+
+        /// Every listed light's icon and every shown effect's star, far to near: where two overlap, the one on top is the nearer,
+        /// the one IconAt picks. The selected light's radius under them all.
+        void DrawIcons(Snapshot const& s, float const* view, float const* projection, float width, float height)
+        {
             for (auto const& l : s.Lights)
             {
                 if (s.Selected && s.SelectedPath == l.Path) DrawRings(l, view, projection, width, height);
-                float x = 0, y = 0;
-                if (!ProjectPoint(view, projection, l.Location, width, height, x, y)) continue;
-                // A dark rim: a white light's icon on a bright wall.
-                draw->AddCircle({ x, y }, IconRadius + 1.5f, IM_COL32(0, 0, 0, 200), 0, 3);
-                if (l.Light.Enabled) draw->AddCircleFilled({ x, y }, IconRadius, ColourOf(l.Light));
-                else draw->AddCircle({ x, y }, IconRadius - 1, ColourOf(l.Light), 0, 2);
-                if (l.Light.Kind == LightKind::Room) draw->AddCircle({ x, y }, IconRadius + 4, ColourOf(l.Light, 200), 0, 1.5f);
+            }
+            struct Icon
+            {
+                float Distance = 0;
+                LightIcon const* Light = nullptr;
+                EffectIcon const* Effect = nullptr;
+            };
+            std::vector<Icon> icons;
+            for (auto const& l : s.Lights) icons.push_back({ CameraDistance(s, l.Location), &l, nullptr });
+            for (auto const e : ShownEffects(s)) icons.push_back({ CameraDistance(s, e->Location), nullptr, e });
+            std::stable_sort(icons.begin(), icons.end(), [](Icon const& a, Icon const& b) { return a.Distance > b.Distance; });
+            auto const draw = ImGui::GetBackgroundDrawList();
+            for (auto const& icon : icons)
+            {
+                if (icon.Light != nullptr) DrawLightIcon(draw, *icon.Light, view, projection, width, height);
+                else DrawEffectIcon(draw, *icon.Effect, view, projection, width, height);
             }
         }
 
-        /// The light whose icon is nearest a point, within 12 px; empty for none.
-        std::string LightAt(Snapshot const& s, float const* view, float const* projection, float width, float height, ImVec2 at)
+        /// What a click picks among the icons within 12 px of it (docs/07 §12): one whose drawn shape is under the cursor beats one
+        /// only near it, then the one nearest the camera, so a light in the next room never wins over the one in front, and a
+        /// click on the icon drawn on top (DrawIcons: far to near) picks it. Lights and effects as asked; none: an empty path.
+        struct IconPick
         {
-            std::string nearest;
-            auto best = IconPickPixels;
-            for (auto const& l : s.Lights)
-            {
+            std::string Path;
+            bool Effect = false;
+        };
+
+        IconPick IconAt(Snapshot const& s, float const* view, float const* projection, float width, float height, ImVec2 at, bool lights, bool effects)
+        {
+            IconPick pick;
+            auto best = 0.f;
+            auto covered = false;
+            auto const consider = [&](FVector location, std::string const& path, bool effect) {
                 float x = 0, y = 0;
-                if (!ProjectPoint(view, projection, l.Location, width, height, x, y)) continue;
-                if (auto const distance = std::hypot(x - at.x, y - at.y); distance <= best)
+                if (!ProjectPoint(view, projection, location, width, height, x, y)) return;
+                auto const pixels = std::hypot(x - at.x, y - at.y);
+                if (pixels > IconPickPixels) return;
+                auto const under = pixels <= IconRadius + 1.5f;
+                auto const distance = CameraDistance(s, location);
+                if (pick.Path.empty() || (under && !covered) || (under == covered && distance < best))
                 {
                     best = distance;
-                    nearest = l.Path;
+                    covered = under;
+                    pick = { path, effect };
                 }
+            };
+            if (lights)
+            {
+                for (auto const& l : s.Lights) consider(l.Location, l.Path, false);
             }
-            return nearest;
+            if (effects)
+            {
+                for (auto const e : ShownEffects(s)) consider(e->Location, e->Path, true);
+            }
+            return pick;
         }
 
         /// DrawScale3D after a scale drag: the dragged axis (all three for the centre handle) is its row's length over DrawScale,
@@ -1538,8 +1862,9 @@ namespace MeleBridge::Editor
 
             if (free && !Looking.load() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && s.CanvasWidth > 0)
             {
-                auto const light = LightsTabOpen || io.KeyAlt ? LightAt(s, view, projection, width, height, io.MousePos) : std::string{};
-                if (!light.empty()) Post({ .Type = Command::Kind::PickLight, .Text = light });
+                // With a tab open, only its icons; with Alt held, the lights' and the effects'.
+                auto const icon = IconAt(s, view, projection, width, height, io.MousePos, LightsTabOpen || io.KeyAlt, EffectsTabOpen || io.KeyAlt);
+                if (!icon.Path.empty()) Post({ .Type = icon.Effect ? Command::Kind::PickEffect : Command::Kind::PickLight, .Text = icon.Path });
                 else Post({ .Type = Command::Kind::Pick, .X = io.MousePos.x * s.CanvasWidth / width, .Y = io.MousePos.y * s.CanvasHeight / height });
             }
             if (s.FreeCam && free && io.MouseWheel != 0) Post({ .Type = Command::Kind::Speed, .X = io.MouseWheel });
@@ -1690,7 +2015,8 @@ namespace MeleBridge::Editor
             EndPanel(s);
             DrawProps(s, height);
             DrawDiagnostics(s, width, height);
-            DrawLightIcons(s, view, projection, width, height);
+            DrawIcons(s, view, projection, width, height);
+            DrawNpcMarker(s, view, projection, width, height);
             DrawGizmo(s, view, projection, width, height);
             HandleWorldInput(s, view, projection, width, height);
 

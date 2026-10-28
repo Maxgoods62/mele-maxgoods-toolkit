@@ -165,7 +165,8 @@ public static class GameTools
      Description("Puts an NPC of a level_build YAML file where Shepard stands in the running game (or at given x, y, z): writes her "
                  + "'location' and 'yaw' into the file (comments kept), runs level_build, and moves her and her lights in the running game "
                  + "as a preview. She faces the way Shepard faces (add 'turn' degrees, e.g. 180 to face him). Install the level afterwards "
-                 + "(game closed, mod_install) to keep her there.")]
+                 + "(game closed, mod_install) to keep her there. A note warns when the in-game editor's session (read only) holds an edit "
+                 + "of her or her lights no editor_import has applied yet: import it first, or that edit conflicts with the move.")]
     public static NpcPlacement NpcPlace(
         [Description("Level YAML file (level_build format).")] string file,
         [Description("NPC name in the file's 'npcs' (optional when it has one).")] string? npc = null,

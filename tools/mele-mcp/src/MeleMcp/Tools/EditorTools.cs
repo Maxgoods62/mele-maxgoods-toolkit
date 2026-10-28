@@ -9,7 +9,7 @@ namespace MeleMcp.Tools;
 public static class EditorTools
 {
     [McpServerTool(Name = "editor_import", Destructive = true),
-     Description("Merges what the in-game editor saved (F8, Save: MeleBridge's session file of the map, version 1 or 2) into a level_build YAML file, "
+     Description("Merges what the in-game editor saved (F8, Save: MeleBridge's session file of the map, version 1 to 3) into a level_build YAML file, "
                  + "keeping its comments, then builds the level. Actors are matched by tag with the npcs, usables, props and lights entries. A props entry "
                  + "gets its location, rotation ('yaw' while upright, else 'rotation: [pitch, yaw, roll]' in place of 'yaw'), 'scale' and 'scale3d' "
                  + "when the editor changed them; npcs and usables a location and a yaw (a pitch, roll or scale is noted, not written). Field by field "
@@ -23,15 +23,20 @@ public static class EditorTools
                  + "A light spawned in the editor gets a lights entry named by its tag (kind, location, radius, brightness, color, falloff; "
                  + "'enabled: false' when switched off), taken as a spawned mesh is; a light of a lights entry is merged field by field the "
                  + "same way (location, kind, radius, brightness, color, falloff, enabled); a deleted one gets 'enabled: false' (a light is "
-                 + "switched off, never removed), and one deleted before any import leaves nothing. An NPC light (a tag of npcs.*.lights) is "
-                 + "skipped, as NPC lights are edited in the YAML, and dropped from the session into <session>.dropped.json. "
+                 + "switched off, never removed), and one deleted before any import leaves nothing. An NPC light (its entry's npc block: "
+                 + "its NPC's tag and its offset [forward, right, up]) goes to the file whose npcs has its NPC, whatever takeSpawned says (on "
+                 + "the Normandy the editor spawns it in BIOA_NOR00), after the NPCs' own entries: its item of npcs.<name>.lights is "
+                 + "merged field by field the same way (offset within 0.02, written to 2 decimals; radius, brightness, color, falloff, "
+                 + "enabled; a key left out is the template's: white, 2, true); one spawned in the editor gets a new item with every field "
+                 + "('enabled: false' when off), and the list with its comment when the NPC has none. An item of another NPC than the "
+                 + "entry's is refused; one removed by hand is never added back (dropped from the session when unchanged since). "
                  + "A vanilla actor of a file the YAML streams (streaming.levels; an actor of a fork counts as its vanilla file's) gets "
                  + "'vanilla.<file>.<actor>', merged the same way, a value the entry leaves out being the file's; a new one holds the fields "
                  + "the editor changed (against the file's values too when the session's base is not the file's: an entry deleted by hand "
-                 + "since), with the mesh and their vanilla values in a comment on its key line, and a deleted one 'removed: true'; shown "
+                 + "since), with the mesh (an effect: 'Emitter <template>') and their vanilla values in a comment on its key line, and a deleted one 'removed: true'; shown "
                  + "again, it loses 'removed', and the whole entry when that was all it had. "
-                 + "Refused with the reason: what level_build would refuse (a class other than StaticMeshActor or BioInert, an actor Kismet "
-                 + "holds, a delete of one drawn whatever its owner) and a room shell. One imported before whose entry is gone was removed "
+                 + "Refused with the reason: what level_build would refuse (a class other than StaticMeshActor, BioInert or Emitter, an actor "
+                 + "Kismet holds, a delete of one drawn whatever its owner) and a room shell (not an effect). One imported before whose entry is gone was removed "
                  + "by hand: dropped from the session when unchanged since, else skipped. A vanilla actor of a file the YAML doesn't stream, "
                  + "or of another map's session, stays dev-only (skipped; MeleBridge re-applies it). The entries applied are marked in the session file "
                  + "(base = what the YAML holds now, 'imported'), so MeleBridge re-applies them until the install shows them and then drops "
@@ -41,9 +46,10 @@ public static class EditorTools
                  + "it after a reload.")]
     public static EditorImportResult EditorImport(
         [Description("Level YAML file (level_build format; Windows or /mnt/<drive> path).")] string file,
-        [Description("Session file (Windows or /mnt/<drive> path); default %LOCALAPPDATA%\\MeleBridge\\LE1\\sessions\\<the YAML's package name>.json, or for "
-                     + "a level the game loads into another map (sideloaded, e.g. on the Normandy) the newest session with an actor of it, or with an "
-                     + "entry whose tag the file has (a mesh imported into it before). The first import of meshes spawned on that map needs it, "
+        [Description("Session file (Windows or /mnt/<drive> path); default %LOCALAPPDATA%\\MeleBridge\\LE1\\sessions\\<the YAML's package name>.json (the "
+                     + "sessions folder beside MELE_LEVELS_JSON when set), or for a level the game loads into another map (sideloaded, e.g. on the "
+                     + "Normandy) the newest session with an actor of it, or with an entry whose tag the file has (a mesh imported into it before, an "
+                     + "NPC light) or a light of one of its NPCs. The first import of meshes spawned on that map needs it, "
                      + "with takeSpawned=true.")] string? session = null,
         [Description("Build the level after writing the file.")] bool build = true,
         [Description("Meshes spawned in the editor become props entries of this file. Default: when the session is of the map this file builds; "

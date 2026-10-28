@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Numerics;
 using System.Text;
 using System.Text.Json;
@@ -43,15 +44,15 @@ public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyL
 /// <summary>
 /// Builds a Game 1 level from a YAML file. The level itself: vanilla sub-levels it shows and their stream volume, its
 /// post-process, character lights, start points (see <see cref="LevelStreams"/>), the squad spawned on load (<see cref="SquadSpawns"/>). Its NPCs: the pawn (found by tag, else imported from a
-/// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her, and the Kismet that
+/// template), position, name (own actor type), skin, hair and eye colors, fill lights that follow her (their colour, falloff, on or off), and the Kismet that
 /// starts her conversation when Shepard uses her. Its usables: placeables Shepard uses to go to another map. Its props: any
 /// actor copied from a template and placed (live_place, live_save), or a mesh shown on a copy of the prop template (editor_import),
 /// turned by a yaw or a full rotation and scaled; a removed one is hidden without collision; each lit by prop lights when a light of its
 /// lights section covers it, else by its light environment. Its lights: point lights on the channels of their kind (props only, or the
 /// room too), switched on or off. Vanilla actors of the files it streams:
-/// moved, turned, scaled or hidden in a fork of the file, which the level streams instead (<see cref="ForkBuilder"/>). A missing level is
-/// created, and the LE1CP Sideloader config that loads it is written. Last, its key of levels.json, which tells MeleBridge which levels
-/// are ours.
+/// moved, turned, scaled or hidden in a fork of the file, which the level streams instead (<see cref="ForkBuilder"/>); an effect (an emitter)
+/// is moved, turned or hidden only. A missing level is created, and the LE1CP Sideloader config that loads it is written. Last, its key of
+/// levels.json, which tells MeleBridge which levels are ours, where its NPCs stand and their lights, and its character lights.
 /// </summary>
 public static class LevelBuilder
 {
@@ -79,7 +80,17 @@ public static class LevelBuilder
     private sealed record NameSpec(string Type, int StrRef, int Line);
 
     /// <param name="Offset">Forward, right, up from the NPC's location, turned by her yaw.</param>
-    private sealed record LightSpec(string Tag, Vector3 Offset, float? Radius, float? Brightness, int Line);
+    /// <param name="Color">[r, g, b]; null: the template's (white). <paramref name="Falloff"/> likewise (2).</param>
+    private sealed record LightSpec(string Tag, Vector3 Offset, float? Radius, float? Brightness, int Line, byte[]? Color = null, float? Falloff = null, bool Enabled = true);
+
+    /// <summary>
+    /// An NPC's pose as this build leaves it (location, yaw in Unreal units) and as the level had it before (<see cref="Was"/>,
+    /// <see cref="WasYaw"/>): an NPC light's receipt names an offset change against the pose the light was built from.
+    /// </summary>
+    private sealed record NpcPose(Vector3 Origin, int Yaw, Vector3 Was, int WasYaw);
+
+    /// <summary>An NPC's pose as built, for levels.json (docs/07 §12): MeleBridge measures her lights' offsets from it.</summary>
+    private sealed record BuiltPose(NpcSpec Npc, string Tag, Vector3 Location, int Yaw);
 
     /// <summary>
     /// A light of the lights: section (docs/07 §11): a point light on the channels of its kind. props: Gameplay_4 only, so it lights
@@ -100,11 +111,12 @@ public static class LevelBuilder
     }
 
     /// <summary>
-    /// What <see cref="ApplyLight"/> gives a light. <see cref="Kind"/> null: an NPC light, which leaves its colour, falloff, shadows,
-    /// channels and level list to its template (Reyes's lights stay on the Dynamic channel); a radius or brightness left out stays the template's too.
+    /// What <see cref="ApplyLight"/> gives a light. <see cref="Kind"/> null: an NPC light, which leaves its shadows, channels and level
+    /// list to its template (Reyes's lights stay on the Dynamic channel), and its colour and falloff when its item leaves them out; a
+    /// radius or brightness left out stays as the level has it. <see cref="Npc"/>: its NPC's pose, for the receipt.
     /// </summary>
     private sealed record LightSettings(string Tag, Vector3 Location, int Line, float? Radius, float? Brightness, bool Enabled = true, string? Kind = null,
-        byte[]? Color = null, float Falloff = 2);
+        byte[]? Color = null, float? Falloff = null, (Vector3 Offset, NpcPose Pose)? Npc = null);
 
     private sealed class NpcSpec
     {
@@ -221,6 +233,7 @@ public static class LevelBuilder
         var backups = new List<string>();
         var missing = new List<string>();
         var levelChanges = new List<string>();
+        var poses = new List<BuiltPose>();
         var ((npcs, usables, props, lights, named), backup) = PackageWriter.Edit(game, package, pcc =>
         {
             var level = pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no {LevelPath}; is it a level?");
@@ -243,7 +256,9 @@ public static class LevelBuilder
                 var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {squad.Line}: the level has no {MainSequence}.");
                 SquadSpawns.Set(game, pcc, sequence, squad.Package, streams, squad.Line, cache, levelChanges);
             }
-            var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, missing, notes)).ToList();
+            // Read once, and only when a found NPC light leaves its colour or falloff out.
+            var templateLook = new Lazy<(StructProperty?, FloatProperty?)>(() => TemplateLook(game, pcc, spec.LightTemplate ?? DefaultLightTemplate));
+            var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, templateLook, poses, missing, notes)).ToList();
             var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList();
             var builtLights = spec.Lights.Select(l => BuildLight(game, pcc, level, spec, l, cache)).ToList();
             NoteOrphanLights(pcc, level, spec, notes);
@@ -281,22 +296,30 @@ public static class LevelBuilder
 
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
         // Last: it describes the build, and only the YAML's own package is the level the game loads.
-        var levelsFile = packageOverride is null ? WriteLevelsFile(package, spec, levels) : null;
+        var levelsFile = packageOverride is null ? WriteLevelsFile(package, spec, levels, poses) : null;
         return new LevelBuildResult(package, create, levelChanges, npcs, usables, props, lights, spec.Strings.Count, tlkFiles, config, missing, notes, backups, forks, levelsFile);
     }
 
-    /// <summary>
-    /// Writes this level's key of levels.json (docs/07 §11), which MeleBridge reads on each map change: the vanilla files the level
-    /// streams (by their vanilla names), the tags of its props that are not removed (the props it may switch to prop lights) and of
-    /// its lights: entries (the lights it lists); 'dlc', the DLC folder it lies in. Other keys stay. Unreadable, the file is kept aside
-    /// (.bad-&lt;ticks&gt;) and a new one started. Written beside it, then moved over it.
-    /// </summary>
-    private static string WriteLevelsFile(string package, Spec spec, IReadOnlyList<string> streams)
+    /// <summary>levels.json: %LOCALAPPDATA%\MeleBridge\LE1\levels.json, or the file <see cref="LevelsFileEnvVar"/> names (tests).</summary>
+    internal static string LevelsFilePath()
     {
         var custom = Environment.GetEnvironmentVariable(LevelsFileEnvVar);
-        var path = string.IsNullOrWhiteSpace(custom)
+        return string.IsNullOrWhiteSpace(custom)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MeleBridge", "LE1", "levels.json")
             : Path.GetFullPath(GamePaths.ToWindowsPath(custom));
+    }
+
+    /// <summary>
+    /// Writes this level's key of levels.json (docs/07 §11, §12), which MeleBridge reads on each map change and when the file changes:
+    /// the vanilla files the level streams (by their vanilla names), the tags of its props that are not removed (the props it may
+    /// switch to prop lights) and of its lights: entries (the lights it lists); every NPC of the YAML by her tag, with her YAML name,
+    /// her pose as built and her lights' offsets (none too: the editor lists her NPC lights and edits them as offsets); the
+    /// characterLights copies, by the collection's name in the level, with the file each is copied from; 'dlc', the DLC folder it lies
+    /// in. Other keys stay. Unreadable, the file is kept aside (.bad-&lt;ticks&gt;) and a new one started. Written beside it, then moved over it.
+    /// </summary>
+    private static string WriteLevelsFile(string package, Spec spec, IReadOnlyList<string> streams, IReadOnlyList<BuiltPose> poses)
+    {
+        var path = LevelsFilePath();
         JsonObject doc;
         try
         {
@@ -316,8 +339,18 @@ public static class LevelBuilder
         {
             ["streams"] = new JsonArray(streams.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray()),
             ["props"] = new JsonArray(spec.Props.Where(p => !p.Removed).Select(p => p.Tag).OfType<string>().Select(t => (JsonNode?)JsonValue.Create(t)).ToArray()),
-            // Switched off ones too: the editor lists them, and switches them on again. Not NPC lights: those are edited in the YAML.
+            // Switched off ones too: the editor lists them, and switches them on again. NPC lights are under their NPC.
             ["lights"] = new JsonArray(spec.Lights.Select(l => l.Tag).OfType<string>().Select(t => (JsonNode?)JsonValue.Create(t)).ToArray()),
+            ["npcs"] = new JsonObject(poses.Select(p => KeyValuePair.Create(p.Tag, (JsonNode?)new JsonObject
+            {
+                ["name"] = p.Npc.Name,
+                ["location"] = Floats(p.Location.X, p.Location.Y, p.Location.Z),
+                ["yaw"] = p.Yaw,
+                ["lights"] = new JsonObject(p.Npc.Lights.Select(l => KeyValuePair.Create(l.Tag, (JsonNode?)Floats(l.Offset.X, l.Offset.Y, l.Offset.Z)))),
+            }))),
+            // The first copy of a name is the one the build keeps (LevelStreams.SetLight finds it again by its name).
+            ["characterLights"] = new JsonObject(spec.CharacterLights.Where(c => c.Package is not null).DistinctBy(c => LevelStreams.CopyName(c.Actor), StringComparer.OrdinalIgnoreCase)
+                .Select(c => KeyValuePair.Create(LevelStreams.CopyName(c.Actor), (JsonNode?)JsonValue.Create(Path.GetFileNameWithoutExtension(GamePaths.ToWindowsPath(c.Package!)))))),
         };
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + ".build.tmp";
@@ -326,7 +359,12 @@ public static class LevelBuilder
         return path;
     }
 
-    private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache, List<string> missing, List<string> notes)
+    /// <summary>Floats as JSON numbers that read back as the same floats, written short: -36739.9, not -36739.8984375.</summary>
+    private static JsonArray Floats(params float[] values) =>
+        new(values.Select(f => (JsonNode?)JsonValue.Create(double.Parse(f.ToString("R", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture))).ToArray());
+
+    private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache,
+        Lazy<(StructProperty?, FloatProperty?)> templateLook, List<BuiltPose> poses, List<string> missing, List<string> notes)
     {
         var changes = new List<string>();
         var tag = npc.Tag ?? throw new ArgumentException($"line {npc.Line}: '{npc.Name}' needs a 'tag' (how the build finds her again).");
@@ -341,9 +379,11 @@ public static class LevelBuilder
 
         // The pawn: tags, place, visibility.
         var props = pawn.GetProperties();
+        var was = props.GetProp<StructProperty>("Location") is { } before ? CommonStructs.GetVector3(before) : Vector3.Zero;
         var dirty = Changed(changes, "tag", Put(props, new NameProperty(tag, "Tag")) | Put(props, new NameProperty(tag, "UniqueTag")));
         if (npc.Location is { } location) dirty |= Changed(changes, "location", Put(props, CommonStructs.Vector3Prop(location, "Location")));
         var rotation = props.GetProp<StructProperty>("Rotation") is { } r ? CommonStructs.GetRotator(r) : new Rotator(0, 0, 0);
+        var wasYaw = rotation.Yaw;
         if (npc.Yaw is { } yaw)
         {
             rotation = new Rotator(rotation.Pitch, (int)Math.Round(yaw * 65536 / 360), rotation.Roll);
@@ -361,7 +401,9 @@ public static class LevelBuilder
         if (behaviorDirty) behavior.WriteProperties(behaviorProps);
 
         SetColors(pcc, pawn, props, npc, changes, notes);
-        foreach (var light in npc.Lights) SetLight(game, pcc, level, spec, light, origin, rotation.Yaw, cache, changes);
+        var pose = new NpcPose(origin, rotation.Yaw, was, wasYaw);
+        poses.Add(new BuiltPose(npc, tag, origin, rotation.Yaw));
+        foreach (var light in npc.Lights) SetLight(game, pcc, level, spec, light, pose, cache, templateLook, changes);
         var talk = npc.Conversation is { } conversation ? LinkConversation(pcc, pawn, conversation, npc.Line, cache, changes) : null;
         if (npc.Conversation is not null && talk is null)
         {
@@ -947,18 +989,36 @@ public static class LevelBuilder
     }
 
     /// <summary>A fill light kept at <see cref="LightSpec.Offset"/> from the NPC, lighting only dynamic objects (see docs/06 §A.8–A.9).</summary>
-    private static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, LightSpec light, Vector3 origin, int yaw, PackageCache cache, List<string> changes)
+    private static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, LightSpec light, NpcPose pose, PackageCache cache,
+        Lazy<(StructProperty?, FloatProperty?)> templateLook, List<string> changes)
     {
-        var angle = yaw * Math.PI * 2 / 65536;
-        var (cos, sin) = (Math.Cos(angle), Math.Sin(angle));
-        var at = new Vector3(
-            (float)(origin.X + light.Offset.X * cos - light.Offset.Y * sin),
-            (float)(origin.Y + light.Offset.X * sin + light.Offset.Y * cos),
-            (float)(origin.Z + light.Offset.Z));
-        var (_, action, changed) = ApplyLight(game, pcc, level, new LightSettings(light.Tag, at, light.Line, light.Radius, light.Brightness), spec.LightTemplate, cache);
+        var at = NpcLightAt([pose.Origin.X, pose.Origin.Y, pose.Origin.Z], pose.Yaw, [light.Offset.X, light.Offset.Y, light.Offset.Z]);
+        var settings = new LightSettings(light.Tag, new Vector3((float)at[0], (float)at[1], (float)at[2]), light.Line, light.Radius, light.Brightness, light.Enabled,
+            Color: light.Color, Falloff: light.Falloff, Npc: (light.Offset, pose));
+        var (_, action, changed) = ApplyLight(game, pcc, level, settings, spec.LightTemplate, cache, templateLook);
         // Among the NPC's own changes: each light on one line.
         if (action != "found") changes.Add($"light {light.Tag} added");
         else if (changed.Count > 0) changes.Add($"light {light.Tag}: {string.Join(", ", changed)}");
+    }
+
+    /// <summary>
+    /// Where an NPC light stands: her location (the pawn's Location, its collision centre) plus the offset [forward, right, up] turned
+    /// by her yaw (Unreal units, 65536 = 360°). MeleBridge places the lights so, and editor_import puts a light back from its offset.
+    /// </summary>
+    internal static double[] NpcLightAt(double[] origin, double yaw, double[] offset)
+    {
+        var angle = yaw * Math.PI * 2 / 65536;
+        var (cos, sin) = (Math.Cos(angle), Math.Sin(angle));
+        return [origin[0] + offset[0] * cos - offset[1] * sin, origin[1] + offset[0] * sin + offset[1] * cos, origin[2] + offset[2]];
+    }
+
+    /// <summary>An NPC light's offset [forward, right, up] from where it stands: <see cref="NpcLightAt"/> the other way round.</summary>
+    internal static double[] NpcLightOffset(double[] origin, double yaw, double[] location)
+    {
+        var angle = yaw * Math.PI * 2 / 65536;
+        var (cos, sin) = (Math.Cos(angle), Math.Sin(angle));
+        var (dx, dy) = (location[0] - origin[0], location[1] - origin[1]);
+        return [dx * cos + dy * sin, -dx * sin + dy * cos, location[2] - origin[2]];
     }
 
     /// <summary>A light of the lights: section, found by its tag, else copied from its template.</summary>
@@ -981,11 +1041,14 @@ public static class LevelBuilder
     /// GUIDs for a new copy, imported or cloned (lightmaps, shadow maps and a primitive's IrrelevantLights know a light by its
     /// LightGuid, so no two lights share one). A lights: entry (<see cref="LightSettings.Kind"/>) also gets the actor's bEnabled,
     /// its colour, falloff, no shadows, dynamic light, its kind's channels in full and no OtherLevelsToAffect (the template's level
-    /// list, which the filter left off ignores); an NPC light keeps its template's (Reyes's: Dynamic only).
+    /// list, which the filter left off ignores); an NPC light keeps its template's (Reyes's: Dynamic only), and gets the colour
+    /// (alpha kept) and falloff its item gives, else its template's again (<paramref name="templateLook"/>), and the actor's bEnabled
+    /// when off (or when an earlier build switched it off). An NPC light's receipt names a move as an offset change, measured from
+    /// the pose its NPC had before this build; a move of its NPC alone stays a location change.
     /// </summary>
     /// <returns>The light, found, imported or cloned, and what the build changed on a found one, each value old → new.</returns>
     private static (ExportEntry Actor, string Action, List<string> Changed) ApplyLight(MEGame game, IMEPackage pcc, ExportEntry level, LightSettings light, Source? template,
-        PackageCache cache)
+        PackageCache cache, Lazy<(StructProperty? Color, FloatProperty? Falloff)>? templateLook = null)
     {
         var actor = FindActor(pcc, level, light.Tag, e => e.IsA("Light"));
         var isNew = actor is null;
@@ -1007,10 +1070,11 @@ public static class LevelBuilder
 
         var props = actor.GetProperties();
         var was = props.GetProp<StructProperty>("Location") is { } l ? CommonStructs.GetVector3(l) : Vector3.Zero;
-        var moved = Changed(changed, $"location {ForkBuilder.Moved(was, light.Location)}", Put(props, CommonStructs.Vector3Prop(light.Location, "Location")));
+        var moved = Changed(changed, MoveOf(light, was), Put(props, CommonStructs.Vector3Prop(light.Location, "Location")));
         var dirty = Changed(changed, $"tag {props.GetProp<NameProperty>("Tag")?.Value.Instanced} → {light.Tag}", Put(props, new NameProperty(light.Tag, "Tag"))) | moved;
-        // On or off: one receipt line for the actor's flag (a lights: entry's) and the component's.
-        var switched = full && Put(props, new BoolProperty(light.Enabled, "bEnabled"));
+        // On or off: one receipt line for the actor's flag and the component's. An NPC light's actor has none of its own until it is off
+        // (Reyes's never had one): it gets one then, and keeps it.
+        var switched = (full || !light.Enabled || props.GetProp<BoolProperty>("bEnabled") is not null) && Put(props, new BoolProperty(light.Enabled, "bEnabled"));
         if (dirty || switched) actor.WriteProperties(props);
 
         var component = Object(pcc, props, "LightComponent") ?? throw new ArgumentException($"line {light.Line}: {actor.InstancedFullPath} has no LightComponent.");
@@ -1043,7 +1107,7 @@ public static class LevelBuilder
             // Alpha 255: a spawned light's is 0.
             var colour = CommonStructs.ColorProp(System.Drawing.Color.FromArgb(255, rgb[0], rgb[1], rgb[2]), "LightColor");
             edited |= Changed(changed, $"colour {Colour(c.GetProp<StructProperty>("LightColor"))} → {Colour(colour)}", Put(c, colour));
-            edited |= PutNumber(c, "FalloffExponent", light.Falloff, "falloff", changed);
+            edited |= PutNumber(c, "FalloffExponent", light.Falloff ?? 2, "falloff", changed);
             edited |= PutFlag(c, "CastShadows", false, changed);
             edited |= PutFlag(c, "bForceDynamicLight", true, changed);
             edited |= Changed(changed, KindChange(c.GetProp<StructProperty>("LightingChannels"), light.Kind!), PutChannels(c, Channels(KindChannels[light.Kind!])));
@@ -1051,6 +1115,31 @@ public static class LevelBuilder
             {
                 var levels = others.Properties.Select(p => p switch { NameProperty n => n.Value.Instanced, StrProperty t => t.Value, _ => p.ToString() });
                 edited |= Changed(changed, $"OtherLevelsToAffect [{string.Join(", ", levels)}] cleared", c.RemoveNamedProperty("OtherLevelsToAffect"));
+            }
+        }
+        else
+        {
+            if (light.Color is { } rgb)
+            {
+                // The light's own alpha kept: LE1CP's template has no colour of its own, so the class default's 0.
+                var alpha = c.GetProp<StructProperty>("LightColor")?.GetProp<ByteProperty>("A")?.Value ?? 0;
+                var colour = CommonStructs.ColorProp(System.Drawing.Color.FromArgb(alpha, rgb[0], rgb[1], rgb[2]), "LightColor");
+                edited |= Changed(changed, $"colour {Colour(c.GetProp<StructProperty>("LightColor"))} → {Colour(colour)}", Put(c, colour));
+            }
+            if (light.Falloff is { } falloff) edited |= PutNumber(c, "FalloffExponent", falloff, "falloff", changed);
+            // A key the item leaves out is the template's: deleting it gives the template's back. A new copy has the template's already.
+            if (!isNew && (light.Color is null || light.Falloff is null) && templateLook is { Value: var (ownColour, ownFalloff) })
+            {
+                if (light.Color is null)
+                {
+                    edited |= Changed(changed, $"colour {Colour(c.GetProp<StructProperty>("LightColor"))} → {Colour(ownColour)} (the template's)", TakeOwn(c, "LightColor", ownColour));
+                }
+                if (light.Falloff is null)
+                {
+                    static string Falloff(FloatProperty? f) => f is null ? "default" : ForkBuilder.Number(f.Value);
+                    edited |= Changed(changed, $"falloff {Falloff(c.GetProp<FloatProperty>("FalloffExponent"))} → {Falloff(ownFalloff)} (the template's)",
+                        TakeOwn(c, "FalloffExponent", ownFalloff));
+                }
             }
         }
         if (isNew)
@@ -1107,14 +1196,7 @@ public static class LevelBuilder
     /// </summary>
     private static void TakeTemplateLight(IMEPackage pcc, ExportEntry template, ExportEntry copy)
     {
-        static bool Take(PropertyCollection to, PropertyCollection from, string name)
-        {
-            if (from.GetProp<Property>(name) is not { } value) return to.RemoveNamedProperty(name);
-            // A struct field for field: Put compares only the fields the template's lists, so the clone's Gameplay_4 could stay.
-            if (value is not StructProperty whole || to.GetProp<StructProperty>(name) is not { } old || SameExactly(old, whole)) return Put(to, value);
-            to.AddOrReplaceProp(whole);
-            return true;
-        }
+        static bool Take(PropertyCollection to, PropertyCollection from, string name) => TakeOwn(to, name, from.GetProp<Property>(name));
 
         var templateProps = template.GetProperties();
         var props = copy.GetProperties();
@@ -1132,23 +1214,65 @@ public static class LevelBuilder
         if (dirty) component.WriteProperties(c);
     }
 
+    /// <summary>A value back to the template's own <paramref name="value"/>: none when it has none.</summary>
+    private static bool TakeOwn(PropertyCollection to, string name, Property? value)
+    {
+        if (value is null) return to.RemoveNamedProperty(name);
+        // A struct field for field: Put compares only the fields the template's lists, so the clone's Gameplay_4 could stay.
+        if (value is not StructProperty whole || to.GetProp<StructProperty>(name) is not { } old || SameExactly(old, whole)) return Put(to, value);
+        to.AddOrReplaceProp(whole);
+        return true;
+    }
+
     /// <summary>
-    /// A note for each light of the level on the prop lights' channel whose tag no lights: entry names (its entry deleted by hand): the
-    /// build never deletes a light, so it stays as built, and MeleBridge no longer lists it.
+    /// The colour and falloff of the NPC lights' template (the file's lightTemplate, else LE1CP's), its component's own values
+    /// (flattened, as an import of it has them), null where it has none: what an NPC light whose item leaves them out goes back to
+    /// (LE1CP's has neither, the class defaults).
+    /// </summary>
+    private static (StructProperty? Color, FloatProperty? Falloff) TemplateLook(MEGame game, IMEPackage pcc, Source template)
+    {
+        using var source = template.Package is null ? null : PackageInspector.Open(game, template.Package);
+        var original = ResolveActor(source ?? pcc, template.Actor, template.Line);
+        // As AddActor imports it: what a prefab's archetype gives its component is the copy's own (only changes the template's file in
+        // memory). The level's own template stays as is: its clones keep their archetype, and the level being built is never flattened.
+        if (source is not null) Flatten(original);
+        if (Object(original.FileRef, original.GetProperties(), "LightComponent") is not { } component) return (null, null);
+        var c = component.GetProperties();
+        return (c.GetProp<StructProperty>("LightColor"), c.GetProp<FloatProperty>("FalloffExponent"));
+    }
+
+    /// <summary>
+    /// A light's move as its receipt names it: an NPC light's as its offset from its NPC when that changed (measured from the pose the
+    /// NPC had before the build), else as its location (its NPC moved, the light with it).
+    /// </summary>
+    private static string MoveOf(LightSettings light, Vector3 was)
+    {
+        if (light.Npc is { } npc)
+        {
+            var before = npc.Pose.Was;
+            var old = NpcLightOffset([before.X, before.Y, before.Z], npc.Pose.WasYaw, [was.X, was.Y, was.Z]);
+            var offset = npc.Offset;
+            if (Math.Abs(old[0] - offset.X) > 0.02 || Math.Abs(old[1] - offset.Y) > 0.02 || Math.Abs(old[2] - offset.Z) > 0.02)
+            {
+                // Measured, a 0 may come out a hair under (-0.0000001): it reads 0, not -0.
+                static float Axis(double d) => (float)(Math.Round(d, 2) + 0.0);
+                return $"offset {ForkBuilder.Location(new Vector3(Axis(old[0]), Axis(old[1]), Axis(old[2])))} → {ForkBuilder.Location(offset)}";
+            }
+        }
+        return $"location {ForkBuilder.Moved(was, light.Location)}";
+    }
+
+    /// <summary>
+    /// A note for each tagged light of the level whose tag no entry names (a lights: entry or an NPC's light deleted by hand): the
+    /// build never deletes a light, so it stays as built. A tag that is its class's name is no tag of ours.
     /// </summary>
     private static void NoteOrphanLights(IMEPackage pcc, ExportEntry level, Spec spec, List<string> notes)
     {
         var named = spec.Lights.Select(l => l.Tag).Concat(spec.Npcs.SelectMany(n => n.Lights.Select(l => l.Tag))).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var light in pcc.Exports.Where(e => e.Parent == level && e.IsA("Light")))
         {
-            var props = light.GetProperties();
-            if (props.GetProp<NameProperty>("Tag")?.Value.Instanced is not { } tag || named.Contains(tag)) continue;
-            // By its instanced name: Gameplay_4 is the name Gameplay, number 5, which a lookup by the string never matches.
-            if (Object(pcc, props, "LightComponent")?.GetProperty<StructProperty>("LightingChannels")?.Properties.OfType<BoolProperty>()
-                    .FirstOrDefault(b => b.Name.Instanced == PropChannel)?.Value != true) continue;
-            var on = Object(pcc, props, "LightComponent")?.GetProperty<BoolProperty>("bEnabled")?.Value != false;
-            notes.Add($"{light.ObjectName.Instanced} (tag {tag}) is a light of the lights section no entry names any more: it stays as built ({(on ? "on" : "off")}), "
-                      + "and MeleBridge no longer lists it. To switch it off, give it an entry again with enabled: false.");
+            if (light.GetProperty<NameProperty>("Tag")?.Value.Instanced is not { } tag || tag == light.ClassName || named.Contains(tag)) continue;
+            notes.Add($"light {tag} is built but no entry names it: it stays as built. Switch a light off with enabled: false instead of deleting its line.");
         }
     }
 
@@ -1426,7 +1550,10 @@ public static class LevelBuilder
         return spec;
     }
 
-    /// <summary>BIOA_FRE31_00_LAY.StaticMeshActor_69: {location: [x, y, z], rotation: [pitch, yaw, roll] or yaw, scale, scale3d, removed}, as props take them.</summary>
+    /// <summary>
+    /// BIOA_FRE31_00_LAY.StaticMeshActor_69: {location: [x, y, z], rotation: [pitch, yaw, roll] or yaw, scale, scale3d, removed}, as props
+    /// take them; an effect (an Emitter_N) takes no scale.
+    /// </summary>
     private static ForkBuilder.Entry VanillaOf(YamlNode key, YamlNode body)
     {
         var name = Scalar(key);
@@ -1440,7 +1567,7 @@ public static class LevelBuilder
         float? yaw = null, scale = null;
         float[]? rotation = null;
         var removed = false;
-        YamlNode? turned = null;
+        YamlNode? turned = null, scaled = null;
         foreach (var (k, value) in Entries(m, "location", "rotation", "yaw", "scale", "scale3d", "removed"))
         {
             switch (k)
@@ -1454,13 +1581,22 @@ public static class LevelBuilder
                     turned = value;
                     break;
                 case "yaw": yaw = Number(value); break;
-                case "scale": scale = Number(value); break;
+                case "scale":
+                    scale = Number(value);
+                    scaled = value;
+                    break;
                 case "scale3d":
                     var s = Numbers(value, 3, 3);
                     scale3d = new Vector3(s[0], s[1], s[2]);
+                    scaled = value;
                     break;
                 case "removed": removed = Bool(value); break;
             }
+        }
+        // How its particles follow a scale is unchecked (the fork refuses one on any Emitter, whatever its name).
+        if (scaled is not null && name[(dot + 1)..].StartsWith("Emitter_", StringComparison.OrdinalIgnoreCase))
+        {
+            throw Fail(scaled, $"{name[(dot + 1)..]} is an effect: location, rotation (or yaw) and removed only");
         }
         if (yaw is not null && turned is not null)
         {
@@ -1691,13 +1827,19 @@ public static class LevelBuilder
         return new LevelStreams.StartPoint(tag, location ?? throw Fail(value, $"start point '{tag}' needs a 'location'."), yaw, (int)m.Start.Line);
     }
 
+    /// <summary>
+    /// {tag, offset: [forward, right, up], radius, brightness, color: [r, g, b], falloff, enabled}: colour and falloff the template's
+    /// when left out (white and 2 for LE1CP's), enabled true.
+    /// </summary>
     private static LightSpec LightOf(YamlNode value)
     {
-        if (value is not YamlMappingNode m) throw Fail(value, "a light is {tag, offset: [forward, right, up], radius, brightness}.");
+        if (value is not YamlMappingNode m) throw Fail(value, "a light is {tag, offset: [forward, right, up], radius, brightness}, and optionally color, falloff and enabled.");
         string? tag = null;
         var offset = Vector3.Zero;
-        float? radius = null, brightness = null;
-        foreach (var (key, v) in Entries(m, "tag", "offset", "radius", "brightness"))
+        float? radius = null, brightness = null, falloff = null;
+        byte[]? color = null;
+        var enabled = true;
+        foreach (var (key, v) in Entries(m, "tag", "offset", "radius", "brightness", "color", "falloff", "enabled"))
         {
             switch (key)
             {
@@ -1708,10 +1850,21 @@ public static class LevelBuilder
                     break;
                 case "radius": radius = Number(v); break;
                 case "brightness": brightness = Number(v); break;
+                case "color": color = ColorOf(v); break;
+                case "falloff": falloff = FalloffOf(v); break;
+                case "enabled": enabled = Bool(v); break;
             }
         }
-        return new LightSpec(tag ?? throw Fail(value, "the light needs a 'tag'."), offset, radius, brightness, (int)m.Start.Line);
+        return new LightSpec(tag ?? throw Fail(value, "the light needs a 'tag'."), offset, radius, brightness, (int)m.Start.Line, color, falloff, enabled);
     }
+
+    private static byte[] ColorOf(YamlNode value)
+    {
+        var rgb = Numbers(value, 3, 3);
+        return rgb.All(c => c is >= 0 and <= 255 && c == MathF.Round(c)) ? rgb.Select(c => (byte)c).ToArray() : throw Fail(value, "'color' is [r, g, b], whole numbers from 0 to 255.");
+    }
+
+    private static float FalloffOf(YamlNode value) => Number(value) is > 0 and var f ? f : throw Fail(value, "'falloff' must be over 0 (2 by default).");
 
     /// <summary>
     /// {tag, kind: props | room, location: [x, y, z], radius, brightness, color: [r, g, b], falloff, enabled, template}: kind props, colour
@@ -1739,11 +1892,8 @@ public static class LevelBuilder
                     break;
                 case "radius": light.Radius = Number(value) is > 0 and var r ? r : throw Fail(value, "'radius' must be over 0."); break;
                 case "brightness": light.Brightness = Number(value) is >= 0 and var b ? b : throw Fail(value, "'brightness' can't be negative."); break;
-                case "color":
-                    var rgb = Numbers(value, 3, 3);
-                    light.Color = rgb.All(c => c is >= 0 and <= 255 && c == MathF.Round(c)) ? rgb.Select(c => (byte)c).ToArray() : throw Fail(value, "'color' is [r, g, b], whole numbers from 0 to 255.");
-                    break;
-                case "falloff": light.Falloff = Number(value) is > 0 and var f ? f : throw Fail(value, "'falloff' must be over 0 (2 by default)."); break;
+                case "color": light.Color = ColorOf(value); break;
+                case "falloff": light.Falloff = FalloffOf(value); break;
                 case "enabled": light.Enabled = Bool(value); break;
                 case "template": light.Template = SourceOf(value); break;
             }

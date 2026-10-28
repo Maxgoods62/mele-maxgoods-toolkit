@@ -28,6 +28,9 @@ internal static class YamlEdits
     /// <summary>A light's brightness or falloff: 4 decimals (taken as one within 0.001).</summary>
     internal static string Fraction(double value) => value.ToString("0.####", Inv);
 
+    /// <summary>An NPC light's offset [forward, right, up]: 2 decimals (editor_import takes offsets within 0.02 as one); a 0 a hair under reads 0, not -0.</summary>
+    internal static string Offset(double[] offset) => $"[{string.Join(", ", offset.Select(d => (Math.Round(d, 2) + 0.0).ToString("0.##", Inv)))}]";
+
     /// <summary>A light's colour, [r, g, b] in whole numbers 0-255.</summary>
     internal static string Color(double[] rgb) => $"[{string.Join(", ", rgb.Select(c => ((int)Math.Round(c)).ToString(Inv)))}]";
 
@@ -62,21 +65,37 @@ internal static class YamlEdits
             .SelectMany(body => body.Children.Where(c => Scalar(c.Key) == "tag").Select(c => Scalar(c.Value)))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The tags of the NPCs' lights (npcs.&lt;name&gt;.lights[].tag), each with where it is: npcs.reyes.lights.</summary>
-    internal static Dictionary<string, string> NpcLightTags(YamlMappingNode root)
+    /// <summary>An NPC's light item: the NPC's name (its npcs key) and tag, and the item ({tag, offset, ...}).</summary>
+    internal sealed record NpcLight(string Npc, string? NpcTag, YamlMappingNode Item)
     {
-        var tags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Where it is: npcs.reyes.lights.</summary>
+        public string Where => $"npcs.{Npc}.lights";
+    }
+
+    /// <summary>The NPCs' lights (npcs.&lt;name&gt;.lights[]) by their tag.</summary>
+    internal static Dictionary<string, NpcLight> NpcLightTags(YamlMappingNode root)
+    {
+        var tags = new Dictionary<string, NpcLight>(StringComparer.OrdinalIgnoreCase);
         if (root.Children.FirstOrDefault(c => Scalar(c.Key) == "npcs").Value is not YamlMappingNode npcs) return tags;
         foreach (var (name, body) in npcs.Children)
         {
             if (body is not YamlMappingNode npc || npc.Children.FirstOrDefault(c => Scalar(c.Key) == "lights").Value is not YamlSequenceNode lights) continue;
+            var npcTag = npc.Children.FirstOrDefault(c => Scalar(c.Key) == "tag").Value is YamlScalarNode { Value: { } t } ? t : null;
             foreach (var light in lights.Children.OfType<YamlMappingNode>())
             {
-                if (light.Children.FirstOrDefault(c => Scalar(c.Key) == "tag").Value is YamlScalarNode { Value: { } tag }) tags.TryAdd(tag, $"npcs.{Scalar(name)}.lights");
+                if (light.Children.FirstOrDefault(c => Scalar(c.Key) == "tag").Value is YamlScalarNode { Value: { } tag }) tags.TryAdd(tag, new NpcLight(Scalar(name), npcTag, light));
             }
         }
         return tags;
     }
+
+    /// <summary>The npcs entry with this tag (its name and body); null when none has it.</summary>
+    internal static (string Name, YamlMappingNode Body)? Npc(YamlMappingNode root, string tag) =>
+        root.Children.FirstOrDefault(c => Scalar(c.Key) == "npcs").Value is YamlMappingNode npcs
+        && npcs.Children.FirstOrDefault(c => c.Value is YamlMappingNode body && body.Children.Any(k => Scalar(k.Key) == "tag" && Scalar(k.Value).Equals(tag, StringComparison.OrdinalIgnoreCase)))
+            is { Key: not null } found
+            ? (Scalar(found.Key), (YamlMappingNode)found.Value)
+            : null;
 
     /// <summary>An entry of a top-level mapping such as npcs; with no name, its only entry.</summary>
     internal static KeyValuePair<YamlNode, YamlNode> Entry(YamlMappingNode root, string section, string? name)
@@ -229,6 +248,53 @@ internal static class YamlEdits
         return at == text.Length && !text.EndsWith('\n') ? text + newline + entry : text[..at] + entry + text[at..];
     }
 
+    /// <summary>
+    /// Appends a flow item ({ key: value, ... }) to a list of an entry (an NPC's lights): on a line of its own after the list's last
+    /// item, or inside the brackets of a flow list. A missing list is added after the entry's last value, under
+    /// <paramref name="comment"/> (one comment line per line of it); an empty one ('lights:' alone, '~', '[]') gets the item under its key.
+    /// </summary>
+    internal static string AppendFlowItem(string text, YamlNode entry, string key, IReadOnlyList<(string Key, string Value)> item, string comment)
+    {
+        if (entry is not YamlMappingNode { Style: not YamlDotNet.Core.Events.MappingStyle.Flow, Children.Count: > 0 } body) throw Fail(entry, "the entry must be a block mapping.");
+        var newline = NewLine(text);
+        var flow = $"{{ {string.Join(", ", item.Select(k => $"{k.Key}: {k.Value}"))} }}";
+        var indent = (int)body.Children.First().Key.Start.Column - 1;
+        var existing = Pair(body, key);
+        if (existing is null)
+        {
+            var at = text.IndexOf('\n', ValueEnd(text, LastLeaf(body)));
+            var lines = string.Concat(comment.Split('\n').Select(l => $"{new string(' ', indent)}# {l.TrimEnd('\r')}{newline}"))
+                        + $"{new string(' ', indent)}{key}:{newline}{new string(' ', indent + 2)}- {flow}{newline}";
+            return at < 0 ? text + newline + lines : text[..(at + 1)] + lines + text[(at + 1)..];
+        }
+        var (name, value) = existing.Value;
+        if (value is YamlSequenceNode { Style: YamlDotNet.Core.Events.SequenceStyle.Flow, Children.Count: > 0 } inline)
+        {
+            // Before its closing bracket.
+            var close = ValueEnd(text, inline) - 1;
+            return text[..close] + $", {flow}" + text[close..];
+        }
+        if (value is YamlSequenceNode { Children.Count: > 0 } list)
+        {
+            var dash = new string(' ', (int)list.Start.Column - 1);
+            var end = text.IndexOf('\n', ValueEnd(text, list.Children[^1]));
+            return end < 0 ? text + newline + $"{dash}- {flow}" : text[..(end + 1)] + $"{dash}- {flow}{newline}" + text[(end + 1)..];
+        }
+        if (!Null(value) && value is not YamlSequenceNode { Children.Count: 0 }) throw Fail(value, $"'{key}' must be a list to add to it.");
+        // Its value ('~', '[]') goes, a comment after it stays; the item goes on the line after the key.
+        var edits = new List<(long Start, long End, string Text)>();
+        if (value is not YamlScalarNode { Value: null or "" })
+        {
+            var start = (int)value.Start.Index;
+            while (start > name.End.Index && text[start - 1] is ' ' or '\t') start--;
+            edits.Add((start, ValueEnd(text, value), ""));
+        }
+        var header = text.IndexOf('\n', (int)name.End.Index);
+        var first = $"{new string(' ', indent + 2)}- {flow}";
+        edits.Add(header < 0 ? (text.Length, text.Length, newline + first) : (header + 1, header + 1, first + newline));
+        return Apply(text, edits);
+    }
+
     /// <summary>Removes the entry of a top-level mapping whose value is <paramref name="value"/>, with its lines (and a comment on them).</summary>
     internal static string RemoveEntry(string text, YamlMappingNode root, string section, YamlNode value)
     {
@@ -310,12 +376,45 @@ internal static class YamlEdits
         return (text.LastIndexOf('\n', (int)pair.Key.Start.Index) + 1, lineEnd < 0 ? text.Length : lineEnd + 1, "");
     }
 
-    /// <summary>Splices edits into the text from its end, so earlier offsets stay valid; edits at one offset keep their order.</summary>
+    /// <summary>
+    /// Splices edits into the text from its end, so earlier offsets stay valid; edits at one offset keep their order. A value
+    /// replaced within its line keeps the line's comment where it was written (KeepCommentColumn).
+    /// </summary>
     private static string Apply(string text, List<(long Start, long End, string Text)> edits)
     {
         foreach (var (start, end, value) in edits.Select((e, i) => (Edit: e, Order: i)).OrderByDescending(e => e.Edit.Start).ThenByDescending(e => e.Order).Select(e => e.Edit))
         {
+            var withinLine = !value.Contains('\n') && text.IndexOf('\n', (int)start, (int)(end - start)) < 0;
             text = text[..(int)start] + value + text[(int)end..];
+            if (withinLine) text = KeepCommentColumn(text, (int)start + value.Length, value.Length - (int)(end - start));
+        }
+        return text;
+    }
+
+    /// <summary>
+    /// After a value on a line grew by <paramref name="grown"/> characters (shrank when negative), takes as many blanks from before
+    /// the line's comment (a '#' after a blank, outside quotes, from <paramref name="from"/> on), or gives them, so it stays in its
+    /// column: comments aligned on several lines stay so. One blank always stays.
+    /// </summary>
+    private static string KeepCommentColumn(string text, int from, int grown)
+    {
+        if (grown == 0) return text;
+        var lineEnd = text.IndexOf('\n', from);
+        if (lineEnd < 0) lineEnd = text.Length;
+        char? quote = null;
+        for (var i = from; i < lineEnd; i++)
+        {
+            var c = text[i];
+            if (quote is { } open)
+            {
+                if (c == open) quote = null;
+                continue;
+            }
+            if (c is '"' or '\'') quote = c;
+            if (c != '#' || i == from || text[i - 1] != ' ') continue;
+            var blanks = i;
+            while (blanks > from && text[blanks - 1] == ' ') blanks--;
+            return text[..blanks] + new string(' ', Math.Max(1, i - blanks - grown)) + text[i..];
         }
         return text;
     }

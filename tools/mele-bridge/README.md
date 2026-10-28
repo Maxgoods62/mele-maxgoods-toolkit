@@ -33,7 +33,9 @@ prop where the view points, from one of two tabs:
 - **Catalog:** a grid of thumbnails of the curated props mele-mcp's `catalog_build` writes, with a category list and a
   search. A tooltip gives the size, triangles, how often the game's levels place it and the file it comes from.
 - **In this level:** the meshes in memory, as a list (Phase 1's).
-- **Lights:** Prop light and Room light add a light over where the view points; the list selects one.
+- **Lights:** Prop light and Room light add a light over where the view points; the list selects one. Below it, a section
+  per NPC of ours with its lights and an **Add light** button ([NPC lights](#npc-lights)).
+- **Effects:** the emitters of the loaded levels, nearest first; the list selects one ([effects](#effects)).
 
 It is Phase 3 of [docs/07](../../docs/07-ingame-editor.md#10-phase-3-the-save-loop): saved edits come back when the map
 loads again, and ship with their tilt and scale. Phase 4's first half ([§11](../../docs/07-ingame-editor.md#11-phase-4-vanilla-actors-and-lights))
@@ -41,7 +43,10 @@ adds the props of vanilla levels: moved, turned, scaled or hidden in game, they 
 [Vanilla actors and forks](#vanilla-actors-and-forks). Its second half lights our props with prop lights instead of their
 light environment, and edits lights: **L** adds a prop light for the selected prop, **Auto light** (toolbar, on by default)
 adds one for a fresh spawn that needs it, and Alt+click picks a light by its icon. See
-[Prop lighting and lights](#prop-lighting-and-lights).
+[Prop lighting and lights](#prop-lighting-and-lights). Phase 5a ([§12](../../docs/07-ingame-editor.md)) adds the levels'
+effects (moved, turned, hidden, then run for 1.5 s: [Effects](#effects)), a gate on actors the loaded Kismet holds, light
+kinds by source with a writer that keeps an NPC's or a level's light as built, session version 3, and our NPCs' lights:
+edited as offsets from their NPC, carried by its moves and turns, and added per NPC ([NPC lights](#npc-lights)).
 
 | Key | Tool | What the gizmo does |
 |---|---|---|
@@ -64,8 +69,10 @@ adds one for a fresh spawn that needs it, and Alt+click picks a light by its ico
   none. Undoing writes the whole state back (shown or hidden, location, rotation, scale, a light's settings) and marks the
   edit unsaved. A drag on the light panel is one step too, from the first change to the release. A spawn and the prop light
   Auto light made for it are one step while the light is linked to it, and so are a drag of the prop and that light
-  following it ([link](#prop-lighting-and-lights)). A step whose actor is gone is dropped, with a status line. A map change
-  clears both stacks. The toolbar's Undo and Redo name the step (`Undo move ed_…`, `Undo spawn ed_… and ed_light_…`).
+  following it ([link](#prop-lighting-and-lights)). A move or turn of one of our NPCs holds the NPC lights it carried, and
+  an NPC light's Add is one step ([NPC lights](#npc-lights)). A step whose actor is gone is dropped, with a status line. A
+  map change clears both stacks. The toolbar's Undo and Redo name the step (`Undo move ed_…`, `Undo spawn ed_… and
+  ed_light_…`, `Undo turn claude_npc_02 with its light`).
 
 - **Threads:** the game thread does everything that touches game objects (`Editor.cpp`, after `BioHUD.PostRender` and
   `Camera.UpdateCamera`). The render thread draws [Dear ImGui](https://github.com/ocornut/imgui) and
@@ -77,13 +84,17 @@ adds one for a fresh spawn that needs it, and Alt+click picks a light by its ico
   - A spawned prop's `DynamicLightEnvironment` only updates when the world ticks: paused, it would render black. After a
     spawn, when a drag ends, after an undo or redo, and after a re-apply applied, spawned or rebound props, the editor lets
     the world tick once and takes the pause back at its next tick. That release is its own: it isn't logged or counted as the game
-    ending the pause.
+    ending the pause. After an effect's step it lets the world run 1.5 s instead, and takes the pause back once that is over
+    ([effects](#effects)), unless the game had its own pause when the editor opened: the editor can't tell the game ending
+    it from its own release over 1.5 s, so it leaves that pause alone and the status line says "effects not run".
 - **Save:** one session file per map, `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json`, outside the install. It holds the
   latest state of each actor spawned, moved, turned, scaled or deleted: spawned ones by tag, level actors by path. Each
   edit keeps that state itself, so a save never reads an actor. mele-mcp's `editor_import` writes it into the level YAML
   and builds it. A field the edit hasn't changed since it was last saved or read takes the file's value (an import may have
   written the YAML's into it while the game ran), on the actor too: each pose field, each field of a light's settings, and
-  `deleted`. The status line counts the entries written; a spawn
+  `deleted`. An NPC light's place follows its offset from its NPC's pose: a pawn of ours that takes the file's location or
+  yaw takes its lights along, as a drag does (an edited light not written by that Save stays unsaved). The status line
+  counts the entries written; a spawn
   deleted before its first save leaves nothing, is named apart and is not counted in `Save (N)`, and a Save of only such
   spawns rewrites nothing. A map change saves the unsaved edits first; those of a map whose file could not be written are
   kept, and the next Save tries again. Until a save writes every map, the toolbar says `not saved`, with why on a line of
@@ -93,13 +104,19 @@ adds one for a fresh spawn that needs it, and Alt+click picks a light by its ico
   [Re-applying a session](#re-applying-a-session).
 - **State:** the `editor` op (`live_editor` in mele-mcp) returns open, camera, selection (rotation, `DrawScale`,
   `DrawScale3D`, why delete or move refuses it, whether it ships, the file its level was loaded from while the game keeps
-  the linker, a light's settings as `light`, a switched prop's `propLighting`: `covered`, `received`, `target`, and
-  `autoRadius`, the radius a fresh Auto light would need from the view), edits (with
-  `saveProblem`), undo and redo, the session's re-apply (file, applied, dropped, pending with why, the levels the last pass
-  saw), `levelsJson` (file, problem, DLC folder, levels, how many props and lights tags it lists), `autoLight`, `lights`
-  (the listed lights of the visible levels while the editor is open: path, tag, location, settings), the status line, the
-  projection check, the catalog (props read, thumbnails on the GPU) and counters. Diagnostics shows the same session and
-  levels.json summaries.
+  the linker, a light's settings as `light`, an NPC light's `npc`: `name`, `tag`, `offset` and the reference `pose`
+  (`location`, `yaw`, or null), a switched prop's `propLighting`: `covered`, `received`, `target`, and `autoRadius`, the
+  radius a fresh Auto light would need from the view, an effect's `effect`: `template` and `loops`),
+  edits (with `saveProblem`), undo and redo, the session's re-apply (file, applied, dropped, pending with why, the levels
+  the last pass saw), `levelsJson` (file, problem, DLC folder, levels, how many props and lights tags, npcs, NPC lights and
+  characterLights copies it lists), `autoLight`, `lights` (the tracked lights of the visible levels while the editor is
+  open, ours and our NPCs': path, tag, location, settings with `kind` `props`, `room`, `npc` or `vanilla`, `npc` (the
+  pawn's tag, or null), `edited`, `unsaved`), `npcs` (the Lights tab's NPC sections: `name`, `tag`, `level`, `away` (a
+  light's NPC whose level is not visible); a light's NPC that `levels.json` no longer lists has null for both), `effects`
+  (the emitters of the visible levels while the editor is open, nearest first: path, name, template, level (a fork's
+  vanilla file), location, `metres` from the view, `refusal` (or null), `deleted`, `hidden`, `forked`, `edited`,
+  `unsaved`), the status line, the projection check, the catalog (props read, thumbnails on the GPU) and counters.
+  Diagnostics shows the same session and levels.json summaries.
 - **Tested 2026-10-27** in the freighter: Phase 0's seven steps ([docs/07 §7](../../docs/07-ingame-editor.md#7-phase-0-the-test-build)),
   the arrows within 0.6 px of where the engine projects the prop; Phase 1's five ([§8](../../docs/07-ingame-editor.md#8-phase-1-the-first-usable-editor)),
   a crate spawned and one deleted in game, both shipped by build + install; Phase 2's catalog on the Normandy
@@ -108,8 +125,12 @@ adds one for a fresh spawn that needs it, and Alt+click picks a light by its ico
 
 ### The session file
 
-Version 2 (UTF-8). The bridge reads versions 1 and 2 and writes 2; a file of another version is left as it is, and one
-that can't be parsed is moved aside (`<map>.json.bad-<tick>`) at the next Save.
+Version 2 or 3 (UTF-8). The bridge reads versions 1 to 3. It writes 3 when an entry holds a light of kind `npc` or
+`vanilla` (in the entry, its `base`, `imported.before` or one of `installed`), else 2: a Phase 4 bridge would write such a
+light with its own writer (channels and shadows included), and it refuses a version 3 file instead. A pass that drops
+entries rewrites the version for what is left (a version 1 file stays 1). A file of another version is left as it is, and
+one that can't be parsed is moved aside (`<map>.json.bad-<tick>`) at the next Save. An effect's entry is a vanilla entry
+of class `Emitter` (version 2).
 
 ```json
 { "version": 2, "map": "BIOA_CLD01", "saved": "2026-10-27T04:00:00Z",
@@ -130,7 +151,8 @@ that can't be parsed is moved aside (`<map>.json.bad-<tick>`) at the next Save.
 |---|---|
 | `location`, `rotation`, `scale`, `scale3d` | The actor's state: rotation in Unreal units (65536 = 360°), `scale` is `DrawScale`, `scale3d` is `DrawScale3D`. |
 | `deleted` | Hidden by Delete. A spawn deleted before it was ever saved is not written. On a light, only a spawned light the editor deleted (switched off). |
-| `light` | Lights only: `kind` (`props` or `room`), `radius`, `brightness`, `color` (0-255), `falloff` (`FalloffExponent`) and `enabled`, its on/off. The same block in `base`, `imported.before` and `installed`. A light's `rotation` and scales are the actor's: only its location counts. |
+| `light` | Lights only: `kind`, `radius`, `brightness`, `color` (0-255), `falloff` (`FalloffExponent`) and `enabled`, its on/off. The same block in `base`, `imported.before` and `installed`. A light's `rotation` and scales are the actor's: only its location counts. The kind is the light's source, read once when the editor first tracks it and stored: `props` or `room` for ours (by their channels), `npc` for a light `levels.json` names among its level's `npcs` lights, `vanilla` for a level's (Phase 5b). |
+| `npc` | NPC lights only: `{ "tag": <the pawn's tag>, "offset": [forward, right, up] }`, the light's offset from the NPC's reference pose, turned by its yaw (`forward = dx cos t + dy sin t`, `right = -dx sin t + dy cos t`, `up = dz`, `t = yaw · 2π / 65536`). `location` stays absolute. The same block in `base` (`levels.json`'s offset for a built light), `imported.before` and `installed`. |
 | `mesh` | Spawned props only (`null` otherwise, lights too): the vanilla mesh and a vanilla file with it, and `load`, the catalog package's copy (`null` for a mesh from the In this level list). |
 | `base` | What the level YAML holds, for `editor_import`'s three-way merge: the actor before the editor first changed it, `null` for a spawn never imported. Save keeps the file's `base` when the entry has one (an import moves it on), with its `deleted` (whether the YAML removes the actor) when an import gave it. A base the editor takes from a shown actor has `deleted: false` (the build that made it did not remove it); one of a version 1 entry taken from a hidden actor has none (the game may have hidden it). |
 | `imported` | Written by `editor_import` only: `{ "before": <the base before the import, plus deleted> | null }`. Save leaves it out: a saved edit is a new state. |
@@ -152,7 +174,8 @@ A pass reads the actors of the loaded levels (the persistent level and each stre
   `editor_import` compares them: location to 0.01, rotation as an orientation, scales to 0.001. A light compares its
   location, its component's `bEnabled` against `enabled && !deleted`, the radius to 0.01, the brightness and falloff to
   0.001, and the colour and kind exactly; its rotation, scales and `bHidden` don't count (every light is `bHidden` by class
-  default).
+  default). An NPC light's location is had within 0.05 on each axis: the build places it from 2-decimal offsets, and a
+  float at the Normandy's heights steps by 0.004. So an entry is dropped as installed only when the game shows it.
 - **Applying:** the stored state is written (deleted: hidden); the edit starts saved. An entry that shows an actor the
   build hid (the YAML state it was judged by says removed, and the actor is hidden) shows it again with its class's
   collision; one the game hid stays hidden. A spawn no loaded actor has the tag of is spawned again, with its mesh from
@@ -167,6 +190,11 @@ A pass reads the actors of the loaded levels (the persistent level and each stre
 - **Waiting:** an entry whose actor isn't loaded waits for a later pass, with why (Diagnostics and the `editor` state list
   them). A pass that faults is not tried again until the loaded levels change; the entries it had applied or dropped leave
   the list then.
+- **NPC lights:** their entries come after every other entry, so a pawn's entry sets the pose they are placed from. One
+  waits, as does an edit of one waiting for its actor, while its NPC fails the pose check ([NPC lights](#npc-lights)); a
+  new `levels.json` (read again while the editor is open) asks for a pass. Applied, it stands at its NPC's reference pose
+  plus its offset (unsaved when that moved it from the file's `location`); spawned again, it gets the NPC light look, not
+  the class defaults. A pawn of ours the pass wrote takes its lights along, as a drag does.
 - **Forks:** an entry of a vanilla actor names its vanilla file; once our map streams a fork of that file, the actor is
   found there by the rule below (its path, then the same path in the fork), with the tag the same way.
 
@@ -184,12 +212,19 @@ built by `level_build` from the YAML's `vanilla:` section, that the map streams 
   Matching never reads `levels.json`.
 - **The gate:** an editor spawn and an actor of one of our levels keep the rules above. Any other actor is a vanilla one, and
   move, turn, scale and delete take it only when:
-  - its class is `StaticMeshActor` or `BioInert` (up the class chain, by name); anything else says why: "a BioDoor: doors
-    carry Kismet and door volumes", "a PathNode: the AI's paths", and so on. Pawns and controllers stay refused;
+  - its class is `StaticMeshActor`, `BioInert` or `Emitter` (up the class chain, by name; an emitter passes the effect gate
+    first, [effects](#effects)); anything else says why: "a BioDoor: doors carry Kismet and door volumes", "a PathNode: the
+    AI's paths", "a PointLight: a vanilla light actor; no map of ours streams one, so it can't ship", and so on. Pawns and
+    controllers stay refused;
   - it was loaded from a level file (a linker, or the load flags its export gave it), not spawned at run time;
+  - no loaded Kismet holds it: "Kismet holds it (Sequence_1791.SeqVar_Object_0): the story moves, hides or switches it".
+    The Kismet set is every object a `SeqVar_Object`'s `ObjValue` or a `SeqVar_ObjectList`'s `ObjList` names, in the
+    loaded levels, read when first needed after a map change or a level turned visible. A variable of a level not loaded
+    is missed; `level_build`'s fork, which reads the whole file, has the last word;
   - no part's bounds reach more than 3000 units from their centre: "a room shell (110 m): hiding it opens the room" (the
     size is the box's, across). The bounds are measured as the level file has the actor, before the editor's own edits
-    (as `editor_import` measures it), so a scale or a turn made in the editor never makes a prop a room shell;
+    (as `editor_import` measures it), so a scale or a turn made in the editor never makes a prop a room shell. A particle
+    system's box is where its particles fly, not a size: it is left out;
   - for delete, no part of it ignores its owner's `bHidden` (`bIgnoreOwnerHidden`): hidden, it would stay drawn.
 
   `bStatic` and `bNoDelete` don't refuse a vanilla prop: hiding destroys nothing.
@@ -206,11 +241,16 @@ built by `level_build` from the YAML's `vanilla:` section, that the map streams 
   editor says `levels.json missing: run mod_build`.
 
 `levels.json` (`%LOCALAPPDATA%\MeleBridge\LE1\levels.json`, UTF-8) is written by `level_build` (each build replaces its own
-level's key) and read by the bridge on each map change:
+level's key) and read by the bridge on each map change, and again whenever its write time changes (checked when F8 opens
+the editor and once a second while it is open: `npc_place` builds, which rewrites it, while the map runs). A new read
+tracks the lights, props and effects again:
 
 ```json
 { "version": 1, "dlc": "DLC_MOD_ClaudeChakwas",
-  "levels": { "BIOA_CLD01": { "streams": ["BIOA_FRE31_00_LAY"], "props": ["ed_Crate_XLarge_03_fdsdl_1"], "lights": [] },
+  "levels": { "BIOA_CLD01": { "streams": ["BIOA_FRE31_00_LAY"], "props": ["ed_Crate_XLarge_03_fdsdl_1"], "lights": [],
+                              "npcs": { "claude_npc_02": { "name": "dorn", "location": [-1647.74, -16092.3, -358.2], "yaw": 36438,
+                                                           "lights": { "claude_npc_02_facelight": [60, 40, 80] } } },
+                              "characterLights": { "StaticLightCollectionActor_68": "BIOA_FRE31_00_DSG" } },
               "ClaudeNPC_NOR10": { "streams": [], "props": [], "lights": [] } } }
 ```
 
@@ -221,6 +261,8 @@ level's key) and read by the bridge on each map change:
 | `dlc` | The DLC folder our level files lie in. |
 | `props` | The tags of the level's built props: the bridge switches them between prop lights and their light environment, as it does its own spawns. |
 | `lights` | The tags of the level's `lights:` entries: the editor lists them, and they may be selected, moved, set and switched off. |
+| `npcs` | Every NPC of the level's YAML, by the pawn's tag (lights or not): `name` (the YAML key), the built `location` (the pawn's `Location`) and `yaw`, and its `lights` by tag, each an offset `[forward, right, up]` from that pose. A light whose tag is listed here is an NPC light (kind `npc`): it is tracked apart from ours and written only by the kept writer. An NPC without a name, a location or a yaw is skipped, and so is a light without three numbers. |
+| `characterLights` | The `StaticLightCollectionActor`s copied into the level for its characters, by object name, with the vanilla file each came from (Phase 5b; read and counted, not used yet). |
 
 A missing or broken file reads as no file; a missing key, or one of another type, as empty; an unknown key is skipped. A
 version other than 1 is not read.
@@ -281,10 +323,26 @@ fixes that ([docs/07 §11](../../docs/07-ingame-editor.md#11-phase-4-vanilla-act
   environment lights it; a prop too big for one prop light shows the radius it would need instead, no L, and while no
   light covers it a room-light hint. After a drag that leaves a prop under half its target, the status line says so.
 - **Lights the editor lists:** its own (`PointLightMovable`, tagged `ed_light_<run>_<n>`) and the YAMLs' `lights:` entries
-  (`levels.json`'s `lights` tags, `PointLightToggleable` when built). Vanilla lights (baked) and NPC lights (edited in the
-  YAML) are neither listed nor picked. Each shows an icon in its colour (hollow when off, a second ring for a room light);
-  the selected one shows its radius as three rings. While the Lights tab is open or Alt is held, a click within 12 px of an
-  icon selects that light, nearest first; any other click traces as usual, so a light never takes a click meant for a prop.
+  (`levels.json`'s `lights` tags, `PointLightToggleable` when built): the Lights tab's rows. Our NPCs' lights (`levels.json`
+  `npcs`) are listed in their NPC's section ([NPC lights](#npc-lights)) and tracked apart, so the prop switch never walks
+  them; a light actor of a vanilla level stays refused ("a vanilla light actor; no map of ours streams one, so it can't
+  ship"), and one of our levels that no `levels.json` entry names says "no levels.json entry names this light (run
+  mod_build)". Each tracked light shows an icon in its colour, its
+  shape its source's: a disc for ours, a diamond for an NPC's, a square for a level's (a star is an effect; the Lights tab
+  has a legend line). Hollow when off, a second ring for a room light; the selected one shows its radius as three rings.
+  Icons are drawn far to near, lights and effects together, so where two overlap the nearer is on top. While the Lights
+  tab is open, a click within 12 px of a light's icon selects the one nearest the camera among the icons drawn under the
+  cursor, or with none under it, among those within 12 px (so a light in the next room never wins over the one in front,
+  and a click on the icon on top picks it). With Alt held, lights and effects alike; any other click traces as usual, so a
+  light never takes a click meant for a prop.
+- **Two writers:** a light's settings are written by the writer its stored kind takes. Ours (`props`, `room`) get every
+  field written, as below. An NPC's or a level's (`npc`, `vanilla`) go through the kept writer: it reads the light first
+  and writes radius (beyond 0.01), brightness and falloff (beyond 0.001), colour RGB (its alpha stays) and on/off only
+  where they differ, and never its channels, shadows or level filter, so an untouched colour from a prefab archetype stays
+  the archetype's. As a hard guard, our writer leaves alone (and logs once) any light of kind `npc` or `vanilla`, and any
+  light that is neither an editor spawn, a `lights:` entry of `levels.json`, nor a light of our levels (not an NPC's) with
+  a `props` or `room` edit: the one the Lights tab lets be picked while `levels.json` is missing or no longer names it,
+  which Phase 4 wrote too.
 - **Editing a light:** the gizmo only moves it (T, R and G don't apply). The Selection window's panel sets the kind (**Prop
   light**: `Gameplay_4`; **Room light**: BSP, Static, Dynamic, CompositeDynamic and `Gameplay_4`, so it lights walls, pawns
   and props alike), enabled, radius (16-4096), brightness (0-10), colour and falloff (1-8). Every field is written to the
@@ -297,6 +355,90 @@ fixes that ([docs/07 §11](../../docs/07-ingame-editor.md#11-phase-4-vanilla-act
 - **Spawning** a light clears `bNoDelete` on `PointLightMovable`'s default object for the `Spawn` call only (`Spawn`
   refuses a `bNoDelete` class), in a `__finally` that puts the bit back whatever happens; a pass spawns a session's lights
   again the same way.
+
+### NPC lights
+
+Our NPCs' lights (`npcs.<name>.lights` in a level YAML, `PointLightToggleable` when built) are edited as offsets from their
+NPC ([§12](../../docs/07-ingame-editor.md)): `[forward, right, up]` from the pawn's `Location` (its collision centre),
+turned by its yaw, as `level_build` places them.
+
+- **Listed:** a light whose tag `levels.json` names among its own level's `npcs` lights. The Lights tab has a section per
+  NPC of the visible levels, lights or not: `Dorn (claude_npc_02)` (the YAML key with a capital, and the pawn's tag) with an
+  **Add light** button, then a row per light: `claude_npc_02_facelight · NPC · radius 100 · brightness 1.2`, `(off)`,
+  `(edited)` or `(unsaved)`. A light shown while its NPC's level is not visible (Reyes's lights, in `BIOA_NOR00`, seen
+  from another deck) keeps its NPC's section, without Add light: `Reyes (claude_npc_01) (ClaudeNPC_NOR10 is not visible
+  here: its lights wait for it)`. A light whose NPC `levels.json` no longer lists keeps a section under its NPC's tag,
+  without Add light. A light no `levels.json` entry names stays refused: "not edited: no levels.json entry names this
+  light (run mod_build)".
+- **Reference pose:** offsets are measured from the pawn's own edit in this session when it has one, else the built pose
+  `levels.json` holds; never the live pawn. While one of an NPC's lights is selected, a cross and a yaw tick (amber) mark
+  that pose.
+- **Pose check:** before an edit of an NPC's light (move, panel, delete, Add light) and before a pass applies an entry of
+  one, the NPC's pawn, unless the editor moved or turned it, must stand within 5 units and 2 degrees of its built pose
+  (the game never moves our NPCs). Otherwise the light is refused and its entry waits: "not edited: Dorn stands 37.2 from
+  where levels.json puts them (the last build): install the last build (mod_install, game closed): a reload shows the
+  installed level, not npc_place's build" (or "is turned 12.0°"). `levels.json` is read again on F8 and once a second
+  while the editor is open, so a fresh `npc_place` doesn't trip it while the map stays loaded (it moves the pawn live). It
+  builds but doesn't install: a reload puts the pawn back where the install has it, and the check then refuses its lights
+  until `mod_install`. An NPC `levels.json` doesn't list: "levels.json has no NPC claude_npc_02 (built before Phase 5): run
+  mod_build"; a pawn not loaded: "Dorn's pawn (claude_npc_02) is not in the loaded levels".
+- **Panel:** `NPC light: Dorn`, then the offset `[forward, right, up]` (2 decimals, as the YAML has it), "It keeps its
+  template's channels (Dynamic: characters and props on their light environment, not the walls).", enabled, radius
+  (16-4096), brightness (0-10), colour and falloff (1-8); no kind control. Greyed while the pose check fails. The kept
+  writer writes them ([two writers](#prop-lighting-and-lights)).
+- **Moving one:** the gizmo only moves it, by raw `Location` and `ForceUpdateComponents(true, false)`, a built
+  `PointLightToggleable` too (not `bMovable`, but it moves live this way, paused, with no tick). Its new offset is
+  `R(-yaw) · (L - P)` from the reference pose. R: "not turned: a light only moves (a point light shines all ways)"; G:
+  "not scaled: a light only moves (its radius is in the panel)".
+- **The NPC carries its lights:** a move or turn of one of our NPCs moves its NPC lights to its new pose plus their offsets,
+  at every frame of the drag, in the same undo step (`turn claude_npc_02 with its light`). A light without an edit gets
+  none (its offset didn't change, and the build places it from the NPC's new pose); one with an edit keeps its offset, and
+  its `location` follows, so Save writes the right place. The step holds where each light stood before and after, the
+  after computed from the pawn's stored pose: closing it reads no game memory.
+- **Add light** (an NPC section's button, or the tab's **NPC light** with one of our pawns selected): a `PointLightMovable`
+  at offset `[60, 0, 80]` (Reyes's face light), radius 100, brightness 1.2, tagged `<npc tag>_light_<run>_<n>`, with the
+  build's default NPC light template's look: channels {`bInitialized`, `Dynamic`}, no dynamic shadows,
+  `bForceDynamicLight`, no level filter, white with alpha 0, falloff 2. It is selected, and its Add is one step; no tick
+  (an NPC light reaches its NPC at once, paused). It lands in the persistent level (`BIOA_NOR00` on the Normandy). The
+  first Add of a game run says that a YAML with its own `lightTemplate` may build it with another look. Refused: "not
+  added: only our NPCs (npcs: in a level YAML) take NPC lights; BioPawn_12 is the game's", and "not added: levels.json has
+  no NPC claude_npc_02 (built before Phase 5): run mod_build".
+- **Delete** switches it off (a light of the YAML: `enabled` false; one already off: "claude_npc_02_facelight is switched
+  off already (a light of the YAML is switched off, never removed)"); a spawned one deleted before its first save leaves
+  nothing, and the status line adds "to keep it switched off, untick Enabled instead".
+- **Session:** `light.kind` `npc` and `npc: { tag, offset }`, in `base` too (`levels.json`'s offset for a built light); the
+  file is version 3. `location` stays absolute: always the reference pose plus the turned offset when written.
+
+### Effects
+
+The emitters (`Emitter`) of the loaded levels, ours and vanilla ones, are moved, turned and hidden like props, and ship like
+them: in our levels through the YAML, in a vanilla level through its fork ([§12](../../docs/07-ingame-editor.md)).
+
+- **Effects tab** (Props window, next to Lights): one row each, nearest first: `Emitter_12 · FX_ME1_dust_card_METR ·
+  BIOA_FRE31_00_LAY · 4.2 m` (the template's name, the level file, a fork's vanilla file, and the distance from the view).
+  A deleted one says `(deleted)`, one hidden in a fork `(hidden: removed in the YAML)`, one hidden otherwise `(hidden)`;
+  one with an edit `(edited)` or `(unsaved)`. One the editor leaves alone is greyed with its reason. A click on a row selects
+  it.
+- **Icons:** an amber star (grey when refused, hollow while hidden). While the Effects tab is open or Alt is held, the
+  untouched ones within 30 m of the camera get one, nearest first, at most 50; one with an edit always has one. With the tab
+  open, a click within 12 px of an icon selects as a light's does (the nearest the camera among those under the cursor,
+  else among those within 12 px); with Alt held, lights and effects alike.
+  A click elsewhere never picks an effect: `PickByBounds` skips particle systems (a dust card's box is about 1000 units
+  across), so a click on a crate behind one selects the crate.
+- **Refusals** (in any level, ours included): one with no load flags, "not edited: made at run time by the game (an
+  impact, a shield, a footstep), not part of the map"; one a loaded Kismet holds, "not edited: Kismet holds it
+  (<sequence>.SeqVar_Object_N): the story moves, hides or switches it"; one with no template or `bAutoActivate` false,
+  "not edited: off until Kismet or a matinee starts it". G: "not scaled: an effect moves and turns (how its particles
+  follow a scale is unchecked)".
+- **Selection:** the template and whether it loops (`loops`) or plays once (`ends`), and the ships line as for a vanilla
+  prop.
+- **Seeing the result:** particles only move while the world ticks, and old ones stay where they were. After an effect's
+  step closes (a move, a turn, a delete, an undo or redo, a pass that applied one), the editor calls its component's
+  `KillParticlesForced`, then `ActivateSystem(false)` unless it is hidden, and, when one was started again, lets the
+  paused world run for 1.5 s (`TickFor`; the status line adds "effects run 1.5 s"). A delete needs none: `SetHidden` and
+  the kill show at once, paused. Like the one-tick release, that release is the editor's own: the pause is taken back once
+  the deadline passes, not counted as the game's. It is skipped when the game had its own pause when the editor opened
+  (the status line adds "effects not run: the game had paused the world when F8 opened"). Live only: nothing of it ships.
 
 ### The prop catalog
 

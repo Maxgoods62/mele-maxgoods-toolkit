@@ -128,7 +128,7 @@ internal static class LevelStreams
     internal static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, string package, string actor, int line, List<string> changes)
     {
         // Found again by its name: an import keeps the source's.
-        var name = actor.Contains('.') ? actor[(actor.LastIndexOf('.') + 1)..] : actor;
+        var name = CopyName(actor);
         if (pcc.FindExport($"{LevelPath}.{name}") is { } existing)
         {
             if (!existing.ClassName.Contains("Light")) throw new ArgumentException($"line {line}: the level's {existing.InstancedFullPath} is a {existing.ClassName}, not a light.");
@@ -140,6 +140,9 @@ internal static class LevelStreams
         Import(pcc, level, original);
         changes.Add($"lights (copy of {package} {original.ObjectName.Instanced})");
     }
+
+    /// <summary>The name a light copied by <see cref="SetLight"/> has in the level: the source actor's own (the last part of its path).</summary>
+    internal static string CopyName(string actor) => actor.Contains('.') ? actor[(actor.LastIndexOf('.') + 1)..] : actor;
 
     /// <summary>The DefaultPostProcessSettings of another level's BioWorldInfo: its color grading, bloom and depth of field.</summary>
     internal static void SetPostProcess(MEGame game, IMEPackage pcc, ExportEntry level, string package, int line, List<string> changes)

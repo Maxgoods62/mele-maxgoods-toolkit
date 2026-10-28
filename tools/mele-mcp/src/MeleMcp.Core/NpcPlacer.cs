@@ -13,7 +13,8 @@ public sealed record NpcPlacement(string File, string Npc, string From, float X,
 
 /// <summary>
 /// Puts an NPC of a level YAML file where Shepard stands (or at given coordinates): writes 'location' and 'yaw' into the
-/// file, keeping its comments, builds the level, and moves the NPC and her lights in the running game as a preview.
+/// file, keeping its comments, builds the level, and moves the NPC and her lights in the running game as a preview. Warns when the
+/// in-game editor's session holds an edit of her or her lights not imported yet.
 /// </summary>
 public static class NpcPlacer
 {
@@ -43,6 +44,14 @@ public static class NpcPlacer
 
         var text = File.ReadAllText(file);
         var (name, edited, changes) = Edit(text, npc, [px, py, pz], degrees);
+        // Her lights' offsets are measured from her pose: an edit made in the editor from the old one no longer matches.
+        if (Tags(edited, name) is ({ } tag, var lights))
+        {
+            foreach (var map in EditorImport.UnimportedEdits(tag, lights))
+            {
+                notes.Add($"the editor's session for {map} holds an unimported edit of {tag} or its lights: editor_import first, or this move will conflict");
+            }
+        }
         if (edited != text) File.WriteAllText(file, edited, new UTF8Encoding(false));
 
         var result = build ? LevelBuilder.Build(game, file, null) : null;
@@ -70,17 +79,26 @@ public static class NpcPlacer
         return (Scalar(entry.Key), edited, changes);
     }
 
+    /// <summary>The NPC's tag and her lights' tags.</summary>
+    private static (string? Tag, List<string> Lights) Tags(string text, string npcName)
+    {
+        var npc = (Root(text).Children.First(c => Scalar(c.Key) == "npcs").Value as YamlMappingNode)!
+            .Children.First(c => Scalar(c.Key) == npcName).Value as YamlMappingNode;
+        string? tag = null;
+        var lights = new List<string>();
+        foreach (var (key, value) in npc!.Children)
+        {
+            if (Scalar(key) == "tag") tag = Scalar(value);
+            if (Scalar(key) == "lights") lights.AddRange(Sequence(value).OfType<YamlMappingNode>().SelectMany(l => l.Children.Where(c => Scalar(c.Key) == "tag").Select(c => Scalar(c.Value))));
+        }
+        return (tag, lights);
+    }
+
     /// <summary>The NPC's pawn and lights as the build left them in the level, pushed to the same actors in the running game.</summary>
     private static List<ActorState> MoveLive(MEGame game, string levelPath, string npcName, string yamlPath)
     {
-        var npc = (Root(File.ReadAllText(yamlPath)).Children.First(c => Scalar(c.Key) == "npcs").Value as YamlMappingNode)!
-            .Children.First(c => Scalar(c.Key) == npcName).Value as YamlMappingNode;
-        var tags = new List<string>();
-        foreach (var (key, value) in npc!.Children)
-        {
-            if (Scalar(key) == "tag") tags.Insert(0, Scalar(value));
-            if (Scalar(key) == "lights") tags.AddRange(Sequence(value).OfType<YamlMappingNode>().SelectMany(l => l.Children.Where(c => Scalar(c.Key) == "tag").Select(c => Scalar(c.Value))));
-        }
+        var (npcTag, lights) = Tags(File.ReadAllText(yamlPath), npcName);
+        var tags = npcTag is null ? lights : lights.Prepend(npcTag).ToList();
 
         using var pcc = PackageInspector.Open(game, levelPath);
         var level = Path.GetFileNameWithoutExtension(levelPath);
