@@ -54,13 +54,14 @@ fetch_pinned() {
         git.exe -C "$(wslpath -w "$dir")" checkout -q --detach FETCH_HEAD
     fi
 }
-fetch_pinned https://github.com/ocornut/imgui.git "$THIRD_PARTY/imgui" "$IMGUI_COMMIT"
-fetch_pinned https://github.com/CedricGuillemet/ImGuizmo.git "$THIRD_PARTY/ImGuizmo" "$IMGUIZMO_COMMIT"
 
 # One build of the tree at a time (mele-pause's build.sh takes the same lock): two configures and two MSBuilds would
 # write the same Common-LE1/LESDK-LE1 objects and PDB. Held until the script exits.
 exec 9> "$(dirname "$LEXASIS")/.lexasis-build.lock"
 flock -n 9 || { echo "another build of $LEXASIS is running (mele-bridge or mele-pause): waiting for it" >&2; flock 9; }
+# Under the lock: mele-pause's build.sh checks out the same imgui.
+fetch_pinned https://github.com/ocornut/imgui.git "$THIRD_PARTY/imgui" "$IMGUI_COMMIT"
+fetch_pinned https://github.com/CedricGuillemet/ImGuizmo.git "$THIRD_PARTY/ImGuizmo" "$IMGUIZMO_COMMIT"
 
 # Our sources become one more ASI project of that tree.
 mkdir -p "$LEXASIS/MeleBridge"
