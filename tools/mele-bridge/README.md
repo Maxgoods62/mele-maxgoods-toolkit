@@ -50,7 +50,9 @@ How the build works:
 - Dear ImGui and ImGuizmo are fetched at pinned commits into `third_party`, next to the LExASIs checkout
   ([THIRD_PARTY.md](THIRD_PARTY.md)). They build as a library of their own, with their default flags.
 - `src/` is copied into the checkout as one more project and built for LE1 only, with that tree's flags (`/W4 /WX`).
-  The script unsets `LEASI_GAME1_WIN64`, so the build never copies the ASI into the game.
+  A `LEASI_GAME1_WIN64` variable would make that build copy the ASI into the game: the script clears it for the
+  configure step, and stops when the configure output says one is still set (one set in the Windows environment
+  reaches CMake all the same).
 - One build of a checkout runs at a time; a second one waits for it.
 
 `MeleBridge.asi` in the ASI folder is the only file this tool writes inside the game install. It is written only while

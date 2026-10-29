@@ -158,11 +158,20 @@ grep -qF 'EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/MeleBridge"' "$CML" \
     || printf '%s\n' 'if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/MeleBridge")' '  add_subdirectory ("MeleBridge")' 'endif ()' >> "$CML"
 
 cd "$LEXASIS"
-# LEASI_GAME1_WIN64 would make every ASI build copy itself into the game: keep it unset.
-env -u LEASI_GAME1_WIN64 "$CMAKE" --preset VisualStudio -DLEASI_BUILD_LE2=OFF -DLEASI_BUILD_LE3=OFF -DLEASI_BUILD_LEL=OFF \
-    "-DMELE_THIRD_PARTY=$(wslpath -m "$THIRD_PARTY")" > /dev/null 2>&1 \
-    || { echo "cmake configure failed: run it by hand in $LEXASIS" >&2; exit 1; }
+# A LEASI_GAME<n>_WIN64 variable makes the ASI builds of every game turned on copy themselves into that game. env -u
+# removes one WSLENV would forward to cmake.exe; one set on the Windows side still reaches it, so the configure output
+# is checked too. Every game flag is passed, so a value cached by an earlier configure never sticks.
 log="$(mktemp)"
+if ! env -u LEASI_GAME1_WIN64 -u LEASI_GAME2_WIN64 -u LEASI_GAME3_WIN64 -u LEASI_GAMEL_WIN64 "$CMAKE" \
+    --preset VisualStudio -DLEASI_BUILD_LE1=ON -DLEASI_BUILD_LE2=OFF -DLEASI_BUILD_LE3=OFF -DLEASI_BUILD_LEL=OFF \
+    "-DMELE_THIRD_PARTY=$(wslpath -m "$THIRD_PARTY")" > "$log" 2>&1; then
+    rm -f "$log"
+    die "cmake configure failed: run it by hand in $LEXASIS"
+fi
+if grep -q 'User-provided Mass Effect' "$log"; then
+    rm -f "$log"
+    die "a LEASI_GAME*_WIN64 variable is set in the Windows environment, and it makes the build copy itself into the game: remove it (System Properties, Environment Variables), then open a new terminal and build again"
+fi
 if ! "$CMAKE" --build Build --config RELEASE --target MeleBridge-LE1 -- /m /v:minimal /nologo > "$log" 2>&1; then
     tr -d '\r' < "$log" | grep -E 'error|warning' | sed -E 's|^.*LExASIs\\||; s| \[[^]]*vcxproj\]||' | sort -u
     rm -f "$log"
