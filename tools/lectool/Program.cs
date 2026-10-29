@@ -434,40 +434,64 @@ if (cmd == "2da") {
     Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{(x.IsForcedExport ? "F" : "-")}\t{(ulong)x.ObjectFlags:X}\t{x.DataSize}\t{(x.ClassName == "Texture2D" ? x.GetProperty<NameProperty>("TextureFileCacheName")?.Value.Instanced : "")}");
   foreach (var i in pcc.Imports) Console.WriteLine($"{i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
 } else if (cmd == "gfxpackage") {
-  // gfxpackage <src.pcc> <movie> <out.pcc> [--copy-textures] [--texture <name> <png|#RRGGBB>]...: a new package holding a
-  // byte copy of a GFx movie at its top level, not forced, under the movie's own name, so that a HandlerLibrary
-  // PanelResource "<out file name>.<movie name>" opens it. The textures the movie references stay imports of their paths
-  // in src.pcc (a startup package's are always loaded); --copy-textures makes them top-level copies, as LE1CP's GUI
-  // packages have them. --texture makes one of them a top-level copy of the same name whose image comes from a PNG of
-  // the texture's size, or is one colour; it keeps the texture's format and mip count, stored in the package.
+  // gfxpackage <src.pcc> <movie> <out.pcc> [--raw-data <file>] [--copy-textures] [--add-texture <name> <like>]...
+  //            [--texture <name> <png|#RRGGBB>]...: a new package holding a copy of a GFx movie at its top level, not
+  // forced, under the movie's own name, so that a HandlerLibrary PanelResource "<out file name>.<movie name>" opens it.
+  // --raw-data gives the copy that file's bytes (a patched movie) instead of the source's. The textures the movie
+  // references stay imports of their paths in src.pcc (a startup package's are always loaded); --copy-textures makes
+  // them top-level copies, as LE1CP's GUI packages have them. --add-texture adds a top-level copy of the referenced
+  // texture <like> under a new name to the references, for an image the patched movie adds. --texture makes a
+  // referenced or added texture a top-level copy whose image comes from a PNG of the texture's size, or is one colour;
+  // it keeps the texture's format, mip count and NeverStream, stored in the package.
   var errors = new List<string>();
-  if (args.Length < 4) { Console.WriteLine("ERROR usage: gfxpackage <src.pcc> <movie> <out.pcc> [--copy-textures] [--texture <name> <png|#RRGGBB>]..."); Environment.Exit(1); }
+  const string usage = "gfxpackage <src.pcc> <movie> <out.pcc> [--raw-data <file>] [--copy-textures] [--add-texture <name> <like>]... [--texture <name> <png|#RRGGBB>]...";
+  if (args.Length < 4) { Console.WriteLine("ERROR usage: " + usage); Environment.Exit(1); }
   var (srcPath, moviePath, outPath) = (args[1], args[2], args[3]);
   var copyAll = false;
+  string rawPath = null;
   var replace = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+  var adds = new List<(string Name, string Like)>();
   for (int i = 4; i < args.Length; i++) {
     if (args[i] == "--copy-textures") copyAll = true;
+    else if (args[i] == "--raw-data" && i + 1 < args.Length) { if (rawPath != null) errors.Add("--raw-data: given twice"); rawPath = args[++i]; }
     else if (args[i] == "--texture" && i + 2 < args.Length) { if (!replace.TryAdd(args[i + 1], args[i + 2])) errors.Add($"--texture {args[i + 1]}: given twice"); i += 2; }
-    else errors.Add(args[i] == "--texture" ? "--texture needs a texture name and a PNG or #RRGGBB" : $"unknown option {args[i]}");
+    else if (args[i] == "--add-texture" && i + 2 < args.Length) { adds.Add((args[i + 1], args[i + 2])); i += 2; }
+    else errors.Add(args[i] switch {
+      "--texture" => "--texture needs a texture name and a PNG or #RRGGBB",
+      "--add-texture" => "--add-texture needs a new texture name and the referenced texture it copies",
+      "--raw-data" => "--raw-data needs a file",
+      _ => $"unknown option {args[i]}",
+    });
   }
-  if (Path.GetFullPath(srcPath).Equals(Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase)) errors.Add($"{outPath}: the output is also the input");
+  foreach (var p in new[] { srcPath, rawPath }.Where(p => p != null))
+    if (Path.GetFullPath(p).Equals(Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase)) errors.Add($"{outPath}: the output is also an input");
+  if (rawPath != null && !File.Exists(rawPath)) errors.Add($"--raw-data {rawPath}: no such file");
   foreach (var (name, v) in replace)
     if (v.StartsWith('#') ? v.Length != 7 || !int.TryParse(v[1..], System.Globalization.NumberStyles.HexNumber, null, out _) : !File.Exists(v))
       errors.Add($"--texture {name}: {v} is neither a PNG file nor a colour #RRGGBB");
+  foreach (var dup in adds.GroupBy(a => a.Name, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+    errors.Add($"--add-texture {dup.Key}: given twice");
   if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
   if (File.Exists(outPath)) File.Delete(outPath);
   using var src = MEPackageHandler.OpenMEPackage(srcPath, forceLoadFromDisk: true);
   var movie = src.FindExport(moviePath);
   if (movie == null || movie.ClassName != "GFxMovieInfo") { Console.WriteLine($"ERROR {moviePath}: not a GFxMovieInfo export of {Path.GetFileName(srcPath)}"); Environment.Exit(1); }
   var mProps = movie.GetProperties();
-  var raw = mProps.GetProp<ImmutableByteArrayProperty>("RawData")?.Bytes;
+  var srcRaw = mProps.GetProp<ImmutableByteArrayProperty>("RawData")?.Bytes;
+  var raw = rawPath != null ? File.ReadAllBytes(rawPath) : srcRaw;
   var refEntries = (mProps.GetProp<ArrayProperty<ObjectProperty>>("References") ?? new ArrayProperty<ObjectProperty>("References")).Select(r => src.GetEntry(r.Value)).ToList();
-  if (raw == null) errors.Add($"{moviePath}: no RawData");
+  if (srcRaw == null) errors.Add($"{moviePath}: no RawData");
   if (movie.GetBinaryData().Length > 0) errors.Add($"{moviePath}: {movie.GetBinaryData().Length} bytes of binary data after the properties, which this command does not copy");
   foreach (var p in mProps.Where(p => p.Name.Instanced is not ("RawData" or "References") && p is ObjectProperty or ArrayPropertyBase or StructProperty))
     errors.Add($"{moviePath}: property {p.Name.Instanced} is not copied by this command");
-  foreach (var name in replace.Keys.Where(n => !refEntries.Any(e => e != null && e.ObjectName.Instanced.Equals(n, StringComparison.OrdinalIgnoreCase))))
-    errors.Add($"--texture {name}: not a texture the movie references");
+  bool IsRef(string n) => refEntries.Any(e => e != null && e.ObjectName.Instanced.Equals(n, StringComparison.OrdinalIgnoreCase));
+  foreach (var (name, like) in adds) {
+    if (IsRef(name)) errors.Add($"--add-texture {name}: the movie already references a texture of that name");
+    var l = refEntries.FirstOrDefault(e => e != null && e.ObjectName.Instanced.Equals(like, StringComparison.OrdinalIgnoreCase));
+    if (l is not ExportEntry { ClassName: "Texture2D" }) errors.Add($"--add-texture {name}: {like} is not a Texture2D export the movie references");
+  }
+  foreach (var name in replace.Keys.Where(n => !IsRef(n) && !adds.Any(a => a.Name.Equals(n, StringComparison.OrdinalIgnoreCase))))
+    errors.Add($"--texture {name}: not a texture the movie references or --add-texture adds");
   foreach (var dup in refEntries.Where(e => e != null).GroupBy(e => e.ObjectName.Instanced, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
     errors.Add($"the movie references two objects named {dup.Key}: their top-level copies would share a path");
   if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
@@ -478,6 +502,48 @@ if (cmd == "2da") {
     var copy = pcc.CreateExport(movie.ObjectName, movie.ClassName, null, indexed: false, cache: cache);
     copy.ObjectFlags = movie.ObjectFlags;
     copy.ExportFlags = 0;
+    // A top-level, not forced copy of one of the movie's textures.
+    ExportEntry CopyTexture(ExportEntry e) {
+      var report = EntryImporter.ImportAndRelinkEntries(EntryImporter.PortingOption.CloneAllDependencies, e, pcc, null, true, new RelinkerOptionsPackage { Cache = cache }, out var ported);
+      foreach (var r in report) errors.Add($"{e.InstancedFullPath}: relink: {r.Message}");
+      var tex = (ExportEntry)ported;
+      tex.ExportFlags &= ~LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+      return tex;
+    }
+    // The texture's image from a PNG of its size or a colour; null and an error when it cannot be.
+    string ReplaceImage(ExportEntry tex, string name, string v) {
+      if (tex.ClassName != "Texture2D") { errors.Add($"--texture {name}: a {tex.ClassName}, not a Texture2D"); return null; }
+      var neverStream = tex.GetProperty<BoolProperty>("NeverStream")?.Value == true;
+      var t2d = new Texture2D(tex);
+      var (w, h) = (t2d.Mips[0].width, t2d.Mips[0].height);
+      var px = new byte[w * h * 4];
+      if (v.StartsWith('#')) {
+        var c = Convert.ToInt32(v[1..], 16);
+        for (int i = 0; i < px.Length; i += 4) { px[i] = (byte)c; px[i + 1] = (byte)(c >> 8); px[i + 2] = (byte)(c >> 16); px[i + 3] = 255; }   // BGRA
+      } else {
+        // Decoded here, not by LEC's Image(file): that one hands RGBA bytes on as ARGB (red and blue swapped) and copies
+        // only the first 4 MB of ImageSharp's pixel buffer (a 1024x2048 portrait does not load).
+        using var png = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Bgra32>(v);
+        if (png.Width != w || png.Height != h) { errors.Add($"--texture {name}: {v} is {png.Width}x{png.Height}, the texture {w}x{h}"); return null; }
+        png.CopyPixelDataTo(px);
+      }
+      var img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, w, h);
+      foreach (var m in t2d.Replace(img, tex.GetProperties(), isPackageStored: true)) Console.WriteLine($"note: --texture {name}: {m}");
+      if (neverStream) {
+        // LEC's Replace drops NeverStream below 6 mips; the vanilla UI textures have one mip and NeverStream.
+        var tp = tex.GetProperties();
+        tp.AddOrReplaceProp(new BoolProperty(true, "NeverStream"));
+        tex.WriteProperties(tp);
+      }
+      return $"{v} ({w}x{h}, {tex.GetProperty<EnumProperty>("Format")?.Value.Instanced})";
+    }
+    // Added textures first: the cloner would hand back a copy made earlier under the same path.
+    var added = new List<(string Name, ExportEntry Tex)>();
+    foreach (var (name, like) in adds) {
+      var tex = CopyTexture((ExportEntry)refEntries.First(e => e != null && e.ObjectName.Instanced.Equals(like, StringComparison.OrdinalIgnoreCase)));
+      tex.ObjectName = new NameReference(name);
+      added.Add((name, tex));
+    }
     var refs = new ArrayProperty<ObjectProperty>("References");
     var how = new List<string>();
     foreach (var e in refEntries) {
@@ -499,38 +565,26 @@ if (cmd == "2da") {
         how.Add($"{name}\timport\t{e.InstancedFullPath}");
         continue;
       }
-      var report = EntryImporter.ImportAndRelinkEntries(EntryImporter.PortingOption.CloneAllDependencies, (ExportEntry)e, pcc, null, true, new RelinkerOptionsPackage { Cache = cache }, out var ported);
-      foreach (var r in report) errors.Add($"{e.InstancedFullPath}: relink: {r.Message}");
-      var tex = (ExportEntry)ported;
-      tex.ExportFlags &= ~LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+      var tex = CopyTexture((ExportEntry)e);
       refs.Add(new ObjectProperty(tex));
       if (!replace.TryGetValue(name, out var v)) { how.Add($"{name}\tcopy\t{e.InstancedFullPath}"); continue; }
-      if (tex.ClassName != "Texture2D") { errors.Add($"--texture {name}: a {tex.ClassName}, not a Texture2D"); continue; }
-      var t2d = new Texture2D(tex);
-      var (w, h) = (t2d.Mips[0].width, t2d.Mips[0].height);
-      LegendaryExplorerCore.Textures.Image img;
-      if (v.StartsWith('#')) {
-        var c = Convert.ToInt32(v[1..], 16);
-        var px = new byte[w * h * 4];
-        for (int i = 0; i < px.Length; i += 4) { px[i] = (byte)c; px[i + 1] = (byte)(c >> 8); px[i + 2] = (byte)(c >> 16); px[i + 3] = 255; }   // BGRA
-        img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, w, h);
-      } else {
-        // Decoded here, not by LEC's Image(file): that one hands RGBA bytes on as ARGB (red and blue swapped) and copies
-        // only the first 4 MB of ImageSharp's pixel buffer (a 1024x2048 portrait does not load).
-        using var png = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Bgra32>(v);
-        if (png.Width != w || png.Height != h) { errors.Add($"--texture {name}: {v} is {png.Width}x{png.Height}, the texture {w}x{h}"); continue; }
-        var px = new byte[w * h * 4];
-        png.CopyPixelDataTo(px);
-        img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, w, h);
-      }
-      foreach (var m in t2d.Replace(img, tex.GetProperties(), isPackageStored: true)) Console.WriteLine($"note: --texture {name}: {m}");
-      how.Add($"{name}\treplaced\t{v} ({w}x{h}, {tex.GetProperty<EnumProperty>("Format")?.Value.Instanced})");
+      if (ReplaceImage(tex, name, v) is { } what) how.Add($"{name}\treplaced\t{what}");
+    }
+    foreach (var (name, tex) in added) {
+      refs.Add(new ObjectProperty(tex));
+      var like = adds.First(a => a.Name == name).Like;
+      if (!replace.TryGetValue(name, out var v)) { how.Add($"{name}\tadded\ta copy of {like}"); continue; }
+      if (ReplaceImage(tex, name, v) is { } what) how.Add($"{name}\tadded\t{what}, from {like}");
     }
     mProps.AddOrReplaceProp(refs);
+    if (rawPath != null) mProps.AddOrReplaceProp(new ImmutableByteArrayProperty(raw, "RawData"));
     copy.WriteProperties(mProps);
     if (errors.Count == 0) {
       pcc.Save();
-      Console.WriteLine($"{Path.GetFileName(outPath)}: movie {copy.InstancedFullPath}, RawData {raw.Length} bytes, sha1 {Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(raw)).ToLowerInvariant()}; exports {pcc.ExportCount}, imports {pcc.ImportCount}");
+      string Sha1(byte[] b) => Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(b)).ToLowerInvariant();
+      Console.WriteLine($"{Path.GetFileName(outPath)}: movie {copy.InstancedFullPath}, RawData {raw.Length} bytes, sha1 {Sha1(raw)}"
+                        + (rawPath != null ? $" (from {Path.GetFileName(rawPath)}; the source's sha1 {Sha1(srcRaw)})" : "")
+                        + $"; exports {pcc.ExportCount}, imports {pcc.ImportCount}");
       foreach (var line in how) Console.WriteLine("reference\t" + line);
     }
   } catch {
@@ -597,8 +651,11 @@ if (cmd == "2da") {
     }
   }
 } else if (cmd == "swf") {
+  // swf <pcc> <outDir> [movie]: each GFx movie's RawData (or only that movie's, by path) as <name>.gfx
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
-  foreach (var e in pcc.Exports.Where(x => x.ClassName == "GFxMovieInfo")) {
+  var movies = pcc.Exports.Where(x => x.ClassName == "GFxMovieInfo" && (args.Length < 4 || x.InstancedFullPath.Equals(args[3], StringComparison.OrdinalIgnoreCase))).ToList();
+  if (args.Length >= 4 && movies.Count != 1) { Console.WriteLine($"ERROR {args[3]}: {movies.Count} GFxMovieInfo exports of that path"); Environment.Exit(1); }
+  foreach (var e in movies) {
     var rd = e.GetProperty<LegendaryExplorerCore.Unreal.ImmutableByteArrayProperty>("RawData");
     var bytes = rd?.Bytes;
     if (bytes == null) { var ap = e.GetProperty<ArrayProperty<ByteProperty>>("RawData"); if (ap != null) bytes = ap.Select(b => b.Value).ToArray(); }
@@ -706,9 +763,11 @@ if (cmd == "2da") {
     foreach (var el in lod.Elements) Console.WriteLine($"  mat={(el.Material == 0 ? "None" : pcc.GetEntry(el.Material).InstancedFullPath)} tris={el.NumTriangles}");
   }
 } else if (cmd == "texpng") {
-  // texpng <pcc> <uIndex> <out.png>: a Texture2D's top mip as PNG
+  // texpng <pcc> <uIndex|path> <out.png>: a Texture2D's top mip as PNG
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
-  Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(pcc.GetUExport(int.Parse(args[2]))).ExportToPNG(args[3]));
+  var tex = int.TryParse(args[2], out var ui) ? pcc.GetUExport(ui) : pcc.FindExport(args[2]);
+  if (tex is not { ClassName: "Texture2D" }) { Console.WriteLine($"ERROR {args[2]}: not a Texture2D export of {Path.GetFileName(args[1])}"); Environment.Exit(1); }
+  Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(tex).ExportToPNG(args[3]));
 } else if (cmd == "coalesced") {
   // coalesced <bin> <outDir> [filter]: writes every ini of a LE1/LE2 Coalesced file to outDir and prints the lines
   // that contain filter, with tabs shown as \t (ConfigDelta removals must match a line exactly)
