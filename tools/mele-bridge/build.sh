@@ -173,7 +173,7 @@ if grep -q 'User-provided Mass Effect' "$log"; then
     die "a LEASI_GAME*_WIN64 variable is set in the Windows environment, and it makes the build copy itself into the game: remove it (System Properties, Environment Variables), then open a new terminal and build again"
 fi
 if ! "$CMAKE" --build Build --config RELEASE --target MeleBridge-LE1 -- /m /v:minimal /nologo > "$log" 2>&1; then
-    tr -d '\r' < "$log" | grep -E 'error|warning' | sed -E 's|^.*LExASIs\\||; s| \[[^]]*vcxproj\]||' | sort -u
+    tr -d '\r' < "$log" | grep -E 'error|warning' | sed -E 's| \[[^]]*vcxproj\]||; s|^.*LExASIs\\||' | sort -u
     rm -f "$log"
     exit 1
 fi
