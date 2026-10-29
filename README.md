@@ -10,7 +10,7 @@ unmerged.
 |---|---|
 | [mele-mcp](tools/mele-mcp/README.md) | An MCP server (C#, stdio) on [LegendaryExplorerCore](https://github.com/ME3Tweaks/LegendaryExplorer) (LEC). Its 72 tools inspect and edit packages, conversations, plot and journal data and Kismet, build a mod's levels, plot and conversations from YAML, check and install the mod, and drive the running game. |
 | [MeleBridge](tools/mele-bridge/README.md) | `MeleBridge.asi`, an ASI for LE1. It opens a named pipe into the running game, through which mele-mcp's `live_*` tools read and write any property of a live object, call UnrealScript functions and run console commands. F8 opens a level editor drawn over the game. |
-| [lectool](tools/lectool/README.md) | A command-line tool on the same LEC for steps mele-mcp has no tool for: compiling script classes into a package, adding a script actor to a level, porting a mesh, building an LE1 sound, building and checking an M3 2DA merge, building an actor type from two packages and checking the result. |
+| [lectool](tools/lectool/README.md) | A command-line tool on the same LEC for steps mele-mcp has no tool for: compiling script classes into a package, adding a script actor to a level, porting a mesh, building an LE1 sound, building and checking an M3 2DA merge, building an actor type from two packages and checking the result, copying a GFx movie into a package of its own. |
 
 ## Versions
 

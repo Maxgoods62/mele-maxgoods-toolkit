@@ -433,6 +433,116 @@ if (cmd == "2da") {
   foreach (var x in pcc.Exports)
     Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{(x.IsForcedExport ? "F" : "-")}\t{(ulong)x.ObjectFlags:X}\t{x.DataSize}\t{(x.ClassName == "Texture2D" ? x.GetProperty<NameProperty>("TextureFileCacheName")?.Value.Instanced : "")}");
   foreach (var i in pcc.Imports) Console.WriteLine($"{i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
+} else if (cmd == "gfxpackage") {
+  // gfxpackage <src.pcc> <movie> <out.pcc> [--copy-textures] [--texture <name> <png|#RRGGBB>]...: a new package holding a
+  // byte copy of a GFx movie at its top level, not forced, under the movie's own name, so that a HandlerLibrary
+  // PanelResource "<out file name>.<movie name>" opens it. The textures the movie references stay imports of their paths
+  // in src.pcc (a startup package's are always loaded); --copy-textures makes them top-level copies, as LE1CP's GUI
+  // packages have them. --texture makes one of them a top-level copy of the same name whose image comes from a PNG of
+  // the texture's size, or is one colour; it keeps the texture's format and mip count, stored in the package.
+  var errors = new List<string>();
+  if (args.Length < 4) { Console.WriteLine("ERROR usage: gfxpackage <src.pcc> <movie> <out.pcc> [--copy-textures] [--texture <name> <png|#RRGGBB>]..."); Environment.Exit(1); }
+  var (srcPath, moviePath, outPath) = (args[1], args[2], args[3]);
+  var copyAll = false;
+  var replace = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+  for (int i = 4; i < args.Length; i++) {
+    if (args[i] == "--copy-textures") copyAll = true;
+    else if (args[i] == "--texture" && i + 2 < args.Length) { if (!replace.TryAdd(args[i + 1], args[i + 2])) errors.Add($"--texture {args[i + 1]}: given twice"); i += 2; }
+    else errors.Add(args[i] == "--texture" ? "--texture needs a texture name and a PNG or #RRGGBB" : $"unknown option {args[i]}");
+  }
+  if (Path.GetFullPath(srcPath).Equals(Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase)) errors.Add($"{outPath}: the output is also the input");
+  foreach (var (name, v) in replace)
+    if (v.StartsWith('#') ? v.Length != 7 || !int.TryParse(v[1..], System.Globalization.NumberStyles.HexNumber, null, out _) : !File.Exists(v))
+      errors.Add($"--texture {name}: {v} is neither a PNG file nor a colour #RRGGBB");
+  if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
+  if (File.Exists(outPath)) File.Delete(outPath);
+  using var src = MEPackageHandler.OpenMEPackage(srcPath, forceLoadFromDisk: true);
+  var movie = src.FindExport(moviePath);
+  if (movie == null || movie.ClassName != "GFxMovieInfo") { Console.WriteLine($"ERROR {moviePath}: not a GFxMovieInfo export of {Path.GetFileName(srcPath)}"); Environment.Exit(1); }
+  var mProps = movie.GetProperties();
+  var raw = mProps.GetProp<ImmutableByteArrayProperty>("RawData")?.Bytes;
+  var refEntries = (mProps.GetProp<ArrayProperty<ObjectProperty>>("References") ?? new ArrayProperty<ObjectProperty>("References")).Select(r => src.GetEntry(r.Value)).ToList();
+  if (raw == null) errors.Add($"{moviePath}: no RawData");
+  if (movie.GetBinaryData().Length > 0) errors.Add($"{moviePath}: {movie.GetBinaryData().Length} bytes of binary data after the properties, which this command does not copy");
+  foreach (var p in mProps.Where(p => p.Name.Instanced is not ("RawData" or "References") && p is ObjectProperty or ArrayPropertyBase or StructProperty))
+    errors.Add($"{moviePath}: property {p.Name.Instanced} is not copied by this command");
+  foreach (var name in replace.Keys.Where(n => !refEntries.Any(e => e != null && e.ObjectName.Instanced.Equals(n, StringComparison.OrdinalIgnoreCase))))
+    errors.Add($"--texture {name}: not a texture the movie references");
+  foreach (var dup in refEntries.Where(e => e != null).GroupBy(e => e.ObjectName.Instanced, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+    errors.Add($"the movie references two objects named {dup.Key}: their top-level copies would share a path");
+  if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
+  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  var pcc = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
+  try {
+    using var cache = new PackageCache();
+    var copy = pcc.CreateExport(movie.ObjectName, movie.ClassName, null, indexed: false, cache: cache);
+    copy.ObjectFlags = movie.ObjectFlags;
+    copy.ExportFlags = 0;
+    var refs = new ArrayProperty<ObjectProperty>("References");
+    var how = new List<string>();
+    foreach (var e in refEntries) {
+      if (e == null) { refs.Add(new ObjectProperty(0)); how.Add("None"); continue; }
+      var name = e.ObjectName.Instanced;
+      var wantCopy = copyAll || replace.ContainsKey(name);
+      if (!wantCopy || e is ImportEntry) {
+        if (wantCopy) errors.Add($"{e.InstancedFullPath}: an import in {Path.GetFileName(srcPath)}, so it cannot be copied");
+        // An import by path, its parents Package imports. (LEC's GetOrAddCrossImportOrPackage copies an export of the
+        // source under a forced package instead.)
+        var classPkg = e switch {
+          ImportEntry ie => ie.PackageFile,
+          ExportEntry { Class: null } => "Core",
+          ExportEntry { Class.Parent: null } => Path.GetFileNameWithoutExtension(srcPath),
+          ExportEntry x => x.Class.Parent.ObjectName.Instanced,
+          _ => "Core",
+        };
+        refs.Add(new ObjectProperty(pcc.GetEntryOrAddImport(e.InstancedFullPath, e.ClassName, classPkg)));
+        how.Add($"{name}\timport\t{e.InstancedFullPath}");
+        continue;
+      }
+      var report = EntryImporter.ImportAndRelinkEntries(EntryImporter.PortingOption.CloneAllDependencies, (ExportEntry)e, pcc, null, true, new RelinkerOptionsPackage { Cache = cache }, out var ported);
+      foreach (var r in report) errors.Add($"{e.InstancedFullPath}: relink: {r.Message}");
+      var tex = (ExportEntry)ported;
+      tex.ExportFlags &= ~LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+      refs.Add(new ObjectProperty(tex));
+      if (!replace.TryGetValue(name, out var v)) { how.Add($"{name}\tcopy\t{e.InstancedFullPath}"); continue; }
+      if (tex.ClassName != "Texture2D") { errors.Add($"--texture {name}: a {tex.ClassName}, not a Texture2D"); continue; }
+      var t2d = new Texture2D(tex);
+      var (w, h) = (t2d.Mips[0].width, t2d.Mips[0].height);
+      LegendaryExplorerCore.Textures.Image img;
+      if (v.StartsWith('#')) {
+        var c = Convert.ToInt32(v[1..], 16);
+        var px = new byte[w * h * 4];
+        for (int i = 0; i < px.Length; i += 4) { px[i] = (byte)c; px[i + 1] = (byte)(c >> 8); px[i + 2] = (byte)(c >> 16); px[i + 3] = 255; }   // BGRA
+        img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, w, h);
+      } else {
+        // Decoded here, not by LEC's Image(file): that one hands RGBA bytes on as ARGB (red and blue swapped) and copies
+        // only the first 4 MB of ImageSharp's pixel buffer (a 1024x2048 portrait does not load).
+        using var png = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Bgra32>(v);
+        if (png.Width != w || png.Height != h) { errors.Add($"--texture {name}: {v} is {png.Width}x{png.Height}, the texture {w}x{h}"); continue; }
+        var px = new byte[w * h * 4];
+        png.CopyPixelDataTo(px);
+        img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, w, h);
+      }
+      foreach (var m in t2d.Replace(img, tex.GetProperties(), isPackageStored: true)) Console.WriteLine($"note: --texture {name}: {m}");
+      how.Add($"{name}\treplaced\t{v} ({w}x{h}, {tex.GetProperty<EnumProperty>("Format")?.Value.Instanced})");
+    }
+    mProps.AddOrReplaceProp(refs);
+    copy.WriteProperties(mProps);
+    if (errors.Count == 0) {
+      pcc.Save();
+      Console.WriteLine($"{Path.GetFileName(outPath)}: movie {copy.InstancedFullPath}, RawData {raw.Length} bytes, sha1 {Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(raw)).ToLowerInvariant()}; exports {pcc.ExportCount}, imports {pcc.ImportCount}");
+      foreach (var line in how) Console.WriteLine("reference\t" + line);
+    }
+  } catch {
+    pcc.Dispose(); File.Delete(outPath);
+    throw;
+  }
+  pcc.Dispose();
+  if (errors.Count > 0) {
+    foreach (var e in errors) Console.WriteLine("ERROR " + e);
+    File.Delete(outPath);
+    Environment.Exit(1);
+  }
 } else if (cmd == "snd") {
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
   foreach (var e in pcc.Exports.Where(x => x.ClassName == "SoundNodeWave" && args.Skip(2).Any(f => x.ObjectName.Instanced.Contains(f, StringComparison.OrdinalIgnoreCase)))) {

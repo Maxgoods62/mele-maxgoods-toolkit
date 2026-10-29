@@ -91,6 +91,8 @@ It builds against the LEC submodule and finds the game through `MELE_LE_DIR` or 
 one manifest on a copy of a game file and checks that every vanilla row is unchanged and every added row is there.
 `actortype` builds a package holding one actor type from the values of one package's actor type and the look of
 another's; `pkgcheck` checks a built package's references, shaders and imports; `pkglist` lists its exports and imports.
+`gfxpackage` copies a GFx movie into a package of its own, its textures kept as imports, copied, or one of them
+replaced by a PNG or a colour.
 
 Docs: [docs/design/in-game-editor.md](docs/design/in-game-editor.md), [docs/formats.md](docs/formats.md) (the pipe
 protocol, `levels.json` version 1, session files versions 1 to 3, `catalog.json` version 1) and
