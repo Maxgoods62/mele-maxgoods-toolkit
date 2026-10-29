@@ -2,10 +2,12 @@
 
 MeleBridge (the ASI in the game) and mele-mcp (the MCP server) share four contracts: the named-pipe protocol, `levels.json`,
 the editor's session files and the prop catalog's `catalog.json`. Each has a version number. A reader refuses a version it
-does not know instead of guessing, so a bridge and a server from different releases fail early with a message that says what
-to rebuild. This page gives each contract as the code reads and writes it: the pipe's ops and their replies, and every file's
-fields. Why the editor works the way it does is in the [editor design](design/in-game-editor.md); section numbers there
-(`§10`) are that document's. The examples use the test mod's names from that document (`BIOA_CLD01`, `dorn`); use your own.
+does not know, so a bridge and a server from different releases fail early, with a message that says what to rebuild. Each
+contract below is given as the code reads and writes it: the pipe's ops and their replies, and every file's fields.
+
+A reference written "design §10" is a section of the [editor design](design/in-game-editor.md), which explains why the
+editor works as it does; a bare section number (§3.3) is one of this page. The examples use the editor design's example
+names (the map `BIOA_MYM01`, the NPC `guard`); use your own.
 
 ## 1. Versions
 
@@ -19,7 +21,7 @@ fields. Why the editor works the way it does is in the [editor design](design/in
 The bridge's own version is `ASI_VERSION` in the same header: `"bridge": "2"` in the `ping` reply. It is for people and logs;
 programs check `"protocol"`.
 
-**When to bump.** The pipe protocol goes up when an op changes its arguments or its reply. A file's version goes up when an
+When to bump: the pipe protocol goes up when an op changes its arguments or its reply. A file's version goes up when an
 older reader would do something wrong with the new content. A reader that would only skip an unknown key needs no bump:
 Phase 5 added `npcs` and `characterLights` to `levels.json` and kept version 1, because a Phase 4 bridge skips them. It added
 session version 3, because a Phase 4 bridge would rewrite an NPC's light with its own writer.
@@ -51,12 +53,12 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
 
 ### 3.1 Transport
 
-- **Name:** `\\.\pipe\MeleBridge_LE1`. The suffix is the game's name; only LE1 is built.
-- **Pipe:** byte mode, local clients only (`PIPE_REJECT_REMOTE_CLIENTS`), any number of connections at once, each served on
+- Name: `\\.\pipe\MeleBridge_LE1`. The suffix is the game's name; only LE1 is built.
+- Pipe: byte mode, local clients only (`PIPE_REJECT_REMOTE_CLIENTS`), any number of connections at once, each served on
   its own thread.
-- **Lines:** UTF-8 JSON, one request per line, each ending in `\n`. One reply line per request, in order. A line of only
+- Lines: UTF-8 JSON, one request per line, each ending in `\n`. One reply line per request, in order. A line of only
   spaces, tabs or `\r` is skipped. More than 1 MB waiting without a newline closes the connection.
-- **Threads:** every op but `editor` runs on the game thread, in the `ProcessEvent` hook, at the next call the game makes
+- Threads: every op but `editor` runs on the game thread, in the `ProcessEvent` hook, at the next call the game makes
   through it.
 
 ### 3.2 Requests and replies
@@ -75,13 +77,13 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
 | `ok` | reply | `true`, with the op's reply keys beside it; or `false`, with `error`. |
 | `error` | reply | What went wrong, in words, ready to show. |
 
-- **Timeout:** when the game thread doesn't take the request in time (a load screen, or a menu that runs no script), the
+- Timeout: when the game thread doesn't take the request in time (a load screen, or a menu that runs no script), the
   reply is `"the game thread did not take the request in time (game loading, or not running script?)"`. A request the game
-  thread has started always runs to the end, and its reply comes back late rather than half done.
-- **Faults:** an access violation while a request runs is caught; the reply is
+  thread has started always runs to the end, even when its reply then comes back late.
+- Faults: an access violation while a request runs is caught; the reply is
   `"access violation in the game while running the request"`.
-- **Unknown op:** `"unknown op X (ping, console, find, get, set, call, describe, subscribe, editor)"`.
-- **mele-mcp's client** (`LiveBridge.cs`) drops `null` keys (a `set`'s `value` excepted, where `null` means None), sets
+- Unknown op: `"unknown op X (ping, console, find, get, set, call, describe, subscribe, editor)"`.
+- mele-mcp's client (`LiveBridge.cs`) drops `null` keys (a `set`'s `value` excepted, where `null` means None), sets
   `timeoutMs` from the tool's timeout, and waits 2 s longer than that for the reply line.
 
 ### 3.3 The version check
@@ -121,27 +123,27 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
 | `subscribe` | `functions` (a non-empty list of function paths); `objectContains`; `params` (true) | `functions`: the paths resolved. Then the connection becomes an event stream (§3.6). |
 | `editor` | none | The in-game editor's state (§3.7). |
 
-- **`find`:** `class` is a class name (any loaded class of that name, subclasses included); `name` and `path` are
+- `find`: `class` is a class name (any loaded class of that name, subclasses included); `name` and `path` are
   case-insensitive substrings of the object's name and full path. Class default objects are left out unless `defaults` is
   true. Without a filter: `"give a class, a name or a path filter"`.
-- **`call`:** the function is found by name up the class chain. Opcode natives work (design §3.1). Arguments are given in
+- `call`: the function is found by name up the class chain. Opcode natives work (design §3.1). Arguments are given in
   order; optional and out parameters may be left out. Latent and iterator functions are refused:
   `"Sleep is latent or an iterator: it cannot be called from outside script"`.
-- **`describe`:** a function a subclass overrides is listed once, with the subclass as `owner`. A `signature` reads
+- `describe`: a function a subclass overrides is listed once, with the subclass as `owner`. A `signature` reads
   `<return type> Name(optional out <type> Param, ...)`, `void` when nothing is returned. Types read `int`, `name`, `string`,
   `struct Vector`, `array<int>`, `class<Actor>`, an enum's name, or the class of an object property.
-- **`subscribe`:** a path may leave out the package (`SequenceOp.Activated` finds `Engine.SequenceOp.Activated`).
+- `subscribe`: a path may leave out the package (`SequenceOp.Activated` finds `Engine.SequenceOp.Activated`).
 
 ### 3.5 Objects, properties and values
 
-- **Object paths** are full paths as `find` returns them, `Package.Group.Name`, compared without case. The `Class Path` form
+- Object paths are full paths as `find` returns them, `Package.Group.Name`, compared without case. The `Class Path` form
   some tools print is taken too (the part after the first space). Not found: `"no object at X (paths as find returns them)"`.
-- **Property paths:** `A.B[2].C`. A dot enters a struct; `[i]` indexes a static array or a dynamic array.
+- Property paths: `A.B[2].C`. A dot enters a struct; `[i]` indexes a static array or a dynamic array.
 
 | Property type | In a reply | Accepted by `set` and `call` |
 |---|---|---|
 | bool | `true` / `false` | a bool, a number (0 is false), `"true"`, `"false"`, `"1"`, `"0"` |
-| byte | the enum value's name when the property has an enum, else a number | an enum value's name (any case) or 0–255 |
+| byte | the enum value's name when the property has an enum, else a number | an enum value's name (any case) or 0 to 255 |
 | int, float | a number | a number, a bool or a numeric string; an int must be whole |
 | name, string | a string | a string |
 | object | its path, or `null` | a path; `null`, `""` or `"None"` for none. The class is checked. |
@@ -198,17 +200,17 @@ lights and NPCs the editor may change (design §11.4, §12.1). It describes the 
   "version": 1,
   "dlc": "DLC_MOD_MyMod",
   "levels": {
-    "BIOA_CLD01": {
+    "BIOA_MYM01": {
       "dlc": "DLC_MOD_MyMod",
       "streams": ["BIOA_FRE31_00_LAY", "BIOA_FRE31_00_DSG"],
       "props": ["ed_Crate_XLarge_02_ff9xa_1"],
       "lights": ["ed_light_1"],
       "npcs": {
-        "claude_npc_02": {
-          "name": "dorn",
+        "mymod_npc_01": {
+          "name": "guard",
           "location": [-310.5, -15120.25, -362.15],
           "yaw": 16384,
-          "lights": { "claude_npc_02_light_ff9xa_1": [60, 40, 80] }
+          "lights": { "mymod_npc_01_light_ff9xa_1": [60, 40, 80] }
         }
       },
       "characterLights": { "StaticLightCollectionActor_68": "BIOA_FRE31_00_DSG" }
@@ -229,31 +231,31 @@ lights and NPCs the editor may change (design §11.4, §12.1). It describes the 
 | `npcs.<tag>` | Every NPC of the YAML by her pawn's tag, with or without lights: `name` (the YAML key), `location` (the built pawn's `Location`, written short: `-36739.9`), `yaw` (Unreal units, 65536 = 360°), `lights` (light tag → offset `[forward, right, up]`). |
 | `characterLights` | The light collections the build copies into the level: the copy's name in the level → the file it was copied from, without `.pcc`. |
 
-**How the bridge reads it.** A missing key, or one of another type, reads as empty, and an unknown key is skipped. Tags are
+How the bridge reads it: a missing key, or one of another type, reads as empty, and an unknown key is skipped. Tags are
 compared without case. An NPC without `name`, `location` or a numeric `yaw` is skipped, and so is an NPC light whose offset is
 not three numbers. A missing file says "levels.json missing: run mod_build"; a broken one says "levels.json can't be read
 (...): run mod_build". Either way every actor keeps Phase 3's rules (design §10).
 
-**How mele-mcp reads it.** The mesh index (`catalog_index`) leaves our own mods' files out, as it does the catalog's. With
+How mele-mcp reads it: the mesh index (`catalog_index`) leaves our own mods' files out, as it does the catalog's. With
 `MELE_OWN_DLC` unset, those are the top `dlc` and every level's `dlc`; with it set, only the folders it lists. A missing or
 broken file gives none.
 
 ## 5. Session files (versions 1 to 3)
 
-`sessions\<map>.json` holds the editor's work on one **persistent** map (the game's `GWorld`), sideloaded levels included.
+`sessions\<map>.json` holds the editor's work on one persistent map (the game's `GWorld`), sideloaded levels included.
 One entry per actor, with its latest state, never a history. The bridge's Save writes it, and its passes drop entries the
 installed level shows; `editor_import` marks the entries it applied and drops the ones no YAML builds (design §3.7, §10).
 
 ```json
 {
   "version": 2,
-  "map": "BIOA_CLD01",
+  "map": "BIOA_MYM01",
   "saved": "2026-10-28T14:03:12Z",
   "actors": [
     {
       "tag": "ed_Crate_XLarge_02_ff9xa_1",
-      "path": "BIOA_CLD01.TheWorld.PersistentLevel.DynamicSMActor_Spawnable_0",
-      "level": "BIOA_CLD01",
+      "path": "BIOA_MYM01.TheWorld.PersistentLevel.DynamicSMActor_Spawnable_0",
+      "level": "BIOA_MYM01",
       "class": "DynamicSMActor_Spawnable",
       "spawned": true,
       "mesh": {
@@ -303,46 +305,46 @@ installed level shows; `editor_import` marks the entries it applied and drops th
 | `imported` | object | Written by `editor_import` only: `{ "before": <state> }`, what the installed level may still show. |
 | `installed` | list of states | Written by the bridge only: earlier `imported.before` states an install may still show. |
 
-- **Key:** a spawn is matched by `tag`; any other entry by `path`, a fork's path read as the vanilla file's path. One entry
+- Key: a spawn is matched by `tag`; any other entry by `path`, a fork's path read as the vanilla file's path. One entry
   per key: a later Save replaces it. When the bridge saves an edit of a built copy (a level actor with a spawn's tag), the
   copy's entry replaces the spawn's.
-- **A state** (in `base`, `imported.before` and `installed`) holds `location`, `rotation`, `scale`, `scale3d`, and as the
+- A state (in `base`, `imported.before` and `installed`) holds `location`, `rotation`, `scale`, `scale3d`, and as the
   entry has them `deleted`, `light` and `npc`. A field it lacks takes the actor's own value.
-- **`base.deleted`** says whether the YAML removes the actor (`removed: true`); in `imported.before`, whether the installed
+- `base.deleted` says whether the YAML removes the actor (`removed: true`); in `imported.before`, whether the installed
   level hides it.
-- **The light block:**
+- The light block:
 
 | Field | Values |
 |---|---|
 | `kind` | `props` (prop light), `room` (room light), `npc` (an NPC's light), `vanilla` (a level light). Compared exactly. |
 | `radius`, `brightness`, `falloff` | Numbers: `Radius`, `Brightness`, `FalloffExponent`. |
-| `color` | `[r, g, b]`, integers 0–255. The light's alpha is not stored. |
+| `color` | `[r, g, b]`, integers 0 to 255. The light's alpha is not stored. |
 | `enabled` | Whether the light is on. |
 | `type` | Level lights only: `B` (baked), `C` (characters only), `U` (special channel) or `D` (dynamic) (design §12.4). |
 
 ### 5.3 Rules both tools keep
 
-- **Two writers:** the bridge's Save reads the file first and keeps what an import changed in fields the editor
+- Two writers: the bridge's Save reads the file first and keeps what an import changed in fields the editor
   didn't change since (design §10). `editor_import` rewrites the file only when it didn't change since it read it; if the
   bridge saved meanwhile, the import merges again, up to 3 times.
-- **Matched as equal:** location within 0.01 after rounding to 2 decimals, rotation as an orientation (axes within 0.02°),
+- Matched as equal: location within 0.01 after rounding to 2 decimals, rotation as an orientation (axes within 0.02°),
   scales within 0.001; a light's radius within 0.01, brightness and falloff within 0.001, colour and kind exact. An NPC light:
   the bridge takes its place within 0.05 per axis, `editor_import` its offset within 0.02 per axis.
-- **Dropped entries are kept:** before `editor_import` removes an entry from a session, it adds it to
+- Dropped entries are kept: before `editor_import` removes an entry from a session, it adds it to
   `<map>.dropped.json` beside it:
 
   ```json
   {
     "about": "Session entries editor_import dropped from the in-game editor's session, ...",
     "dropped": [
-      { "at": "2026-10-28T14:10:00Z", "session": "...\\sessions\\BIOA_CLD01.json", "file": "...\\BIOA_CLD01.yaml", "why": "...", "entry": { } }
+      { "at": "2026-10-28T14:10:00Z", "session": "...\\sessions\\BIOA_MYM01.json", "file": "...\\BIOA_MYM01.yaml", "why": "...", "entry": { } }
     ]
   }
   ```
 
   To add one back: copy its `entry` into the session's `actors` with `"base": null` and without `imported` or `installed`,
   game closed, then import again. `editor_import` skips `*.dropped.json` when it looks for sessions.
-- **Session choice:** with no `session` given, `editor_import` takes the level's own `sessions\<level>.json` when it exists,
+- Session choice: with no `session` given, `editor_import` takes the level's own `sessions\<level>.json` when it exists,
   however old. Else (a level the game loads into another map) it takes the newest session in the sessions folder with an
   actor of the level that the editor didn't spawn, an entry whose tag the YAML builds (an NPC's light included), or a light
   on one of the YAML's NPCs. Files that can't be parsed are skipped. With none, it refuses and names the sessions that hold
@@ -356,11 +358,11 @@ installed level shows; `editor_import` marks the entries it applied and drops th
 | 2 | Phase 3 on: the default | Version 1's fields and `scale`, `scale3d`, `base`, `imported`, `installed`. Phase 4 added `light` blocks of kind `props` and `room`, and vanilla actors. Effects (`class: Emitter`) are plain vanilla entries. |
 | 3 | Phase 5 on, when needed | An entry, its `base`, its `imported.before` or one of its `installed` holds a `light` of kind `npc` or `vanilla`. Adds `npc`, `owner` and `light.type`. |
 
-- **The bridge** writes 3 when an entry needs it, else 2, at every Save. A pass that drops entries rewrites a version 2 or 3
+- The bridge writes 3 when an entry needs it, else 2, at every Save. A pass that drops entries rewrites a version 2 or 3
   file at the version of what is left; a version 1 file stays 1.
-- **`editor_import`** never lowers a version: a file it marks becomes at least 2, and 3 when an entry holds an `npc` or
+- `editor_import` never lowers a version: a file it marks becomes at least 2, and 3 when an entry holds an `npc` or
   `vanilla` light.
-- **Another version:** the bridge's Save says `"<file> is version N, and this bridge reads versions 1 to 3: left as it is"`,
+- Another version: the bridge's Save says `"<file> is version N, and this bridge reads versions 1 to 3: left as it is"`,
   and its passes skip the file. `editor_import` says `"<file> is a version N session; editor_import reads versions 1 to 3.
   Deploy mele-mcp and MeleBridge from the same commit."` A Phase 4 bridge or import (it reads versions 1 and 2) refuses a
   version 3 file, so it never rewrites an NPC's or a level's light with Phase 4's writer.
@@ -368,7 +370,7 @@ installed level shows; `editor_import` marks the entries it applied and drops th
 ## 6. catalog.json (version 1)
 
 `catalog_build` writes the prop catalog for the editor's Props window: `catalog\catalog.json`, its thumbnails in
-`catalog\thumbs\`, and `MeleCatalog_Core.pcc` in the dev mod **Mele Catalog** (`DLC_MOD_MeleCatalog`). The overlay reads the
+`catalog\thumbs\`, and `MeleCatalog_Core.pcc` in the dev mod Mele Catalog (`DLC_MOD_MeleCatalog`). The overlay reads the
 file the first time it draws the Catalog tab, and again on Reload; the game thread reads it once more, for the `load` paths
 of sessions' spawns (design §3.5, §10).
 

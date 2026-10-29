@@ -1,1 +1,10 @@
-{"mcpServers":{"mele":{"type":"stdio","command":"${MELE_MCP_EXE}","env":{"MELE_LE_DIR":"${MELE_LE_DIR}","WSLENV":"MELE_LE_DIR"}}}}
+{
+  "mcpServers": {
+    "mele": {
+      "type": "stdio",
+      "command": "C:\\Users\\<you>\\AppData\\Local\\mele-mcp\\server\\MeleMcp.exe",
+      "args": [],
+      "env": {}
+    }
+  }
+}

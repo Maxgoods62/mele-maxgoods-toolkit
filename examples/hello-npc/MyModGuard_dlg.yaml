@@ -1,0 +1,52 @@
+# The guard's conversation (example mod "My Mod"), in the map BIOA_MYM01.
+# The first build copies the requisitions officer's conversation into the map, under its own names and ids and without
+# its plot; later builds find MyModGuard_dlg by name. E<n>/R<n> are nodes of that copy, kept with new text; any other
+# node name is a new line, found again by its strref.
+# Ids: strings 61230000+, resref 612301, node ids from 61230100. A mod of yours takes its own block (id_alloc).
+# Build: mod_build folder=<this folder> (see ../README.md). Format: ../../docs/yaml-reference.md.
+
+requires: mele-mcp >= 0.1.0
+package: DLC_MOD_MyMod/CookedPCConsole/BIOA_MYM01.pcc
+conversation: MyModGuard_dlg
+from:
+  package: BIOA_NOR10_11_DSG_LOC_INT.pcc   # the requisitions officer on the Normandy
+  conversation: nor20_req_officer_dlg
+  resref: 612301
+  nodeIds: 61230100
+
+start: [E16]
+
+nodes:
+  E16:
+    strref: 61230010
+    text: "Commander. This deck is closed to the crew. Not to you, of course."
+    replies: [R1, posting, R5]
+  R1:
+    strref: 61230012
+    text: "Why is it closed?"
+    wheel: { strref: 61230011, category: INVESTIGATE, en: "Closed?" }
+    then: [E2]
+  E2:
+    strref: 61230013
+    text: "The captain keeps the ship's records down here. I keep everyone else out."
+    replies: [posting, R5]
+  posting:                       # a new line: Shepard's question, copied from the template's R7
+    reply: 61230020
+    template: R7
+    text: "How long have you served on this ship?"
+    wheel: { strref: 61230021, category: INVESTIGATE, en: "Your posting" }
+    then: [posting_answer]
+  posting_answer:                # the guard's answer, copied from E4 and cut to 4 seconds
+    entry: 61230022
+    template: E4
+    length: 4
+    text: "Three runs now. Long enough to know every sound this hull makes."
+    replies: [R1, R5]
+  R5:
+    strref: 61230015
+    text: "Carry on."
+    wheel: { strref: 61230014, category: DEFAULT, en: "Goodbye." }
+    then: [E6]
+  E6:
+    strref: 61230016
+    text: "Aye, Commander."

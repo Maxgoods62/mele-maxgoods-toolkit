@@ -1,0 +1,25 @@
+# Level of the example mod "My Mod": a map of its own, BIOA_MYM01, that shows the freighter of the uncharted-world
+# assignments (BIOA_FRE31: walls, cargo, lights, doors) without its scripts or enemies, and a guard who talks.
+# Build: mod_build folder=<this folder> (see ../README.md). Format: ../../docs/yaml-reference.md.
+# In game: at BIOA_MYM01 start_mym01 (console).
+
+requires: mele-mcp >= 0.1.0
+package: DLC_MOD_MyMod/CookedPCConsole/BIOA_MYM01.pcc   # created on the first build
+
+# The whole ship is one file, shown inside a copy of the one stream volume of its vanilla map.
+streaming:
+  volume: { package: BIOA_FRE31.pcc, actor: BioTriggerStream_0 }
+  levels: [BIOA_FRE31_00_LAY]
+postProcess: BIOA_FRE31.pcc
+
+startPointTemplate: { package: BIOA_FRE31.pcc, actor: BioStartPoint_0 }
+startPoints:
+  start_mym01: { location: [-2703.0488, -16297.884, -284.53085], yaw: 0 }   # where the vanilla map's start point is
+
+npcs:
+  guard:
+    tag: mymod_npc_01                                              # how the build finds him again
+    template: { package: BIONPC_Pressly.pcc, actor: BioPawn_3 }    # imported on the first build: an officer's body, face, uniform
+    location: [-1647.74, -16092.3, -358.2]                         # npc_place writes these two from where Shepard stands
+    yaw: 200.16                                                    # degrees: 0 faces +X, 90 faces +Y
+    conversation: MyModGuard_dlg                                   # built by MyModGuard_dlg.yaml; Shepard uses him and it starts
