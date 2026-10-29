@@ -7,6 +7,10 @@
     <Nullable>disable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <!-- 2dapart reads its recipe with the YamlDotNet that mele-mcp uses. -->
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
+  </ItemGroup>
+  <ItemGroup>
     <!-- The same LEC as mele-mcp. LEC only defines WINDOWS (registry lookup, native DLL copy) in its Win* configurations. -->
     <ProjectReference Include="..\mele-mcp\external\LegendaryExplorer\LegendaryExplorer\LegendaryExplorerCore\LegendaryExplorerCore.csproj"
                       SetConfiguration="Configuration=WinRelease"

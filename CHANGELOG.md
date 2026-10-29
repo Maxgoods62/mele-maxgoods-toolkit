@@ -87,6 +87,8 @@ The in-game editor, on F8 ([design §4](docs/design/in-game-editor.md#4-phases))
 
 lectool, a command-line tool on LEC: `compileclass`, `addactor`, `portmesh`, `buildsound`, `wwise` and research dumps.
 It builds against the LEC submodule and finds the game through `MELE_LE_DIR` or the registry.
+`2dapart` builds the package of an M3 Bio2DA merge (`.m3da`) from a YAML recipe of rows; `2damerge` runs M3's merge of
+one manifest on a copy of a game file and checks that every vanilla row is unchanged and every added row is there.
 
 Docs: [docs/design/in-game-editor.md](docs/design/in-game-editor.md), [docs/formats.md](docs/formats.md) (the pipe
 protocol, `levels.json` version 1, session files versions 1 to 3, `catalog.json` version 1) and

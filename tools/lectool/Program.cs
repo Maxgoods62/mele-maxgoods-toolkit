@@ -4,6 +4,7 @@ using LegendaryExplorerCore.Unreal.Classes;
 using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Unreal.BinaryConverters;
 using LegendaryExplorerCore.Unreal;
+using LegendaryExplorerCore.Unreal.ObjectInfo;
 
 // The Legendary Edition folder: MELE_LE_DIR as for mele-mcp (from WSL also set WSLENV=MELE_LE_DIR), else LEC's registry lookup.
 var leDir = Environment.GetEnvironmentVariable("MELE_LE_DIR");
@@ -35,6 +36,186 @@ if (cmd == "2da") {
     for (int c = 0; c < t.ColumnCount; c++) { var cell = t[r, c]; cells.Add(cell == null ? "" : cell.DisplayableValue); }
     Console.WriteLine(t.RowNames[r] + "\t" + string.Join("\t", cells));
   }
+} else if (cmd == "2dapart") {
+  // 2dapart <src.pcc> <recipe.yaml> <out.pcc>: a package for M3's Bio2DA merge (.m3da). Per table of the recipe, a
+  // <Table>_part_1 export of the source table's class under Package exports named like the source's parents, with the
+  // source's columns and only the recipe's rows. A row with `from` starts as a copy of that source row; `set` replaces
+  // cells by column name, typed like the copied cell, else like most of the column's cells; `~` empties a cell. A table
+  // stored without cell indexes has every cell filled, so an empty cell in its rows is an error: written that way, the
+  // cells after it would shift left. Prints the tables as read back from out.pcc.
+  var outPath = args[3];
+  if (File.Exists(outPath)) File.Delete(outPath);
+  TwoDaRecipe recipe;
+  try { recipe = new YamlDotNet.Serialization.DeserializerBuilder().WithDuplicateKeyChecking().Build().Deserialize<TwoDaRecipe>(File.ReadAllText(args[2])); }
+  catch (YamlDotNet.Core.YamlException ex) { Console.WriteLine($"ERROR {Path.GetFileName(args[2])}: {ex.Message}"); Environment.Exit(1); return; }
+  using var src = MEPackageHandler.OpenMEPackage(args[1]);
+  var inv = System.Globalization.CultureInfo.InvariantCulture;
+  var errors = new List<string>();
+  var parts = new List<string>();
+  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
+  try {
+    var tablesSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var (path, recipeTable) in recipe?.tables ?? new()) {
+      var vexp = src.FindExport(path);
+      if (vexp == null || vexp.ClassName is not ("Bio2DA" or "Bio2DANumberedRows")) { errors.Add($"{path}: no Bio2DA or Bio2DANumberedRows export with this path"); continue; }
+      if (!tablesSeen.Add(vexp.InstancedFullPath)) { errors.Add($"{path}: listed twice"); continue; }
+      if (recipeTable?.rows == null || recipeTable.rows.Count == 0) { errors.Add($"{path}: no rows"); continue; }
+      bool numbered = vexp.ClassName == "Bio2DANumberedRows";
+      // A Bio2DANumberedRows row name is a number, spelt as the table spells it (8, not 08).
+      string RowName(string key) => numbered && int.TryParse(key, System.Globalization.NumberStyles.AllowLeadingSign, inv, out var n) ? n.ToString(inv) : key;
+      var source = new Bio2DA(vexp);
+      IEntry parent = null;
+      foreach (var anc in vexp.InstancedFullPath.Split('.').SkipLast(1)) parent = pkg.CreatePackageExport(NameReference.FromInstancedString(anc), parent, forcedExport: false);
+      var exp = pkg.CreateExport(NameReference.FromInstancedString(vexp.ObjectName.Instanced + "_part_1"), vexp.ClassName, parent, indexed: false);
+      var part = new Bio2DA { Export = exp, IsIndexed = source.IsIndexed };
+      foreach (var c in source.ColumnNames) part.AddColumn(c);
+      foreach (var (rowKey, recipeRow) in recipeTable.rows) {
+        var rowName = RowName(rowKey);
+        var where = $"{path} row {rowKey}";
+        if (numbered && !int.TryParse(rowKey, System.Globalization.NumberStyles.AllowLeadingSign, inv, out _)) { errors.Add($"{where}: a Bio2DANumberedRows row name is a number"); continue; }
+        if (recipeRow == null) { errors.Add($"{where}: empty, give it `from` or `set`"); continue; }
+        if (part.TryGetRowIndexByName(rowName, out _)) { errors.Add($"{where}: listed twice"); continue; }
+        if (source.TryGetRowIndexByName(rowName, out _)) Console.WriteLine($"note: {where} is already in {Path.GetFileName(args[1])}: M3 replaces that row with the recipe's");
+        int r = part.AddRow(rowName), fromRow = -1;
+        if (recipeRow.from != null) {
+          if (!source.TryGetRowIndexByName(RowName(recipeRow.from), out fromRow)) { errors.Add($"{where}: no row {recipeRow.from} to copy"); continue; }
+          for (int c = 0; c < source.ColumnCount; c++) part[r, c] = CopyCell(source[fromRow, c], pkg);
+        }
+        foreach (var (col, value) in recipeRow.set ?? new()) {
+          if (!source.TryGetColumnIndexByName(col, out int c)) { errors.Add($"{where}: no column {col}"); continue; }
+          if (value == null) { part[r, c] = new Bio2DACell { package = pkg }; continue; }
+          var type = fromRow >= 0 && source[fromRow, c].Type != Bio2DACell.Bio2DADataType.TYPE_NULL ? source[fromRow, c].Type
+            : Enumerable.Range(0, source.RowCount).Select(i => source[i, c].Type).Where(t => t != Bio2DACell.Bio2DADataType.TYPE_NULL)
+                .GroupBy(t => t).OrderByDescending(g => g.Count()).Select(g => (Bio2DACell.Bio2DADataType?)g.Key).FirstOrDefault();
+          if (type == null) { errors.Add($"{where}: column {col} has only empty cells, so its type is unknown"); continue; }
+          Bio2DACell cell = type switch {
+            Bio2DACell.Bio2DADataType.TYPE_INT => int.TryParse(value, System.Globalization.NumberStyles.Integer, inv, out var i) ? new Bio2DACell(i) : null,
+            Bio2DACell.Bio2DADataType.TYPE_FLOAT => float.TryParse(value, System.Globalization.NumberStyles.Float, inv, out var f) ? new Bio2DACell(f) : null,
+            _ => new Bio2DACell(NameReference.FromInstancedString(value), pkg),
+          };
+          if (cell == null) { errors.Add($"{where}: {col} is a {type} column, '{value}' is not one"); continue; }
+          part[r, c] = cell;
+        }
+        if (!source.IsIndexed)
+          foreach (var c in Enumerable.Range(0, part.ColumnCount).Where(c => part[r, c].Type == Bio2DACell.Bio2DADataType.TYPE_NULL))
+            errors.Add($"{where}: {part.ColumnNames[c]} is empty, but this table is stored without cell indexes (every cell filled): give it a value");
+      }
+      part.Write2DAToExport(exp);
+      parts.Add(exp.InstancedFullPath);
+    }
+    if (parts.Count == 0 && errors.Count == 0) errors.Add("the recipe has no tables");
+    if (errors.Count == 0) pkg.Save();
+  } catch {
+    pkg.Dispose(); File.Delete(outPath);
+    throw;
+  }
+  pkg.Dispose();
+  if (errors.Count > 0) {
+    foreach (var e in errors) Console.WriteLine("ERROR " + e);
+    File.Delete(outPath);
+    Environment.Exit(1);
+  }
+  using var saved = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
+  foreach (var ifp in parts) {
+    var exp = saved.FindExport(ifp);
+    var t = new Bio2DA(exp);
+    Console.WriteLine($"{exp.UIndex}\t{exp.ClassName}\t{ifp}\tcolumns={t.ColumnCount}\trows={t.RowCount}");
+    PrintRows(t, t.RowNames);
+  }
+} else if (cmd == "2damerge") {
+  // 2damerge [--add-only] <m3da> <modDir> <base.pcc> <out.pcc>: M3's Bio2DA merge of one .m3da manifest, done as
+  // ME3TweaksCore's Bio2DAMerge.MergeManifest does it (Newtonsoft reads the manifest, the same table lookup, then LEC's
+  // Bio2DA.MergeInto, which adds missing rows), on a copy of base.pcc saved as out.pcc. The merge package is found in
+  // modDir by file name, as M3 finds it in the DLC's CookedPCConsole. Then out.pcc is read back and each merged table
+  // checked once against the rows of all its parts, in manifest order (the last part to name a row decides it): the base
+  // columns, every base row no part names unchanged, every part row there with its cells. Base rows a part replaces are
+  // listed; with --add-only, replacing a row with other cells is an error (equal cells: these rows were merged before).
+  // M3 first resets the tables to its own vanilla copies, so pass a vanilla base.pcc (M3's game backup) when there is
+  // one. Exits 1 on an error, or when nothing was merged.
+  string[] mergeable = { "Engine.pcc", "SFXGame.pcc", "EntryMenu.pcc", "BIOG_2DA_UNC_AreaMap_X.pcc", "BIOG_2DA_UNC_GalaxyMap_X.pcc",
+    "BIOG_2DA_UNC_GamerProfile_X.pcc", "BIOG_2DA_UNC_Movement_X.pcc", "BIOG_2DA_UNC_Music_X.pcc", "BIOG_2DA_UNC_Talents_X.pcc",
+    "BIOG_2DA_UNC_TreasureTables_X.pcc", "BIOG_2DA_UNC_UI_X.pcc" };    // Bio2DAMerge.Mergable2DAFiles
+  bool addOnly = args.Contains("--add-only");
+  var a = args.Where(x => x != "--add-only").ToArray();
+  var manifest = Newtonsoft.Json.JsonConvert.DeserializeObject<List<M3DAEntry>>(File.ReadAllText(a[1])) ?? new();
+  var (modDir, basePath, outPath) = (a[2], a[3], a[4]);
+  var errors = new List<string>();
+  void Fail(string e) { Console.WriteLine("ERROR " + e); errors.Add(e); }
+  using var basePkg = MEPackageHandler.OpenMEPackage(basePath, forceLoadFromDisk: true);
+  var merged = new List<(int uIndex, string ifp, Bio2DA before, List<Bio2DA> parts)>();
+  foreach (var entry in manifest) {
+    if (entry.packagefile == null || entry.mergepackagefile == null || entry.mergetables == null) { Fail("a manifest entry lacks packagefile, mergepackagefile or mergetables"); continue; }
+    if (!mergeable.Contains(entry.packagefile, StringComparer.OrdinalIgnoreCase)) { Fail($"packagefile {entry.packagefile}: M3 merges only into {string.Join(", ", mergeable)}"); continue; }
+    if (!string.Equals(entry.packagefile, Path.GetFileName(basePath), StringComparison.OrdinalIgnoreCase)) { Fail($"packagefile {entry.packagefile}, but the base is {Path.GetFileName(basePath)}"); continue; }
+    var modPath = Directory.GetFiles(modDir, entry.mergepackagefile, SearchOption.AllDirectories).FirstOrDefault();
+    if (modPath == null) { Fail($"mergepackagefile {entry.mergepackagefile}: not in {modDir}"); continue; }
+    using var modPkg = MEPackageHandler.OpenMEPackage(modPath, forceLoadFromDisk: true);
+    foreach (var table in entry.mergetables) {
+      var objName = NameReference.FromInstancedString(table[(table.LastIndexOf('.') + 1)..]);
+      if (!objName.Name.EndsWith("_part")) { Fail($"{table}: the object name does not end with _part"); continue; }
+      var tableName = objName.Name[..^5];
+      var modTable = modPkg.FindExport(table);
+      if (modTable == null || !modTable.IsA("Bio2DA")) { Fail($"{table}: no Bio2DA export with this path in {Path.GetFileName(modPath)}"); continue; }
+      bool Matches(ExportEntry x) => !x.IsDefaultObject && x.IsA("Bio2DA") && (x.ObjectName.Instanced.Equals(tableName, StringComparison.OrdinalIgnoreCase)
+        || (x.ObjectName.Name.Length > 5 && x.ObjectName.Name.StartsWith(tableName, StringComparison.CurrentCultureIgnoreCase) && x.ObjectName.Name.EndsWith("_part")));
+      var candidates = basePkg.Exports.Where(Matches).ToList();
+      if (candidates.Count == 0) { Fail($"{table}: no table named {tableName} in {Path.GetFileName(basePath)}"); continue; }
+      var baseTable = candidates[0];
+      if (candidates.Count > 1) Console.WriteLine($"note: {table}: {candidates.Count} tables match, M3 takes the first: {string.Join(", ", candidates.Select(x => $"#{x.UIndex} {x.InstancedFullPath}"))}");
+      var expectedIfp = modTable.Parent == null ? tableName : modTable.Parent.InstancedFullPath + "." + tableName;
+      if (!baseTable.InstancedFullPath.Equals(expectedIfp, StringComparison.OrdinalIgnoreCase)) Console.WriteLine($"note: {table} merges into {baseTable.InstancedFullPath}, not {expectedIfp}");
+      int known = merged.FindIndex(m => m.uIndex == baseTable.UIndex);
+      if (known < 0) { merged.Add((baseTable.UIndex, baseTable.InstancedFullPath, new Bio2DA(baseTable), new())); known = merged.Count - 1; }
+      var mod2DA = new Bio2DA(modTable);
+      var base2DA = new Bio2DA(baseTable);
+      List<int> rows; Bio2DAMergeResult result;
+      try { rows = mod2DA.MergeInto(base2DA, out result); }
+      catch (Exception ex) { Fail($"{table}: MergeInto {baseTable.InstancedFullPath}: {ex.Message}"); continue; }
+      if (result != Bio2DAMergeResult.OK) { Fail($"{table}: MergeInto {baseTable.InstancedFullPath}: {result} (columns: mod {mod2DA.ColumnCount}, base {base2DA.ColumnCount})"); continue; }
+      base2DA.Write2DAToExport();
+      merged[known].parts.Add(mod2DA);
+      Console.WriteLine($"merged {rows.Count} rows of {table} into #{baseTable.UIndex} {baseTable.InstancedFullPath}");
+    }
+  }
+  if (errors.Count == 0 && merged.All(m => m.parts.Count == 0)) Fail("the manifest merged no table");
+  if (errors.Count > 0) Environment.Exit(1);
+  basePkg.Save(outPath);
+  using var outPkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
+  foreach (var (_, ifp, before, parts) in merged) {
+    var after = new Bio2DA(outPkg.FindExport(ifp));
+    if (!after.ColumnNames.SequenceEqual(before.ColumnNames)) { Fail($"{ifp}: columns changed"); continue; }
+    var expected = new Dictionary<string, (Bio2DA part, int row)>(StringComparer.OrdinalIgnoreCase);
+    var order = new List<string>();
+    foreach (var p in parts)
+      for (int r = 0; r < p.RowCount; r++) { if (!expected.ContainsKey(p.RowNames[r])) order.Add(p.RowNames[r]); expected[p.RowNames[r]] = (p, r); }
+    int unchanged = 0, kept = 0;
+    var replaced = new List<string>(); var again = new List<string>();
+    for (int r = 0; r < before.RowCount; r++) {
+      var name = before.RowNames[r];
+      if (expected.TryGetValue(name, out var e)) {
+        bool equal = e.part.ColumnNames.All(c => SameCell(before[r, c], e.part[e.row, c]));
+        (equal ? again : replaced).Add(name);
+        if (addOnly && !equal) Fail($"{ifp}: the merge replaces base row {name} (--add-only)");
+        continue;
+      }
+      kept++;
+      if (r < after.RowCount && after.RowNames[r] == before.RowNames[r] && Enumerable.Range(0, before.ColumnCount).All(c => SameCell(before[r, c], after[r, c]))) unchanged++;
+      else Fail($"{ifp}: base row {name} changed");
+    }
+    int added = order.Count(n => !before.TryGetRowIndexByName(n, out _));
+    foreach (var n in order) {
+      var (p, pr) = expected[n];
+      if (!after.TryGetRowIndexByName(n, out int ar)) { Fail($"{ifp}: row {n} missing"); continue; }
+      var bad = p.ColumnNames.FirstOrDefault(c => !SameCell(p[pr, c], after[ar, c]));
+      if (bad != null) Fail($"{ifp}: row {n}: {bad} is '{after[ar, bad].DisplayableValue}', the part has '{p[pr, bad].DisplayableValue}'");
+    }
+    if (after.RowCount != before.RowCount + added) Fail($"{ifp}: {after.RowCount} rows, expected {before.RowCount} + {added}");
+    string Names(List<string> l) => l.Count == 0 ? "" : " (" + string.Join(", ", l) + ")";
+    Console.WriteLine($"{ifp}: columns {after.ColumnCount} unchanged; rows {before.RowCount} -> {after.RowCount}; {added} added, {replaced.Count} replaced{Names(replaced)}, {again.Count} merged before{Names(again)}; base rows unchanged {unchanged}/{kept}");
+    PrintRows(after, order);
+  }
+  if (errors.Count > 0) Environment.Exit(1);
 } else if (cmd == "snd") {
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
   foreach (var e in pcc.Exports.Where(x => x.ClassName == "SoundNodeWave" && args.Skip(2).Any(f => x.ObjectName.Instanced.Contains(f, StringComparison.OrdinalIgnoreCase)))) {
@@ -321,6 +502,32 @@ if (cmd == "2da") {
     Console.WriteLine($"{e.UIndex}\t{e.InstancedFullPath}\traw={bin.RawData.Length}\tdatachunks={i}");
   }
 }
+
+// The cell's value in a cell of the given package (a name cell resolves its name there).
+static Bio2DACell CopyCell(Bio2DACell c, IMEPackage pkg) => c.Type switch {
+  Bio2DACell.Bio2DADataType.TYPE_INT => new Bio2DACell(c.IntValue),
+  Bio2DACell.Bio2DADataType.TYPE_FLOAT => new Bio2DACell(c.FloatValue),
+  Bio2DACell.Bio2DADataType.TYPE_NAME => new Bio2DACell(c.NameValue, pkg),
+  _ => new Bio2DACell { package = pkg },
+};
+static bool SameCell(Bio2DACell a, Bio2DACell b) => a.Type == b.Type && a.Type switch {
+  Bio2DACell.Bio2DADataType.TYPE_INT => a.IntValue == b.IntValue,
+  Bio2DACell.Bio2DADataType.TYPE_FLOAT => BitConverter.SingleToInt32Bits(a.FloatValue) == BitConverter.SingleToInt32Bits(b.FloatValue),
+  Bio2DACell.Bio2DADataType.TYPE_NAME => a.NameValue == b.NameValue,    // as LEC and the engine compare names: case aside
+  _ => true,
+};
+// The named rows as `2da` prints a table: a header line, then one tab-separated line per row.
+static void PrintRows(Bio2DA t, IEnumerable<string> rows) {
+  Console.WriteLine("ROW\t" + string.Join("\t", t.ColumnNames));
+  foreach (var n in rows) { int r = t.GetRowIndexByName(n); Console.WriteLine(n + "\t" + string.Join("\t", Enumerable.Range(0, t.ColumnCount).Select(c => t[r, c].DisplayableValue))); }
+}
+
+// 2dapart's recipe: tables: { <Package.Table>: { rows: { <row>: { from: <row>, set: { <column>: <value> } } } } }
+class TwoDaRecipe { public Dictionary<string, TwoDaTable> tables { get; set; } }
+class TwoDaTable { public Dictionary<string, TwoDaRow> rows { get; set; } }
+class TwoDaRow { public string from { get; set; } public Dictionary<string, string> set { get; set; } }
+// One entry of an M3 .m3da manifest (ME3TweaksCore's Bio2DAMergeManifest).
+class M3DAEntry { public string comment { get; set; } public string packagefile { get; set; } public string mergepackagefile { get; set; } public List<string> mergetables { get; set; } }
 
 partial class Program { [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] internal static extern bool SetDllDirectoryW(string p); }
 [System.Runtime.InteropServices.UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)]
