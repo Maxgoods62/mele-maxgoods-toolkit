@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to mele-toolkit. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
+Notable changes to mele-maxgoods-toolkit. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 version is mele-mcp's (`<Version>` in `tools/mele-mcp/src/MeleMcp/MeleMcp.csproj`), the one a mod YAML's
 `requires: mele-mcp >= X.Y.Z` is checked against. MeleBridge has its own `ASI_VERSION` and pipe protocol number
 (`tools/mele-bridge/src/SharedVersion.h`).

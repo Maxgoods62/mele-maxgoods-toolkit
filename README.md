@@ -1,20 +1,23 @@
-# mele-toolkit
+# mele-maxgoods-toolkit
 
-Tools for modding Mass Effect Legendary Edition from an MCP client such as Claude Code. LE1 comes first. The toolkit
-reads and edits the game's packages, builds mods from YAML files, installs them through ME3Tweaks Mod Manager and works
-on the running game.
+My own tools for modding Mass Effect Legendary Edition, mostly LE1, from an MCP client such as Claude Code. They read
+and edit the game's packages, build mods from YAML files, install them through ME3Tweaks Mod Manager and work on the
+running game. I build what my mods need and change or remove things when I like. The code is shared as-is under GPL-3.0:
+use it, fork it or copy from it. There is no support and no roadmap. Issues may go unanswered and pull requests
+unmerged.
 
 | Tool | What it is |
 |---|---|
 | [mele-mcp](tools/mele-mcp/README.md) | An MCP server (C#, stdio) on [LegendaryExplorerCore](https://github.com/ME3Tweaks/LegendaryExplorer) (LEC). Its 72 tools inspect and edit packages, conversations, plot and journal data and Kismet, build a mod's levels, plot and conversations from YAML, check and install the mod, and drive the running game. |
 | [MeleBridge](tools/mele-bridge/README.md) | `MeleBridge.asi`, an ASI for LE1. It opens a named pipe into the running game, through which mele-mcp's `live_*` tools read and write any property of a live object, call UnrealScript functions and run console commands. F8 opens a level editor drawn over the game. |
-| [lectool](tools/lectool/README.md) | A command-line tool on the same LEC for steps mele-mcp has no tool for yet: compiling script classes into a package, adding a script actor to a level, porting a mesh, building an LE1 sound. |
+| [lectool](tools/lectool/README.md) | A command-line tool on the same LEC for steps mele-mcp has no tool for: compiling script classes into a package, adding a script actor to a level, porting a mesh, building an LE1 sound. |
 
-## Status
+## Versions
 
-Pre-release: there is no release or tag yet. The toolkit's version is mele-mcp's, 0.1.0 (`Version` in
-`tools/mele-mcp/src/MeleMcp/MeleMcp.csproj`). MeleBridge is ASI version 2 and speaks pipe protocol 1; mele-mcp checks
-the protocol and refuses a bridge that speaks another one.
+There are no releases or tags: build from a commit. The toolkit's version is mele-mcp's, 0.1.0 (`Version` in
+`tools/mele-mcp/src/MeleMcp/MeleMcp.csproj`), and a mod YAML's `requires:` line is checked against it. MeleBridge is ASI
+version 2 and speaks pipe protocol 1. mele-mcp refuses a bridge that speaks another protocol, so build both from the
+same commit.
 
 The package, export, Kismet and FaceFX tools and `mod_install` also take LE2 and LE3. The YAML builds, conversations,
 plot, journal, prop catalog and `live_*` tools are LE1 only, and nearly all testing was done on LE1.
@@ -34,8 +37,8 @@ Versions, the optional ASIs and the LE1 Community Patch are in [getting started]
 Clone with the LEC submodule:
 
 ```bash
-git clone https://github.com/Maxgoods62/mele-toolkit
-cd mele-toolkit
+git clone https://github.com/Maxgoods62/mele-maxgoods-toolkit
+cd mele-maxgoods-toolkit
 git submodule update --init
 ```
 
@@ -70,7 +73,6 @@ MeleBridge build.
 | [docs/formats.md](docs/formats.md) | The contracts mele-mcp and MeleBridge share: pipe protocol, `levels.json`, session files, `catalog.json` |
 | [docs/le1-lighting.md](docs/le1-lighting.md) | Why an NPC a mod adds to LE1 can render darker than the vanilla NPC beside her, and the lights the toolkit gives her |
 | [CHANGELOG.md](CHANGELOG.md) | Changes per version |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 | [THIRD_PARTY.md](THIRD_PARTY.md) | Third-party code in mele-mcp and lectool, and its licenses; MeleBridge has its own list in [tools/mele-bridge/THIRD_PARTY.md](tools/mele-bridge/THIRD_PARTY.md) |
 
 ## Repo layout

@@ -9,7 +9,7 @@ only handles whole classes (`getall`), and commands queued together run in rever
 
 This is MeleBridge 2 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1. mele-mcp refuses a bridge with
 another protocol number ([formats §3.3](../../docs/formats.md#33-the-version-check)), so build the bridge and the server
-from the same toolkit release.
+from the same commit.
 
 ## Build and install
 
@@ -618,9 +618,13 @@ script never show up.
   only in memory.
 - Plot table. It is a single object, `SFXGame.Default__BioWorldInfo.BioGlobalVars0`. Its `GetBool`/`SetBool` (and the
   Int and Float versions) work through `call`. `game_plot` uses them.
-- SDK layouts. Some LExSDKv2 classes don't match the engine's layout: the SDK's `FRwVector3` is 12 bytes in C++ and 16
-  in the engine, which shifts the particle classes' fields
-  ([CONTRIBUTING.md](../../CONTRIBUTING.md#the-sdk-layout-trap)).
+- SDK layouts. Some LExSDKv2 classes don't match the engine's memory layout. The SDK's `FRwVector3` is 12 bytes in C++
+  and 16 in the engine, so `FBioRwBox` compiles to 0x28 bytes instead of 0x30. Every later field of `UParticleSystem` is
+  then 8 bytes off, and so are `UParticleSystemComponent::Template` and `bAutoActivate`. MeleBridge reads those fields
+  at the offsets the engine's reflection gives (`PropertyOffset` in `src/Reflection.cpp`) and pins the other fields it
+  reads with `static_assert` (`src/Editor.cpp`). Before you read a field that comes after an `FRwVector3`, or after a
+  struct that holds one, check its offset against reflection
+  ([design §12.7](../../docs/design/in-game-editor.md#127-findings)).
 
 ## License
 

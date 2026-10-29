@@ -100,7 +100,7 @@ public static class TalkTools
                  + "its node data, FaceFX and TLK set, under its own names, resref and node ids, vanilla plot removed). Then: new text strrefs for "
                  + "kept nodes, new lines copied from template nodes (node data and lip sync with them), text in every language of the conversation's TLK set (and optional GlobalTlk files), plot conditions and transitions, "
                  + "wheels, replies' next lines and the starting list, in one save. A new line is found again by its strref, so running "
-                 + "the file twice changes nothing new; every list in the file replaces the conversation's. The format is in mele-toolkit's docs/yaml-reference.md, Conversation files. "
+                 + "the file twice changes nothing new; every list in the file replaces the conversation's. The format is in mele-maxgoods-toolkit's docs/yaml-reference.md, Conversation files. "
                  + "Backs the packages up first and refuses files inside the game install.")]
     public static ConvBuildResult ConvBuild(
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,

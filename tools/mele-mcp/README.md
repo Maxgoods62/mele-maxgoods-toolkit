@@ -8,7 +8,7 @@ MCP server that gives Claude Code headless access to Mass Effect Legendary Editi
 Claude Code (Windows or WSL) ─stdio─► MeleMcp.exe (Windows) ─► LEC ─► .pcc files
 ```
 
-Version 0.1.0, no release yet. GPL-3.0, like LEC: see [LICENSE](../../LICENSE).
+Version 0.1.0. GPL-3.0, like LEC: see [LICENSE](../../LICENSE).
 
 ## Tools
 

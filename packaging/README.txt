@@ -1,8 +1,10 @@
 mele-mcp @VERSION@ for Windows x64
 
-mele-mcp is an MCP server for modding Mass Effect Legendary Edition, LE1 first. It reads and
+mele-mcp is an MCP server for modding Mass Effect Legendary Edition, mostly LE1. It reads and
 writes the game's packages with LegendaryExplorerCore, builds mods from YAML files and talks to
 the running game.
+
+This is a personal tool, shared as-is. It comes with no support and no warranty (see LICENSE).
 
 What it needs:
 - Windows x64.
@@ -26,13 +28,13 @@ Other MCP clients start MeleMcp.exe with no arguments. It speaks JSON-RPC on std
 and logs to stderr.
 
 Settings, the optional ASIs and what to do when it fails:
-https://github.com/Maxgoods62/mele-toolkit/blob/main/docs/getting-started.md
+https://github.com/Maxgoods62/mele-maxgoods-toolkit/blob/main/docs/getting-started.md
 
 mele-mcp is free software under the GNU GPL version 3 (LICENSE). THIRD_PARTY.md lists what it
 is built with, and the licenses folder holds their license texts. This build comes from
-mele-toolkit @COMMIT@, with Legendary Explorer @LEC_COMMIT@ as its submodule.
+mele-maxgoods-toolkit @COMMIT@, with Legendary Explorer @LEC_COMMIT@ as its submodule.
 Sources:
-- mele-mcp: https://github.com/Maxgoods62/mele-toolkit
+- mele-mcp: https://github.com/Maxgoods62/mele-maxgoods-toolkit
 - LegendaryExplorerCore and TexConverter.dll: https://github.com/ME3Tweaks/LegendaryExplorer
 - CompressionWrappers.dll: https://github.com/MassEffectModder/MassEffectModder
 

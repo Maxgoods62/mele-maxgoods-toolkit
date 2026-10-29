@@ -44,8 +44,8 @@ Tested with M3 9.2.1 build 137, LE1CP 2.0, LEC from Legendary Explorer 6.5 (the 
 ## Get the source
 
 ```bash
-git clone https://github.com/Maxgoods62/mele-toolkit
-cd mele-toolkit
+git clone https://github.com/Maxgoods62/mele-maxgoods-toolkit
+cd mele-maxgoods-toolkit
 git submodule update --init
 ```
 
@@ -54,8 +54,9 @@ project. Its own nested submodules are not needed.
 
 ## Build mele-mcp
 
-When a release exists, its `mele-mcp-v<version>-win-x64.zip` holds a built server that needs only the .NET 8 runtime.
-Unzip it into a folder such as `%LOCALAPPDATA%\mele-mcp\server` and go on to [Register the server](#register-the-server).
+No built server is published, so you build it as below. From WSL, `./package.sh` at the repo root can also build the server
+into `dist/mele-mcp-v<version>-win-x64.zip`, a server that needs only the .NET 8 runtime.
+[THIRD_PARTY.md](../THIRD_PARTY.md#the-release-zip) says what the zip holds.
 
 ### On Windows
 

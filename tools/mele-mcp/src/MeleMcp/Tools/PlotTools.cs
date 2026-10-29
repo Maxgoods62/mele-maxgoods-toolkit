@@ -49,7 +49,7 @@ public static class PlotTools
                  + "journal quests (title, goals, tasks, plot items, task evaluations) with their text written to the mod's GlobalTlk files, and "
                  + "the missing AutoLoad.ini [Packages] lines. A missing package given as a full path, or under the mod root from the "
                  + "DLC folder on (as mod_build says), is created. Every event and quest in the file replaces the package's, others are "
-                 + "kept; running it twice reports 'unchanged'. The format is in mele-toolkit's docs/yaml-reference.md, Plot files. Backs every file up first and refuses "
+                 + "kept; running it twice reports 'unchanged'. The format is in mele-maxgoods-toolkit's docs/yaml-reference.md, Plot files. Backs every file up first and refuses "
                  + "files inside the game install.")]
     public static PlotBuildResult PlotBuild(
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
