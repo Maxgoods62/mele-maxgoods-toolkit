@@ -57,6 +57,7 @@ Set-up and settings:
 - `mod_build out=` builds into another mod root, such as a temp folder, and changes nothing outside it apart from
   backups.
 - `.mcp.json.example`: an example entry that registers the server with an MCP client.
+- `package.sh` builds the release zip `dist/mele-mcp-v<version>-win-x64.zip`, with its license texts and no Oodle.
 
 MeleBridge 2, pipe protocol 1:
 

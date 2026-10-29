@@ -120,8 +120,8 @@ namespace MeleBridge::Editor
     };
 
     /// An NPC of our visible levels (levels.json npcs, docs/design/in-game-editor.md §12), for its section of the Lights tab: its name as the section
-    /// says it ("Dorn", from the YAML key), the pawn's tag, and the level it is built into. A shown light whose NPC's level is
-    /// not visible (Reyes's lights on another deck of the Normandy) gets a section of its NPC, Away; one whose NPC levels.json
+    /// says it ("Guard", from the YAML key), the pawn's tag, and the level it is built into. A shown light whose NPC's level is
+    /// not visible (the medic's lights on another deck of the Normandy) gets a section of its NPC, Away; one whose NPC levels.json
     /// no longer lists gets a section of its own, with no name and no level. Add light is offered in neither.
     struct NpcSection
     {
@@ -191,7 +191,7 @@ namespace MeleBridge::Editor
         /// A light the editor lists: its settings, for the panel. It only moves.
         bool SelectedLight = false;
         LightBlock SelectedLightBlock;
-        /// A light of one of our NPCs (docs/design/in-game-editor.md §12): the NPC's name ("Dorn"; empty when levels.json no longer lists it) and tag,
+        /// A light of one of our NPCs (docs/design/in-game-editor.md §12): the NPC's name ("Guard"; empty when levels.json no longer lists it) and tag,
         /// and the light's offset [forward, right, up] (X, Y, Z) from the NPC's reference pose. The tag is empty for any other
         /// selection. The reference pose itself (its own edit in this session, else levels.json's built pose), for the marker the
         /// overlay draws there, when levels.json lists the NPC.

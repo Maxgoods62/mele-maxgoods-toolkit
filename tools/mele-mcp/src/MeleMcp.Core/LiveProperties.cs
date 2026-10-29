@@ -4,7 +4,7 @@ using LegendaryExplorerCore.Packages;
 
 namespace MeleMcp.Core;
 
-/// <param name="Level">The object's package: its level for an actor, e.g. BIOA_CLD01.</param>
+/// <param name="Level">The object's package: its level for an actor, e.g. BIOA_MYM01.</param>
 /// <param name="Name">Its object name, e.g. BioPawn_4: the actor name game_actor_get takes.</param>
 public sealed record LiveValue(string Class, string Level, string Name, string Path, string Value);
 
@@ -12,7 +12,7 @@ public sealed record LiveValues(string Command, int Count, IReadOnlyList<LiveVal
 
 /// <summary>
 /// Live property values read with the engine's console command getall, whose answer the DebugLogger ASI writes to its log:
-/// one line per object, "appLogErrorf: 0) BioPawn BIOA_CLD01.TheWorld:PersistentLevel.BioPawn_5.bTickIsDisabled = False"; an array
+/// one line per object, "appLogErrorf: 0) BioPawn BIOA_MYM01.TheWorld:PersistentLevel.BioPawn_5.bTickIsDisabled = False"; an array
 /// ends its line at "=" and puts each element on a line of its own, "appLogErrorf: \t0: (...)". A wrong name logs "Unrecognized
 /// property" (or class). No reply comes through the interop pipe, so the log is read from where it stood before the command.
 /// </summary>

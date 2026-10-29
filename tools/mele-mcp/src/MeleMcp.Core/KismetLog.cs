@@ -5,7 +5,7 @@ using LegendaryExplorerCore.Packages;
 namespace MeleMcp.Core;
 
 /// <param name="Time">Seconds since the ASI started (game start), as logged; the first one when grouped.</param>
-/// <param name="Level">The op's package, e.g. BIOA_CLD01.</param>
+/// <param name="Level">The op's package, e.g. BIOA_MYM01.</param>
 /// <param name="Object">Its instanced full path in that package, e.g. TheWorld.PersistentLevel.Main_Sequence.SeqAct_Delay_0: what export_get takes.</param>
 /// <param name="Pin">The input link that had the impulse; none for ops activated natively.</param>
 /// <param name="Count">Activations: 1, or how many when grouped.</param>
@@ -16,7 +16,7 @@ public sealed record KismetLogResult(string Path, int Read, int Matches, IReadOn
 
 /// <summary>
 /// The Kismet Logger ASI's log (Binaries\Win64\Logs\KismetLogger.log): one line per sequence op activation, in order,
-/// "[0012.345] SeqAct_Delay BIOA_CLD01.TheWorld:PersistentLevel.Main_Sequence.SeqAct_Delay_0 Start"; rewritten at each game start.
+/// "[0012.345] SeqAct_Delay BIOA_MYM01.TheWorld:PersistentLevel.Main_Sequence.SeqAct_Delay_0 Start"; rewritten at each game start.
 /// </summary>
 public static partial class KismetLog
 {

@@ -17,7 +17,7 @@ internal static class LevelStreams
     private const string LevelPath = "TheWorld.PersistentLevel";
 
     /// <param name="Volume">The vanilla BioTriggerStream to copy, e.g. the cabin's on the Normandy.</param>
-    /// <param name="Levels">Files shown inside the volume, by name without extension, e.g. BIOA_NOR10_09_LAY, or its fork CLD00_NOR10_09_LAY.</param>
+    /// <param name="Levels">Files shown inside the volume, by name without extension, e.g. BIOA_NOR10_09_LAY, or its fork MYM00_NOR10_09_LAY.</param>
     internal sealed record Spec(string Package, string Volume, List<string> Levels, int Line);
 
     /// <param name="Yaw">Degrees: 0 faces +X, 90 faces +Y.</param>

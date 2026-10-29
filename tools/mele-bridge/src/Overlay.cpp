@@ -1304,7 +1304,7 @@ namespace MeleBridge::Editor
 
         bool SameNoCase(std::string const& a, std::string const& b) { return _stricmp(a.c_str(), b.c_str()) == 0; }
 
-        /// One NPC's section of the Lights tab (docs/design/in-game-editor.md §12): "Dorn (claude_npc_02)" with Add light, then its lights, each a row
+        /// One NPC's section of the Lights tab (docs/design/in-game-editor.md §12): "Guard (mymod_npc_02)" with Add light, then its lights, each a row
         /// that selects it. A light whose NPC's level is not visible has its NPC's section saying so, and one whose NPC levels.json
         /// no longer lists has a section under its NPC's tag; neither offers Add light.
         void DrawNpcSection(Snapshot const& s, NpcSection const& npc)

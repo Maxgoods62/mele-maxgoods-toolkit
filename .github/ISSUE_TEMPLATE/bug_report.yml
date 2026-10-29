@@ -1,0 +1,41 @@
+name: Bug report
+description: A mele-mcp tool, a YAML build, MeleBridge or lectool does something wrong.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you asked for, what you expected, and what you got (paste the tool's error text).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The tool and its arguments, or the YAML file (cut it down to what fails), and the game files it touches.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Toolkit version
+      description: The commit or release you built from, e.g. the output of `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: >-
+        Windows version, Steam or EA app, the MCP client, Windows or WSL, and for live tools
+        the other ASIs in `Game\ME1\Binaries\Win64\ASI`. The `le_status` output helps.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Logs
+      description: >-
+        For MeleBridge, attach `Logs\MeleBridge.log` from `<LE folder>\Game\ME1\Binaries\Win64` (it is rewritten at
+        each game start). For mele-mcp, the MCP client's server log if it has one.

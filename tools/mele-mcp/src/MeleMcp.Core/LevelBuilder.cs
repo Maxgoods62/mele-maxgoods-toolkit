@@ -114,7 +114,7 @@ public static class LevelBuilder
 
     /// <summary>
     /// What <see cref="ApplyLight"/> gives a light. <see cref="Kind"/> null: an NPC light, which leaves its shadows, channels and level
-    /// list to its template (Reyes's lights stay on the Dynamic channel), and its colour and falloff when its item leaves them out; a
+    /// list to its template (the medic's lights stay on the Dynamic channel), and its colour and falloff when its item leaves them out; a
     /// radius or brightness left out stays as the level has it. <see cref="Npc"/>: its NPC's pose, for the receipt.
     /// </summary>
     private sealed record LightSettings(string Tag, Vector3 Location, int Line, float? Radius, float? Brightness, bool Enabled = true, string? Kind = null,
@@ -1166,7 +1166,7 @@ public static class LevelBuilder
     /// GUIDs for a new copy, imported or cloned (lightmaps, shadow maps and a primitive's IrrelevantLights know a light by its
     /// LightGuid, so no two lights share one). A lights: entry (<see cref="LightSettings.Kind"/>) also gets the actor's bEnabled,
     /// its colour, falloff, no shadows, dynamic light, its kind's channels in full and no OtherLevelsToAffect (the template's level
-    /// list, which the filter left off ignores); an NPC light keeps its template's (Reyes's: Dynamic only), and gets the colour
+    /// list, which the filter left off ignores); an NPC light keeps its template's (the medic's: Dynamic only), and gets the colour
     /// (alpha kept) and falloff its item gives, else its template's again (<paramref name="templateLook"/>), and the actor's bEnabled
     /// when off (or when an earlier build switched it off). An NPC light's receipt names a move as an offset change, measured from
     /// the pose its NPC had before this build; a move of its NPC alone stays a location change.
@@ -1198,7 +1198,7 @@ public static class LevelBuilder
         var moved = Changed(changed, MoveOf(light, was), Put(props, CommonStructs.Vector3Prop(light.Location, "Location")));
         var dirty = Changed(changed, $"tag {props.GetProp<NameProperty>("Tag")?.Value.Instanced} → {light.Tag}", Put(props, new NameProperty(light.Tag, "Tag"))) | moved;
         // On or off: one receipt line for the actor's flag and the component's. An NPC light's actor has none of its own until it is off
-        // (Reyes's never had one): it gets one then, and keeps it.
+        // (the medic's never had one): it gets one then, and keeps it.
         var switched = (full || !light.Enabled || props.GetProp<BoolProperty>("bEnabled") is not null) && Put(props, new BoolProperty(light.Enabled, "bEnabled"));
         if (dirty || switched) actor.WriteProperties(props);
 
@@ -1330,7 +1330,7 @@ public static class LevelBuilder
         var originalProps = original.GetProperties();
         var c = component.GetProperties();
         var dirty = TemplateLightFields.Aggregate(false, (any, name) => Take(c, originalProps, name) | any);
-        // The level list only when the copy has none (a lights: entry's clears it): an NPC light's own list, as Reyes's, stays.
+        // The level list only when the copy has none (a lights: entry's clears it): an NPC light's own list, as the medic's, stays.
         if (c.GetProp<ArrayPropertyBase>("OtherLevelsToAffect") is null && originalProps.GetProp<ArrayPropertyBase>("OtherLevelsToAffect") is { } levels)
         {
             c.AddOrReplaceProp(levels);

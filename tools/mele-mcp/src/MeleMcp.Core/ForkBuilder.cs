@@ -87,7 +87,7 @@ public static class ForkBuilder
     internal sealed record PreparedFork(string File, string Fork, string ForkPath, string Source, long SourceSize, string SourceMd5, byte[] Bytes, string Md5,
         IReadOnlyList<ForkedActor> Actors, IReadOnlyList<string> Warnings, IReadOnlyList<string> Refusals, IReadOnlyList<(string Language, string Source)> Localized);
 
-    /// <summary>The fork of a file in a map: BIOA_CLD01 + BIOA_FRE31_00_LAY → CLD01_FRE31_00_LAY.</summary>
+    /// <summary>The fork of a file in a map: BIOA_MYM01 + BIOA_FRE31_00_LAY → MYM01_FRE31_00_LAY.</summary>
     public static string ForkName(string map, string file) => $"{Bare(map)}_{Bare(file)}";
 
     /// <summary>

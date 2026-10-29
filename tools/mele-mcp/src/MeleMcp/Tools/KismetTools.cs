@@ -92,7 +92,7 @@ public static class KismetTools
                  + "built pose, their lights' offsets) and its character lights (each copy's name and source file) go to MeleBridge's "
                  + "levels.json (not with 'package'; MELE_LEVELS_JSON moves it). Creates a missing level (a full path, or one under "
                  + "the mod root from the DLC folder on, as mod_build says) and the Sideloader ConfigDelta that loads it. Only changed "
-                 + "values are written; running it twice changes nothing. See the tool README for the format. Backs every file up "
+                 + "values are written; running it twice changes nothing. The format is in mele-toolkit's docs/yaml-reference.md, Level files. Backs every file up "
                  + "first (not forks: each is built again from the vanilla file) and refuses files inside the game install.")]
     public static LevelBuildResult LevelBuild(
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,

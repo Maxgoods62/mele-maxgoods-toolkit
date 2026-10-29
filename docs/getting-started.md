@@ -54,6 +54,9 @@ project. Its own nested submodules are not needed.
 
 ## Build mele-mcp
 
+When a release exists, its `mele-mcp-v<version>-win-x64.zip` holds a built server that needs only the .NET 8 runtime.
+Unzip it into a folder such as `%LOCALAPPDATA%\mele-mcp\server` and go on to [Register the server](#register-the-server).
+
 ### On Windows
 
 In PowerShell:

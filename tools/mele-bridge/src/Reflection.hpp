@@ -16,7 +16,7 @@ namespace MeleBridge
     std::wstring NameOf(UObject const* object);
     bool ContainsNoCase(std::wstring_view text, std::wstring_view part);
 
-    /// The persistent level's package, e.g. BIOA_CLD01.
+    /// The persistent level's package, e.g. BIOA_MYM01.
     std::wstring MapName();
 
     /// An object by its full path (Outer.Outer.Name, as find returns it), case-insensitive. Throws BridgeError.

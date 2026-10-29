@@ -41,6 +41,8 @@ python3 -I scripts/mcp_call.py le_status '{}'       # call one tool on a fresh s
 - Settings (`build.env.example` explains each): `MELE_DOTNET`, `MELE_LE_DIR`, `MELE_OUT`, `MELE_DLL`. The two Python
   scripts pass every other `MELE_*` variable on to the server, such as `MELE_OWN_DLC`, `MELE_LEVELS_JSON` and
   `MELE_BACKUP_DIR`.
+- `./package.sh`, at the repo root, builds the release zip and `SHA256SUMS` in `dist/`; it reads `MELE_DOTNET` like
+  `deploy.sh`, and [THIRD_PARTY.md](THIRD_PARTY.md#the-release-zip) says what the zip holds.
 
 ### MeleBridge
 

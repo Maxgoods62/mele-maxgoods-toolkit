@@ -68,7 +68,7 @@ internal static class YamlEdits
     /// <summary>An NPC's light item: the NPC's name (its npcs key) and tag, and the item ({tag, offset, ...}).</summary>
     internal sealed record NpcLight(string Npc, string? NpcTag, YamlMappingNode Item)
     {
-        /// <summary>Where it is: npcs.reyes.lights.</summary>
+        /// <summary>Where it is: npcs.medic.lights.</summary>
         public string Where => $"npcs.{Npc}.lights";
     }
 

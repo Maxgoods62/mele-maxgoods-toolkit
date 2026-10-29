@@ -11,7 +11,7 @@ namespace MeleMcp.Tools;
 public static class LiveTools
 {
     private const string GameParam = "Game: LE1 (the bridge is built for LE1 only).";
-    private const string ObjectParam = "Object path as live_find returns it, e.g. BIOA_CLD01.TheWorld.PersistentLevel.BioPawn_3.";
+    private const string ObjectParam = "Object path as live_find returns it, e.g. BIOA_MYM01.TheWorld.PersistentLevel.BioPawn_3.";
     private const string TimeoutParam = "Seconds to wait for the game thread.";
 
     [McpServerTool(Name = "live_find", ReadOnly = true),
@@ -20,7 +20,7 @@ public static class LiveTools
     public static JsonObject LiveFind(
         [Description("Class name, e.g. BioPawn, SeqAct_Interp, BioGlobalVariableTable.")] string? className = null,
         [Description("Keep objects whose name contains this, e.g. BioPawn_3.")] string? name = null,
-        [Description("Keep objects whose path contains this, e.g. BIOA_CLD01 or BIONPC_Dorn.")] string? path = null,
+        [Description("Keep objects whose path contains this, e.g. BIOA_MYM01 or BIONPC_MyGuard.")] string? path = null,
         [Description("Include class default objects.")] bool defaults = false,
         [Description("Maximum objects returned (total still counts all).")] int limit = 100,
         [Description(TimeoutParam)] double timeoutSeconds = 5,
@@ -121,7 +121,7 @@ public static class LiveTools
     public static LivePlacement LivePlace(
         [Description("Actor to move (object path as live_find returns it). Give this or template.")] string? objectPath = null,
         [Description("Actor to copy: a new one is spawned from it. Give this or objectPath.")] string? template = null,
-        [Description("Tag for the actor (required to spawn): live_save finds its YAML entry by it, e.g. claude_prop_crate.")] string? tag = null,
+        [Description("Tag for the actor (required to spawn): live_save finds its YAML entry by it, e.g. mymod_prop_crate.")] string? tag = null,
         [Description("front (default: 'distance' in front of Shepard, facing her) or shepard (where she stands, facing her way). Ignored with x, y, z.")] string at = "front",
         [Description("How far in front of Shepard, in Unreal units (100 ≈ 1 m).")] float distance = 100,
         [Description("X; give x, y and z together to place it at coordinates.")] float? x = null,

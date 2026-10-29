@@ -41,7 +41,7 @@ public static class LivePlacer
         var isPawn = chain.Contains("Pawn");
         if (template is not null && isPawn)
         {
-            // Seen 2026-10-26: Spawn with Dorn's BioPawn as the template faulted inside the engine and the game closed.
+            // Seen 2026-10-26: Spawn with a mod NPC's BioPawn as the template faulted inside the engine and the game closed.
             throw new ArgumentException("Spawning a copy of a pawn crashes LE1. Add the NPC to the level YAML instead (npcs, with a template), build and install it, then move it here with live_place objectPath.");
         }
 

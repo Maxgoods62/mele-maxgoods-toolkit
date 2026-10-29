@@ -82,7 +82,7 @@ namespace MeleBridge::Editor
         constexpr ULONGLONG EffectRunMs = 1500;
         /// After a step of a baked or character-only level light, the light environments in its reach are reset and the paused
         /// world runs this long (docs/design/in-game-editor.md §12, spike S2): an environment updates only in Tick, fully at most once a second
-        /// (MinTimeBetweenFullUpdates 1.0 on Dorn's), and blends over 0.3 s.
+        /// (MinTimeBetweenFullUpdates 1.0 on a mod NPC's), and blends over 0.3 s.
         constexpr ULONGLONG LightRunMs = 1500;
         /// An environment is reset when its owner stands within the light's radius plus this (a pawn's own size).
         constexpr float EnvironmentReach = 100;
@@ -145,7 +145,7 @@ namespace MeleBridge::Editor
         /// The pose check: an NPC's pawn with no edit stands within this many units and degrees of its built pose, or its lights
         /// are not edited (their offsets are measured from that pose).
         constexpr float MaxNpcDrift = 5, MaxNpcTurn = 2;
-        /// Add light's light: Reyes's face light's offset [forward, right, up] (60, 0, 80), radius and brightness.
+        /// Add light's light: offset [forward, right, up] (60, 0, 80), radius and brightness of a mod NPC's face light.
         constexpr float NpcLightForward = 60, NpcLightUp = 80, NpcLightRadius = 100, NpcLightBrightness = 1.2f;
 
         thread_local bool InEditor = false;
@@ -384,7 +384,7 @@ namespace MeleBridge::Editor
             FVector Offset{};
         };
 
-        /// An NPC of one of our levels as the last build placed it (levels.json npcs): the level YAML's key ("dorn"), the pawn's
+        /// An NPC of one of our levels as the last build placed it (levels.json npcs): the level YAML's key ("guard"), the pawn's
         /// tag as the file has it, its built Location (the collision centre) and yaw (65536 = 360°), its lights, possibly none,
         /// and the level it is built into, as levels.json names it. Held by index or looked up again, never by pointer across a
         /// tick: CheckLevels reads the file again.
@@ -731,7 +731,7 @@ namespace MeleBridge::Editor
         }
 
         /// The fork of a vanilla level file in a map (docs/design/in-game-editor.md §11): a renamed copy the map streams instead, named
-        /// <map minus BIOA_>_<file minus BIOA_> (BIOA_CLD01 and BIOA_FRE31_00_LAY: CLD01_FRE31_00_LAY), as level_build and
+        /// <map minus BIOA_>_<file minus BIOA_> (BIOA_MYM01 and BIOA_FRE31_00_LAY: MYM01_FRE31_00_LAY), as level_build and
         /// editor_import name it. Nothing stores the pair: the rule is the link.
         std::string ForkName(std::string const& map, std::string const& file) { return WithoutBioa(map) + "_" + WithoutBioa(file); }
 
@@ -1601,7 +1601,7 @@ namespace MeleBridge::Editor
         // ! NPC lights
         // ========================================
 
-        /// An NPC's name as the Lights tab and the status line say it: its YAML key with a capital ("dorn": "Dorn").
+        /// An NPC's name as the Lights tab and the status line say it: its YAML key with a capital ("guard": "Guard").
         std::string Title(std::string name)
         {
             if (!name.empty()) name[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(name[0])));
@@ -1954,7 +1954,7 @@ namespace MeleBridge::Editor
             return step.Also;
         }
 
-        /// "move ed_crate_x_1", "spawn ed_crate_x_1 and ed_light_x_2", "turn claude_npc_02 with its 2 lights": what the toolbar's
+        /// "move ed_crate_x_1", "spawn ed_crate_x_1 and ed_light_x_2", "turn mymod_npc_02 with its 2 lights": what the toolbar's
         /// Undo and Redo name. A step's light only when the step writes it (AlsoOf).
         std::string Label(Step const& step)
         {

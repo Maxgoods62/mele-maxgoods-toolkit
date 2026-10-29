@@ -37,7 +37,7 @@ public static partial class LivePlot
     private static partial Regex SetAnswer();
 
     /// <param name="kind">bool, int or float.</param>
-    /// <param name="nameContains">Finds ids by name in LEX's plot databases, e.g. "Reyes" or "Paragon".</param>
+    /// <param name="nameContains">Finds ids by name in LEX's plot databases, e.g. "Wrex" or "Paragon".</param>
     /// <param name="value">Sets this value after reading the current one (one id only): True/False or 1/0 for a bool, a number otherwise.</param>
     public static PlotValues Run(MEGame game, string kind, IReadOnlyList<int> ids, string? nameContains, string? value, double timeoutSeconds)
     {

@@ -47,7 +47,7 @@ public static class EditorImport
         "Lights placed with the in-game editor (F8, Save, then editor_import). kind props: lights only props (the Gameplay_4\n"
         + "channel); room: walls, vanilla meshes, pawns and props. A light is switched off (enabled: false), never removed.";
 
-    /// <summary>Above a vanilla section the import adds; {0} names the fork of the first entry's file (", here CLD01_FRE31_00_LAY"), or nothing.</summary>
+    /// <summary>Above a vanilla section the import adds; {0} names the fork of the first entry's file (", here MYM01_FRE31_00_LAY"), or nothing.</summary>
     private const string VanillaComment =
         "Vanilla actors and lights the map's streamed files change (shipped in a fork), and lights of the map's characterLights\n"
         + "copies (written into the map). A light is <file>.<collection>.<light> (a copy's: keyed by its source file): location,\n"

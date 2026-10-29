@@ -9,12 +9,12 @@ namespace MeleMcp.Tools;
 public static class ModTools
 {
     [McpServerTool(Name = "mod_build", Destructive = true),
-     Description("Builds every YAML file in a mod's source folder: plot files (with transitions, consequences or quests) through plot_build, "
-                 + "level files (with npcs, usables, streaming, characterLights, startPoints or squad) through level_build, then conversation files (with 'conversation') through conv_build, then again "
-                 + "the level files whose NPCs named a conversation the level did not have yet. Stops at the first error, naming the file; files "
+     Description("Builds the YAML files at the top of a mod's source folder (not its subfolders): plot files (with transitions, consequences or quests) through plot_build, "
+                 + "then level files (with npcs, usables, props, streaming, characterLights, startPoints or squad) through level_build, then conversation files (with 'conversation') through conv_build, then again "
+                 + "the level files whose NPCs named a conversation the level did not have yet. A YAML file with none of these keys is skipped and listed. Stops at the first error, naming the file; files "
                  + "built before it stay saved. A file's 'package' is a full path, or a path under the mod root from the DLC folder on "
                  + "(DLC_MOD_MyMod\\CookedPCConsole\\BIOA_MyMap.pcc): the YAML's folder when it has that DLC folder, else the mod of M3's library "
-                 + "that has it; a missing level or plot package is created from either. A file may start with 'requires: mele-mcp >= X.Y.Z' "
+                 + "that has it; a missing level or plot package is created from either. A file may have a top-level 'requires: mele-mcp >= X.Y.Z' "
                  + "(the oldest server that builds it): every file is checked first, and an older server builds nothing.")]
     public static ModBuildResult ModBuild(
         [Description("Folder with the mod's YAML files, e.g. the repo's mods/<name>.")] string folder,

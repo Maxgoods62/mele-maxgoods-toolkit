@@ -56,13 +56,28 @@ builds and are referenced with `PrivateAssets="All"`, so neither lands in the ou
 
 LEC copies three prebuilt Windows DLLs from `LegendaryExplorerCore/Libraries/Windows` into every build of mele-mcp
 and lectool. They are the only native DLLs in the output. The `MeleMcp.exe` and `lectool.exe` launchers are the .NET
-SDK's app host.
+SDK's app host, MIT like the Microsoft .NET packages.
 
 | DLL | What it is | License |
 |---|---|---|
-| `CompressionWrappers.dll` | Native decompression for packages, built from the MassEffectModder library (`Licenses/COPYING_MASSEFFECTMODDER.txt` in the Legendary Explorer repo) | GPL-3.0, per that notice |
-| `TexConverter.dll` | Texture format conversion, called by LEC's `Textures/TexConverter.cs` | license not stated |
-| `ISACTTools.dll` | An ISACT (LE1 audio) helper. LEC's own code does not call it; lectool's `ogg` command calls its `CreateIPSOgg` export. | license not stated |
+| `CompressionWrappers.dll` | zlib, LZO, LZX and LZMA for packages, and the DXT block codecs LEC decodes textures with. Built from the MassEffectModder library (`Licenses/COPYING_MASSEFFECTMODDER.txt` in the Legendary Explorer repo). | GPL-3.0, per that notice. It includes zlib, MiniZip, fast_zlib (BSD 3-clause) and AMD Compressonator (MIT) code. |
+| `TexConverter.dll` | Texture format conversion, called by LEC's `Textures/TexConverter.cs`. Built from the `TexConverter` folder of the Legendary Explorer repo, whose project writes it to `Libraries/Windows`, with Microsoft's DirectXTex. | GPL-3.0 (Legendary Explorer's `LICENSE`); DirectXTex is MIT |
+| `ISACTTools.dll` | An ISACT (LE1 audio) helper. Neither LEC nor mele-mcp calls it; lectool's `ogg` command calls its `CreateIPSOgg` export. | license not stated, and the Legendary Explorer repo has no source for it |
+
+## The release zip
+
+`package.sh` writes `dist/mele-mcp-v<version>-win-x64.zip` and `dist/SHA256SUMS`. The zip holds the framework-dependent
+`win-x64` publish of mele-mcp without debug symbols, `LICENSE`, this page, a `README.txt` and a `licenses` folder:
+
+- `MIT.txt` and `Apache-2.0.txt`, each listing its packages with their copyright lines, and the license files and
+  third-party notices the packages ship;
+- the Legendary Explorer repo's `Licenses/` notices, except Peregrine66's, whose code is only in the Legendary Explorer
+  app;
+- MassEffectModder's Compressonator notice, kept in `packaging/licenses`.
+
+It ships `CompressionWrappers.dll` and `TexConverter.dll`, and leaves out `ISACTTools.dll`, Oodle and lectool. The script
+builds from scratch in `dist/build`, and fails when the publish holds an `oo2core` file, a native DLL that is in neither
+its `SHIP_NATIVE` nor its `LEAVE_OUT` list, or a file with the path of the repo or of your home folder in it.
 
 ## Oodle
 

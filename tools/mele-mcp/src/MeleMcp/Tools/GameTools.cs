@@ -29,7 +29,7 @@ public static class GameTools
     public static LiveValues GameGet(
         [Description("Class name, e.g. BioPawn.")] string className,
         [Description("Property name, exact, e.g. bTickIsDisabled.")] string property,
-        [Description("Keep objects whose path contains this, e.g. BIOA_CLD01 or BioPawn_4.")] string? nameContains = null,
+        [Description("Keep objects whose path contains this, e.g. BIOA_MYM01 or BioPawn_4.")] string? nameContains = null,
         [Description("Seconds to wait for the answer.")] double timeoutSeconds = 3,
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => LiveProperties.Get(PackageTools.ParseGame(game), className, property, nameContains, timeoutSeconds));
@@ -53,7 +53,7 @@ public static class GameTools
                  + "LogInternal lines, warnings, and script errors with their arguments and locals. Filters: from the last load of a map, "
                  + "errors only, text. Something works in vanilla and not in ours? Play both in one session and compare their entries.")]
     public static DebugLogResult GameLog(
-        [Description("Start at the last load of this map (persistent level file name without .pcc, e.g. BIOA_CLD01).")] string? sinceMap = null,
+        [Description("Start at the last load of this map (persistent level file name without .pcc, e.g. BIOA_MYM01).")] string? sinceMap = null,
         [Description("Only entries containing this text (case-insensitive), e.g. stasis, Hench, Main_Sequence.")] string? contains = null,
         [Description("Only errors, warnings and 'Accessed None'.")] bool errorsOnly = false,
         [Description("Maximum entries returned: the last ones that match.")] int limit = 100,
@@ -65,7 +65,7 @@ public static class GameTools
                  + "sequence op activated, in order, with its level, instanced path (for export_get) and input pin. Did my Kismet run? Do the "
                  + "thing in game, then read the last seconds filtered by your level; grouped shows each op once with its count.")]
     public static KismetLogResult GameKismetLog(
-        [Description("Only activations whose class, path or pin contains this (case-insensitive), e.g. BIOA_CLD01, Main_Sequence, RemoteEvent.")] string? contains = null,
+        [Description("Only activations whose class, path or pin contains this (case-insensitive), e.g. BIOA_MYM01, Main_Sequence, RemoteEvent.")] string? contains = null,
         [Description("Only the last seconds of the log, e.g. 30 right after doing something in game.")] double? lastSeconds = null,
         [Description("One entry per op and pin, in order of first activation, with its count.")] bool grouped = false,
         [Description("Maximum entries returned: the last ones that match.")] int limit = 100,
@@ -86,12 +86,12 @@ public static class GameTools
                  + "(stops on errors) and mod_install with boot (or only boots, with no mod), waits for the main menu in the DebugLogger "
                  + "log, loads a developer save slot (BioLoadGame <n> loads Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's "
                  + "BioSaveGame <n> writes where Shepard stands; career saves can't be loaded this way), runs console "
-                 + "commands (e.g. 'at BIOA_CLD01 start_cld01'), waits for the map and takes a screenshot to Read. Takes 1–3 minutes.")]
+                 + "commands (e.g. 'at BIOA_MYM01 start_mym01'), waits for the map and takes a screenshot to Read. Takes 1 to 3 minutes.")]
     public static GameCycleResult GameCycle(
         [Description("Mod to check and install first (as mod_install takes it, e.g. 'My Mod'); omit to only restart.")] string? mod = null,
         [Description("Developer save slot to load from the menu: n for BioSaveGame<n>.sav, made once in game with game_console 'BioSaveGame <n>'.")] int? loadSlot = null,
         [Description("Console commands to run after the load, in order.")] string[]? commands = null,
-        [Description("Map to wait for (persistent level file name without .pcc, e.g. BIOA_CLD01); default the first one the save loads.")] string? waitForMap = null,
+        [Description("Map to wait for (persistent level file name without .pcc, e.g. BIOA_MYM01); default the first one the save loads.")] string? waitForMap = null,
         [Description("Run mod_check before installing and stop on errors.")] bool check = true,
         [Description("Languages mod_check requires text for, comma-separated.")] string languages = "INT,FR",
         [Description("Take a screenshot at the end.")] bool screenshot = true,
@@ -127,7 +127,7 @@ public static class GameTools
     public static LiveActors GameActors(
         [Description("Substring of the level name, e.g. BIONPC.")] string? levelContains = null,
         [Description("Substring of the actor object name, e.g. BioPawn.")] string? nameContains = null,
-        [Description("Substring of the actor tag, e.g. claude.")] string? tagContains = null,
+        [Description("Substring of the actor tag, e.g. mymod.")] string? tagContains = null,
         [Description("Maximum actors returned.")] int limit = 200,
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => GameLink.Actors(PackageTools.ParseGame(game), levelContains, nameContains, tagContains, limit));

@@ -30,7 +30,7 @@ public static class GameLink
         var replies = false;
         string? problem = null;
         if (!running) problem = $"{game} is not running.";
-        else if (!pipe) problem = "Interop pipe missing: install the LEX Interop ASI (M3 > ASI Manager), then restart the game.";
+        else if (!pipe) problem = "Interop pipe missing: install the LEX Interop ASI from Legendary Explorer (Live Level Editor, requirements), then restart the game.";
         else
         {
             try
