@@ -42,6 +42,9 @@ Build commands (the Galaxy Map Normandy build runs the first five):
 | `wwise <pcc> <bankUIndex> [eventId]...` | Prints a Wwise bank's embedded files and objects, and follows each event ID given to its sounds. With `WEMDIR` (a folder) and `WEMIDS` (comma-separated IDs) set, it also writes those embedded files there as `.wem`. The galaxy map build takes its travel sound from LE3 this way, with `LECGAME=LE3`. |
 | `2dapart <src.pcc> <recipe.yaml> <out.pcc>` | Writes a package for ME3Tweaks Mod Manager's Bio2DA merge (`.m3da`): per table of the recipe, a `<Table>_part_1` export of the table's class under `Package` exports named like the table's parents in `src.pcc`, with the same columns and only the recipe's rows. Prints the tables as read back from `out.pcc`. The recipe format is below. |
 | `2damerge [--add-only] <m3da> <modDir> <base.pcc> <out.pcc>` | Runs M3's Bio2DA merge of one `.m3da` manifest the way ME3TweaksCore's `Bio2DAMerge` does (Newtonsoft reads the manifest, the same table lookup, then LEC's `Bio2DA.MergeInto`) on a copy of `base.pcc`, saved as `out.pcc`; the merge package is found in `modDir` by file name. Then it reads `out.pcc` back and checks each merged table once: the columns, every base row no part names unchanged, every part row there with its cells (the last part to name a row decides it). It lists the base rows a part replaces; with `--add-only`, replacing a row with other cells is an error. It prints the merged rows and exits 1 on an error or when nothing merged. M3 first resets the tables to its own vanilla copies, so pass a vanilla `base.pcc` when you have one, such as the `Engine.pcc` of M3's game backup. |
+| `actortype <recipe.yaml> <template.pcc> <look.pcc> <out.pcc>` | Writes a new package holding one actor type at its top level, not forced (a spawned pawn's Tag is its actor type's object name), from two existing ones: plain values and imports of the template's actor type (`keep`), and objects of the look's actor type (`take`), each copied with what it references. A subobject of the look's actor type goes under the new one; other exports keep their paths, unless their tree is listed in `moveRoots`: those move under a Package export `moveUnder`, not forced, so they share no path with the look package's own copies. `set` gives plain values, typed by the class. An `ObjectReferencer` lists the actor type. No shader cache is copied; `pkgcheck` says whether the game's `RefShaderCache` covers the materials. Prints the top-level exports and the actor type's properties. The recipe format is below. |
+| `pkgcheck <pcc> [--like <ref.pcc>]... [--allow-import <path>]... [--forbid-root <name>]...` | Checks a built package. Errors: anything LEC's reference check reports, two exports with one path, a material (decals included) whose shaders are neither in the package nor in the game's `RefShaderCache`, a Class import that does not resolve and is not a native class of the package it names, and any other import that LEC cannot resolve to an object of the same class and class package. With `--like`, every import that is not a Package or a Class must also have its path and class in one of the reference packages (as an import or an export). `--allow-import` exempts one path and reports it; `--forbid-root` fails on an import or a top-level export with that root. Exits 1 on an error. |
+| `pkglist <pcc>` | One tab-separated line per export (UIndex, class, path, `F` when forced, object flags, data size, a texture's `TextureFileCacheName`) and per import. |
 
 A `2dapart` recipe:
 
@@ -59,6 +62,31 @@ have. A row that `src.pcc` already has is reported, since M3 replaces it with th
 cell indexes (every cell filled, as in `PlotManagerGameData`), an empty cell is an error: the cells after it would
 shift. A row given twice (`InSquadBonus` and `insquadbonus`, `10` and `010`), a duplicate key or an unknown key is an
 error too.
+
+An `actortype` recipe:
+
+```yaml
+name: hench_bonus                         # the new actor type's object name
+template:
+  actorType: hench_jenkins                # its full path in template.pcc
+  keep: [m_eRank, AIController]           # properties it sets: plain values, or objects that are imports
+look:
+  actorType: BIOA_PR1_C.BAT.prc1_lieutenant
+  take:                                   # object properties, each with the full path it must name in look.pcc
+    m_oAppearance: BIOG_BAT_Appr_L.Character.BAT_Character_Appr
+  moveUnder: Charn                        # optional, with moveRoots: the Package export the trees move under
+  moveRoots: [BIOG_BAT_Appr_L]            # top-level trees of the copy
+set: { ActorGameNameStrRef: 176039 }      # int, string ref, float, bool, name, string or enum values
+```
+
+Properties the recipe does not name are left out. The template's and the look's actor types must have the same class.
+Paths are as in the files on disk. (Porting from a `BIOG_` or `GUI_` file moves its top-level exports under a package
+named after the file in memory, so the copies may come out under that package.) Each error is one line, and no package
+is written: a property named twice, a `keep` the template does not set or that names an export, an array or struct
+`keep`, a `take` that names another path than the recipe's, a `set` the class does not have or a value of the wrong
+type (an enum value must be one of its enum's names), a `moveUnder` that is the actor type's name, a `moveRoots` tree
+or a top-level export of the copy, a `moveRoots` tree with an import under it, the look's own actor type pulled in by a
+reference, an output path that is also an input.
 
 Research dumps: `2da`, `snd`, `swf`, `reflect`, `meshinfo`, `texpng`, `coalesced`, `bankdump`, `eventflags`,
 `preprop`, `dumpwave`. `Program.cs` shows their arguments. `ogg` (ISACT's own encoder, through `ISACTTools.dll`)

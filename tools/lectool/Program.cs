@@ -1,5 +1,6 @@
 using LegendaryExplorerCore;
 using LegendaryExplorerCore.Packages;
+using LegendaryExplorerCore.Packages.CloningImportingAndRelinking;
 using LegendaryExplorerCore.Unreal.Classes;
 using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Unreal.BinaryConverters;
@@ -216,6 +217,222 @@ if (cmd == "2da") {
     PrintRows(after, order);
   }
   if (errors.Count > 0) Environment.Exit(1);
+} else if (cmd == "actortype") {
+  // actortype <recipe.yaml> <template.pcc> <look.pcc> <out.pcc>: a new package holding one actor type at its top level,
+  // not forced (a spawned pawn's Tag is its actor type's object name). It gets the `keep` properties of the template's
+  // actor type (plain values and imports) and the `take` properties of the look's actor type, each object they name
+  // copied with what it references: a subobject of the look's actor type goes under the new one, another export to its
+  // own path, an import stays an import. The `moveRoots` trees then move under a Package export `moveUnder`, not forced,
+  // so they share no path with the look package's own copies; an import under them is an error, as it could no longer
+  // be found. `set` gives plain values, typed by the class. An ObjectReferencer lists the actor type, as in LE1CP's
+  // rebuilt henchman packages. No shader cache is copied: pkgcheck tells whether the game's RefShaderCache covers it.
+  var (templatePath, lookPath, outPath) = (args[2], args[3], args[4]);
+  if (new[] { args[1], templatePath, lookPath }.Any(p => Path.GetFullPath(p).Equals(Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase))) {
+    Console.WriteLine($"ERROR {outPath}: the output is also an input"); Environment.Exit(1);
+  }
+  if (File.Exists(outPath)) File.Delete(outPath);
+  ActorTypeRecipe recipe;
+  try { recipe = new YamlDotNet.Serialization.DeserializerBuilder().WithDuplicateKeyChecking().Build().Deserialize<ActorTypeRecipe>(File.ReadAllText(args[1])); }
+  catch (YamlDotNet.Core.YamlException ex) { Console.WriteLine($"ERROR {Path.GetFileName(args[1])}: {ex.Message}"); Environment.Exit(1); return; }
+  var inv = System.Globalization.CultureInfo.InvariantCulture;
+  var errors = new List<string>();
+  using var cache = new PackageCache();
+  using var template = MEPackageHandler.OpenMEPackage(templatePath, forceLoadFromDisk: true);
+  using var look = MEPackageHandler.OpenMEPackage(lookPath, forceLoadFromDisk: true);
+  var tType = recipe?.template?.actorType == null ? null : template.FindExport(recipe.template.actorType);
+  var lType = recipe?.look?.actorType == null ? null : look.FindExport(recipe.look.actorType);
+  if (recipe?.name == null) errors.Add("the recipe has no name");
+  if (tType == null) errors.Add($"template.actorType {recipe?.template?.actorType}: not an export of {Path.GetFileName(templatePath)}");
+  if (lType == null) errors.Add($"look.actorType {recipe?.look?.actorType}: not an export of {Path.GetFileName(lookPath)}");
+  if (tType != null && lType != null && tType.ClassName != lType.ClassName) errors.Add($"the template's actor type is a {tType.ClassName}, the look's a {lType.ClassName}");
+  var keyUse = (recipe?.template?.keep ?? new()).Concat(recipe?.look?.take?.Keys ?? Enumerable.Empty<string>()).Concat(recipe?.set?.Keys ?? Enumerable.Empty<string>());
+  foreach (var dup in keyUse.GroupBy(k => k, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1)) errors.Add($"{dup.Key} is listed more than once in keep, take and set");
+  var under = recipe?.look?.moveUnder;
+  if (under != null && (under.Equals(recipe.name, StringComparison.OrdinalIgnoreCase) || (recipe.look.moveRoots ?? new()).Contains(under, StringComparer.OrdinalIgnoreCase)))
+    errors.Add($"look.moveUnder {under}: also the actor type's name or a moveRoots tree");
+  // Every take is checked against the look as it is on disk: porting from a BIOG_ or GUI_ file re-parents the look's
+  // top-level exports in memory (LEC's PrepareGlobalFileForPorting), so a later take would see another path.
+  var takes = new List<(string name, ObjectProperty prop, IEntry entry)>();
+  if (lType != null) {
+    var lProps = lType.GetProperties();
+    foreach (var (name, expected) in recipe.look.take ?? new()) {
+      if (lProps.FirstOrDefault(p => p.Name.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase)) is not ObjectProperty op) { errors.Add($"take {name}: not an object property that {lType.InstancedFullPath} sets"); continue; }
+      var e = look.GetEntry(op.Value);
+      if (e == null) errors.Add($"take {name}: None in {lType.InstancedFullPath}");
+      else if (!e.InstancedFullPath.Equals(expected, StringComparison.OrdinalIgnoreCase)) errors.Add($"take {name}: names {e.InstancedFullPath}, the recipe expects {expected}");
+      else takes.Add((name, op, e));
+    }
+  }
+  if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
+  var lTypeUIndex = lType.UIndex;
+  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  var pcc = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
+  ExportEntry type = null;
+  try {
+    var rop = new RelinkerOptionsPackage { Cache = cache };
+    type = pcc.CreateExport(NameReference.FromInstancedString(recipe.name), tType.ClassName, null, indexed: false, cache: cache);
+    type.ObjectFlags = tType.ObjectFlags;
+    type.ExportFlags = 0;
+    var props = new PropertyCollection();
+    var tProps = tType.GetProperties();
+    var keep = new HashSet<string>(recipe.template.keep ?? new(), StringComparer.OrdinalIgnoreCase);
+    foreach (var name in keep.Where(k => !tProps.Any(p => p.Name.Instanced.Equals(k, StringComparison.OrdinalIgnoreCase)))) errors.Add($"keep {name}: {tType.InstancedFullPath} does not set it");
+    foreach (var p in tProps.Where(p => keep.Contains(p.Name.Instanced))) {
+      if (p is ObjectProperty op) {
+        var e = template.GetEntry(op.Value);
+        if (e is ExportEntry) { errors.Add($"keep {p.Name}: names the export {e.InstancedFullPath}; keep copies only plain values and imports"); continue; }
+        props.Add(e == null ? new ObjectProperty(0, p.Name) : new ObjectProperty(EntryImporter.GetOrAddCrossImportOrPackage(e.InstancedFullPath, template, pcc, rop), p.Name));
+      } else if (p is ArrayPropertyBase or StructProperty or DelegateProperty) errors.Add($"keep {p.Name}: a {p.PropType} is not supported");
+      else props.Add(p);
+    }
+    foreach (var (name, op, e) in takes) {
+      IEntry ported;
+      if (e is ImportEntry) ported = EntryImporter.GetOrAddCrossImportOrPackage(e.InstancedFullPath, look, pcc, rop);
+      else {
+        var parent = e.Parent?.UIndex == lTypeUIndex ? type : EntryExporter.PortParents(e, pcc, cache: cache);
+        var report = EntryImporter.ImportAndRelinkEntries(EntryImporter.PortingOption.CloneAllDependencies, (ExportEntry)e, pcc, parent, true, new RelinkerOptionsPackage { Cache = cache }, out ported);
+        foreach (var r in report) errors.Add($"take {name}: relink: {r.Message}");
+      }
+      props.AddOrReplaceProp(new ObjectProperty(ported, op.Name));
+    }
+    foreach (var (name, value) in recipe.set ?? new()) {
+      var info = GlobalUnrealObjectInfo.GetPropertyInfo(MEGame.LE1, name, tType.ClassName);
+      if (info == null) { errors.Add($"set {name}: {tType.ClassName} has no such property"); continue; }
+      Property p = info.Type switch {
+        PropertyType.IntProperty => int.TryParse(value, System.Globalization.NumberStyles.Integer, inv, out var i) ? new IntProperty(i, name) : null,
+        PropertyType.StringRefProperty => int.TryParse(value, System.Globalization.NumberStyles.Integer, inv, out var s) ? new StringRefProperty(s, name) : null,
+        PropertyType.FloatProperty => float.TryParse(value, System.Globalization.NumberStyles.Float, inv, out var f) ? new FloatProperty(f, name) : null,
+        PropertyType.BoolProperty => bool.TryParse(value, out var b) ? new BoolProperty(b, name) : null,
+        PropertyType.NameProperty => new NameProperty(NameReference.FromInstancedString(value), name),
+        PropertyType.StrProperty => new StrProperty(value, name),
+        PropertyType.ByteProperty when info.IsEnumProp() => GlobalUnrealObjectInfo.GetEnumValues(MEGame.LE1, info.Reference).FirstOrDefault(v => v.Instanced.Equals(value, StringComparison.OrdinalIgnoreCase)) is var ev && ev.Name != null
+          ? new EnumProperty(ev, info.Reference, MEGame.LE1, name) : null,
+        _ => null,
+      };
+      if (p == null) { errors.Add($"set {name}: '{value}' is not a value of its type ({info.Type}{(info.Reference != null ? " " + info.Reference : "")}), or the type is not supported"); continue; }
+      props.AddOrReplaceProp(p);
+    }
+    type.WriteProperties(props);
+    if (pcc.FindExport(lType.InstancedFullPath) != null) errors.Add($"{lType.InstancedFullPath}, the look's actor type, was copied in through a reference");
+    foreach (var d in type.GetAllDescendants().OfType<ExportEntry>()) d.ExportFlags &= ~LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+    var moved = new List<string>();
+    if (recipe.look.moveRoots?.Count > 0) {
+      if (recipe.look.moveUnder == null) errors.Add("look.moveRoots needs look.moveUnder");
+      else if (pcc.Exports.Any(e => e.Parent == null && e.ObjectName.Instanced.Equals(recipe.look.moveUnder, StringComparison.OrdinalIgnoreCase)))
+        errors.Add($"look.moveUnder {recipe.look.moveUnder}: the copy already has a top-level export of that name");
+      else {
+        var underPkg = pcc.CreatePackageExport(NameReference.FromInstancedString(recipe.look.moveUnder), null, forcedExport: false);
+        foreach (var root in recipe.look.moveRoots) {
+          var x = pcc.Exports.FirstOrDefault(e => e.Parent == null && e.ObjectName.Instanced.Equals(root, StringComparison.OrdinalIgnoreCase));
+          if (x == null) { errors.Add($"moveRoots {root}: not a top-level export of the copy"); continue; }
+          var subtree = x.GetAllDescendants().Prepend(x).ToList();
+          foreach (var i in subtree.OfType<ImportEntry>()) errors.Add($"moveRoots {root}: the import {i.InstancedFullPath} is under it and could not be found once moved");
+          x.Parent = underPkg;
+          foreach (var d in subtree.OfType<ExportEntry>()) d.ExportFlags &= ~LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+          moved.Add($"{root} ({subtree.Count} exports)");
+        }
+      }
+    }
+    var referencer = pcc.CreateExport("ObjectReferencer", "ObjectReferencer", null, indexed: true, cache: cache);
+    referencer.ObjectFlags = LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForClient | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForServer | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForEdit;
+    referencer.WriteProperty(new ArrayProperty<ObjectProperty>(new[] { new ObjectProperty(referencer), new ObjectProperty(type) }, "ReferencedObjects"));
+    if (errors.Count == 0) {
+      pcc.Save();
+      Console.WriteLine($"{Path.GetFileName(outPath)}: exports {pcc.ExportCount}, imports {pcc.ImportCount}{(moved.Count > 0 ? $"; moved under {recipe.look.moveUnder}: {string.Join(", ", moved)}" : "")}");
+      foreach (var x in pcc.Exports.Where(e => e.Parent == null)) Console.WriteLine($"top\t{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{(x.IsForcedExport ? "forced" : "not forced")}\t{x.GetAllDescendants().Count} below");
+      foreach (var p in type.GetProperties()) Console.WriteLine($"{type.ObjectName.Instanced}\t{p.Name.Instanced}\t{PropText(p, pcc)}");
+    }
+  } catch {
+    pcc.Dispose(); File.Delete(outPath);
+    throw;
+  }
+  pcc.Dispose();
+  if (errors.Count > 0) {
+    foreach (var e in errors) Console.WriteLine("ERROR " + e);
+    File.Delete(outPath);
+    Environment.Exit(1);
+  }
+} else if (cmd == "pkgcheck") {
+  // pkgcheck <pcc> [--like <ref.pcc>]... [--allow-import <path>]... [--forbid-root <name>]...: LEC's reference check
+  // (every issue it reports is an error), two exports with one path, every material (decals included) whose shaders are
+  // neither in the package nor in the game's RefShaderCache, and every import that is not a Package. A Class import
+  // must resolve, or be a native class of the package it names (Core.Package). Any other import must resolve the way LEC
+  // finds imports to an object of its class and class package, and with --like its path and class must also be an
+  // import or an export of one of the reference packages. --allow-import exempts one import path and reports it;
+  // --forbid-root fails on an import or a top-level export with that root. Exits 1 on an error.
+  var likes = new List<string>(); var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase); var forbidden = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+  for (int i = 2; i < args.Length; i += 2) {
+    if (args[i] is not ("--like" or "--allow-import" or "--forbid-root")) { Console.WriteLine($"ERROR unknown option {args[i]}"); Environment.Exit(1); }
+    if (i + 1 == args.Length) { Console.WriteLine($"ERROR {args[i]} needs a value"); Environment.Exit(1); }
+    if (args[i] == "--like") likes.Add(args[i + 1]);
+    else if (args[i] == "--allow-import") allowed.Add(args[i + 1]);
+    else forbidden.Add(args[i + 1]);
+  }
+  using var pcc = MEPackageHandler.OpenMEPackage(args[1], forceLoadFromDisk: true);
+  using var cache = new PackageCache();
+  int errs = 0;
+  void Err(string m) { Console.WriteLine("ERROR " + m); errs++; }
+  var report = new ReferenceCheckPackage();
+  EntryChecker.CheckReferences(report, pcc, LegendaryExplorerCore.Localization.LECLocalizationShim.NonLocalizedStringConverter, Path.GetFileName(args[1]));
+  foreach (var m in report.GetBlockingErrors().Concat(report.GetSignificantIssues())) Err($"refs: {m.Entry?.InstancedFullPath}: {m.Message}");
+  foreach (var g in pcc.Exports.GroupBy(x => x.InstancedFullPath, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+    Err($"export path {g.Key}: held by {string.Join(", ", g.Select(x => "#" + x.UIndex))}");
+  // LEC's GetBrokenMaterials, for every Material subclass (it reads only the class Material itself)
+  var paramSets = new Dictionary<StaticParameterSet, List<ExportEntry>>();
+  int materials = 0;
+  foreach (var x in pcc.Exports) {
+    StaticParameterSet set = null;
+    if (x.IsA("Material")) { materials++; set = (StaticParameterSet)ObjectBinary.From<Material>(x).SM3MaterialResource.ID; }
+    else if (x.IsA("MaterialInstance")) { materials++; if (x.GetProperty<BoolProperty>("bHasStaticPermutationResource")) set = ObjectBinary.From<MaterialInstance>(x).SM3StaticParameterSet; }
+    if (set == null) continue;
+    if (!paramSets.TryGetValue(set, out var list)) paramSets[set] = list = new();
+    list.Add(x);
+  }
+  var noShaders = paramSets.Keys.ToHashSet();
+  if (pcc.FindExport("SeekFreeShaderCache") is ExportEntry localCache)
+    foreach ((StaticParameterSet key, _) in localCache.GetBinaryData<ShaderCache>().MaterialShaderMaps) noShaders.Remove(key);
+  if (noShaders.Count > 0) LegendaryExplorerCore.Shaders.RefShaderCacheReader.RemoveStaticParameterSetsThatAreInTheGlobalCache(noShaders, pcc.Game);
+  foreach (var x in noShaders.SelectMany(k => paramSets[k])) Err($"shaders: {x.InstancedFullPath} ({x.ClassName}) has no shaders in the package or in the game's RefShaderCache");
+  var likeKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+  foreach (var path in likes) {
+    using var r = MEPackageHandler.OpenMEPackage(path, forceLoadFromDisk: true);
+    foreach (var x in r.Exports) likeKeys.Add(x.InstancedFullPath + "|" + x.ClassName);
+    foreach (var x in r.Imports) likeKeys.Add(x.InstancedFullPath + "|" + x.ClassName);
+  }
+  var classes = GlobalUnrealObjectInfo.GetClasses(pcc.Game);
+  int checkedImports = 0;
+  string Root(IEntry e) { while (e.Parent != null) e = e.Parent; return e.ObjectName.Instanced; }
+  string ClassPackage(ExportEntry x) => x.Class switch {
+    null => "Core",
+    ExportEntry c when c.Parent == null => Path.GetFileNameWithoutExtension(x.FileRef.FilePath),
+    IEntry c => Root(c),
+  };
+  foreach (var i in pcc.Imports) {
+    if (forbidden.Contains(Root(i))) Err($"import {i.InstancedFullPath}: its root {Root(i)} is forbidden");
+    if (i.ClassName == "Package") continue;
+    checkedImports++;
+    var resolved = EntryImporter.ResolveImport(i, cache);
+    if (allowed.Contains(i.InstancedFullPath)) { Console.WriteLine($"note: allowed import {i.InstancedFullPath} ({i.ClassName}): {(resolved == null ? "not found" : "found in " + Path.GetFileName(resolved.FileRef.FilePath))}"); continue; }
+    if (i.ClassName == "Class") {
+      if (resolved == null && !(classes.TryGetValue(i.ObjectName.Name, out var ci) && Path.GetFileNameWithoutExtension(ci.pccPath.Replace('\\', '/')).Equals(Root(i), StringComparison.OrdinalIgnoreCase)))
+        Err($"class {i.InstancedFullPath}: not found");
+      continue;
+    }
+    if (resolved == null) Err($"import {i.InstancedFullPath} ({i.ClassName}): not found");
+    else if (!resolved.ClassName.Equals(i.ClassName, StringComparison.OrdinalIgnoreCase) || !ClassPackage(resolved).Equals(i.PackageFile, StringComparison.OrdinalIgnoreCase))
+      Err($"import {i.InstancedFullPath} ({i.PackageFile}.{i.ClassName}): found in {Path.GetFileName(resolved.FileRef.FilePath)} as a {ClassPackage(resolved)}.{resolved.ClassName}");
+    if (likes.Count > 0 && !likeKeys.Contains(i.InstancedFullPath + "|" + i.ClassName)) Err($"import {i.InstancedFullPath} ({i.ClassName}): in none of the --like packages with this class");
+  }
+  foreach (var x in pcc.Exports.Where(x => x.Parent == null && forbidden.Contains(x.ObjectName.Instanced))) Err($"export {x.InstancedFullPath}: a forbidden root");
+  Console.WriteLine($"pkgcheck {Path.GetFileName(args[1])}: exports {pcc.ExportCount}, imports {pcc.ImportCount} ({checkedImports} checked), materials {materials}, errors {errs}");
+  if (errs > 0) Environment.Exit(1);
+} else if (cmd == "pkglist") {
+  // pkglist <pcc>: one tab-separated line per export (UIndex, class, instanced full path, F if forced, object flags in
+  // hex, data size, a Texture2D's TextureFileCacheName) and per import (UIndex, class, instanced full path)
+  using var pcc = MEPackageHandler.OpenMEPackage(args[1], forceLoadFromDisk: true);
+  foreach (var x in pcc.Exports)
+    Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{(x.IsForcedExport ? "F" : "-")}\t{(ulong)x.ObjectFlags:X}\t{x.DataSize}\t{(x.ClassName == "Texture2D" ? x.GetProperty<NameProperty>("TextureFileCacheName")?.Value.Instanced : "")}");
+  foreach (var i in pcc.Imports) Console.WriteLine($"{i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
 } else if (cmd == "snd") {
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
   foreach (var e in pcc.Exports.Where(x => x.ClassName == "SoundNodeWave" && args.Skip(2).Any(f => x.ObjectName.Instanced.Contains(f, StringComparison.OrdinalIgnoreCase)))) {
@@ -522,6 +739,23 @@ static void PrintRows(Bio2DA t, IEnumerable<string> rows) {
   foreach (var n in rows) { int r = t.GetRowIndexByName(n); Console.WriteLine(n + "\t" + string.Join("\t", Enumerable.Range(0, t.ColumnCount).Select(c => t[r, c].DisplayableValue))); }
 }
 
+// A property's value as one line of text: an object as its path, a string ref with a $.
+static string PropText(Property p, IMEPackage pcc) => p switch {
+  ObjectProperty o => o.Value == 0 ? "None" : pcc.GetEntry(o.Value)?.InstancedFullPath ?? $"#{o.Value}?",
+  StringRefProperty s => "$" + s.Value,
+  IntProperty i => i.Value.ToString(),
+  FloatProperty f => f.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+  BoolProperty b => b.Value.ToString(),
+  EnumProperty e => e.Value.Instanced,
+  NameProperty n => n.Value.Instanced,
+  StrProperty s => "\"" + s.Value + "\"",
+  _ => p.PropType.ToString(),
+};
+
+// actortype's recipe.
+class ActorTypeRecipe { public string name { get; set; } public ActorTypeTemplate template { get; set; } public ActorTypeLook look { get; set; } public Dictionary<string, string> set { get; set; } }
+class ActorTypeTemplate { public string actorType { get; set; } public List<string> keep { get; set; } }
+class ActorTypeLook { public string actorType { get; set; } public Dictionary<string, string> take { get; set; } public string moveUnder { get; set; } public List<string> moveRoots { get; set; } }
 // 2dapart's recipe: tables: { <Package.Table>: { rows: { <row>: { from: <row>, set: { <column>: <value> } } } } }
 class TwoDaRecipe { public Dictionary<string, TwoDaTable> tables { get; set; } }
 class TwoDaTable { public Dictionary<string, TwoDaRow> rows { get; set; } }
