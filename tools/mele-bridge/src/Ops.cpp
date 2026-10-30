@@ -146,6 +146,36 @@ namespace MeleBridge
             return Ok(Editor::State());
         }
 
-        throw BridgeError("unknown op " + ToUtf8(op) + " (ping, console, find, get, set, call, describe, subscribe, editor)");
+        if (op == L"status")
+        {
+            return RunOnGameThread([] { return Ok(Status()); }, timeout);
+        }
+
+        if (op == L"keep_ticking")
+        {
+            // On resolves BioWorldInfo's fields and ends a focus-loss pause already there: game thread. Off and a read (no "on")
+            // only touch atomics, so they answer while the game loads, like editor.
+            auto const it = request.find("on");
+            auto const read = it == request.end() || it->is_null();
+            if (!read && !it->is_boolean()) throw BridgeError("\"on\" is a bool");
+            if (!read && it->get<bool>())
+            {
+                return RunOnGameThread([] {
+                    auto const world = CurrentWorldInfo();
+                    auto const cleared = KeepTickingOn(world);
+                    auto reply = KeepTickingState();
+                    reply["clearedFocusPause"] = cleared;
+                    reply["world"] = world ? json(ToUtf8(PathOf(world))) : json(nullptr);
+                    return Ok(reply);
+                }, timeout);
+            }
+            if (!read) KeepTickingOff();
+            auto reply = KeepTickingState();
+            reply["clearedFocusPause"] = nullptr;
+            reply["world"] = nullptr;
+            return Ok(reply);
+        }
+
+        throw BridgeError("unknown op " + ToUtf8(op) + " (ping, console, find, get, set, call, describe, subscribe, editor, status, keep_ticking)");
     }
 }

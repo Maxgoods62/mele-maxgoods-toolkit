@@ -32,6 +32,7 @@ asi_target (MeleBridge
     "Reflection.cpp"
     "Reflection.hpp"
     "SharedVersion.h"
+    "Status.cpp"
   LINKS
     "MeleImGui"
     "d3d11"

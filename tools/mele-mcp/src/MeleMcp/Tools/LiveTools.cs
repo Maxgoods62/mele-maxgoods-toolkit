@@ -111,6 +111,28 @@ public static class LiveTools
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "editor" }, 5));
 
+    [McpServerTool(Name = "live_status", ReadOnly = true),
+     Description("One cheap look at the running game (MeleBridge ASI 3+): map, its BioWorldInfo (begunPlay, bPlayersOnly, the "
+                 + "focus-loss pause flag), player controller and pawn, streaming levels still loading or changing visibility, the "
+                 + "loading movie (null when no SFXLoadMovieManager exists), the squad screen (partySelectOpen, its handler, the movie's "
+                 + "member count) and the keep_ticking switch with its counters. Times out while a map loads: the game thread runs no "
+                 + "script then.")]
+    public static JsonObject LiveStatus(
+        [Description(TimeoutParam)] double timeoutSeconds = 3,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "status" }, timeoutSeconds));
+
+    [McpServerTool(Name = "live_keep_ticking", Destructive = true),
+     Description("Test switch (MeleBridge ASI 3+), off by default and again at every game start. While on, LE1 does not pause its "
+                 + "world and Kismet when its window loses focus (BioWorldInfo.Tick's focus pause); real pauses (menus, squad screen, "
+                 + "photo mode, the F8 editor) are untouched. Turning it on also ends a focus pause already in place. Omit 'on' to read "
+                 + "it. Returns the switch and its counters.")]
+    public static JsonObject LiveKeepTicking(
+        [Description("true: on; false: off; omit to read.")] bool? on = null,
+        [Description(TimeoutParam)] double timeoutSeconds = 5,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "keep_ticking", ["on"] = on }, timeoutSeconds));
+
     [McpServerTool(Name = "live_place", Destructive = true),
      Description("Moves a live actor, or spawns a copy of one (MeleBridge ASI), in front of Shepard facing her, where she stands, or at "
                  + "coordinates. Props land on the floor, pawns at Shepard's height. A copy goes into the map's level. A static template "

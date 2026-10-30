@@ -9,10 +9,11 @@
 #define ASI_NAME_NO_SPACE_A "MeleBridge"
 #define ASI_NAME_NO_SPACE_W L"MeleBridge"
 
-#define ASI_VERSION 2
-#define VERSION_STRING_A "2"
-#define VERSION_STRING_W L"2"
+#define ASI_VERSION 3
+#define VERSION_STRING_A "3"
+#define VERSION_STRING_W L"3"
 
 // The pipe protocol: ping returns it, and mele-mcp refuses a bridge with another number. Bump it when an op changes
-// its arguments or its reply.
+// its arguments or its reply. A new op needs no bump: an older bridge answers it "unknown op" (MeleBridge 3 added
+// status and keep_ticking under protocol 1).
 #define MELE_PROTOCOL_VERSION 1

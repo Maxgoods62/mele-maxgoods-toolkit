@@ -9,7 +9,7 @@ version is mele-mcp's (`<Version>` in `tools/mele-mcp/src/MeleMcp/MeleMcp.csproj
 
 ### Added
 
-mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 72 tools:
+mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 74 tools:
 
 - Game files: `le_status`, `le_refresh_files`, and `le_find_file`, which says which copy of a file the game loads. For
   LE1 it follows the installed AutoTOC ASI.
@@ -29,16 +29,24 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 72 tools:
   lights. `npc_place` puts an NPC where Shepard stands.
 - Mods: `mod_check` (references, streaming states, start points, strings, FaceFX and IDs, before an install),
   `mod_install` through ME3Tweaks Mod Manager, and `game_cycle`, which quits the game, checks and installs the mod,
-  boots, loads a save, runs console commands and takes a screenshot.
+  boots, loads a save, runs console commands and takes a screenshot. A career save loads through its commands
+  (`nextframedefer loadgame <name> DevId=-1`); a name the game can't find (`Unable to load … on device Id`) stops the
+  cycle at once instead of at the timeout.
 - The running game without MeleBridge, through the LEX Interop ASI, the logs of the DebugLogger and Kismet Logger
   ASIs, and the game window: `game_status`, `game_actors`, `game_actor_get`, `game_actor_set`, `game_player_location`,
   `game_console`, `game_get`, `game_stream_level`, `game_remote_event`, `game_hot_reload`, `game_log`,
   `game_kismet_log` and `game_screenshot`.
 - The running game, through MeleBridge: `live_find`, `live_get`, `live_set`, `live_call`, `live_describe`,
-  `live_console`, `live_watch`, `live_place`, `live_remove`, `live_save` and `live_editor`. `game_plot` reads and sets
+  `live_console`, `live_watch`, `live_place`, `live_remove`, `live_save`, `live_editor`, `live_status` (one look for
+  unattended tests: map, world, player, streaming, loading movie, squad screen) and `live_keep_ticking` (a test switch
+  that stops the focus-loss pause). `game_plot` reads and sets
   plot values through MeleBridge, or without it through BioWare's cheat commands and the DebugLogger log.
 - The in-game editor's side: `catalog_index` and `catalog_build` (the prop catalog, its thumbnails and the Mele Catalog
   dev mod), and `editor_import`, a three-way merge of an editor session into a level YAML.
+- `scripts/scenario.py` runs in-game test suites (YAML or JSON) unattended against LE1 through `live_status` and
+  `live_keep_ticking`, refuses save and load commands, backs a career's saves up before a run that saves and restores
+  them with the game closed, and writes a report (`docs/scenarios.md`). Used in game on a suite of about 40 checks,
+  with the cold start through `game_cycle`.
 
 Set-up and settings:
 
@@ -59,12 +67,15 @@ Set-up and settings:
 - `.mcp.json.example`: an example entry that registers the server with an MCP client.
 - `package.sh` builds the release zip `dist/mele-mcp-v<version>-win-x64.zip`, with its license texts and no Oodle.
 
-MeleBridge 2, pipe protocol 1:
+MeleBridge 3, pipe protocol 1:
 
 - `MeleBridge.asi` serves `\\.\pipe\MeleBridge_LE1`: one JSON request per line, with the ops `ping`, `console`,
-  `find`, `get`, `set`, `call`, `describe`, `subscribe` and `editor`.
+  `find`, `get`, `set`, `call`, `describe`, `subscribe`, `editor`, `status` and `keep_ticking`.
 - `ping` returns the pipe protocol. mele-mcp checks it once per game process and refuses a bridge with another
-  number, `editor` requests excepted.
+  number, `editor` requests and `keep_ticking` turning off or reading excepted.
+- MeleBridge 3 added `status` and `keep_ticking` (off at every game start: while on, `BioWorldInfo.Tick` takes no
+  focus-loss pause), and `console` now sends to the current map's live player controller. Used in game by
+  `scenario.py`.
 - `build.sh` builds in its own LExASIs checkout (default `%LOCALAPPDATA%\mele-asi-build\MeleBridge\LExASIs`), stages
   in `dist/` (`MELE_STAGE`), finds Visual Studio 18 with vswhere and the game in the registry, and runs one build of a
   checkout at a time.

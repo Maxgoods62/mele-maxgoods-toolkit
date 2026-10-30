@@ -44,12 +44,13 @@ public static partial class LiveBridge
     public static JsonObject Request(MEGame game, JsonObject request, double timeoutSeconds = 5) => RequestAll(game, [request], timeoutSeconds)[0];
 
     /// <summary>
-    /// Several requests over one connection, in order. When all of them are 'editor' ops, the protocol check is skipped (and nothing
-    /// kept): the bridge answers them off the game thread (live_editor works while the game loads), and the check waits for that thread.
+    /// Several requests over one connection, in order. When all of them are ops the bridge answers off the game thread ('editor', and
+    /// 'keep_ticking' turning off or reading), the protocol check is skipped (and nothing kept): live_editor works while the game
+    /// loads, and so does turning the switch off, while the check waits for that thread.
     /// </summary>
     public static List<JsonObject> RequestAll(MEGame game, IReadOnlyList<JsonObject> requests, double timeoutSeconds = 5)
     {
-        var check = requests.Any(r => !(r["op"] is JsonValue op && op.TryGetValue<string>(out var name) && name == "editor"));
+        var check = !requests.All(OffGameThread);
         using var pipe = Connect(game, timeoutSeconds, check);
         var writer = new StreamWriter(pipe, Utf8) { AutoFlush = true, NewLine = "\n" };
         var reader = new StreamReader(pipe, Utf8);
@@ -145,6 +146,13 @@ public static partial class LiveBridge
         return new LiveEvents(watched, events, dropped, events.Count >= maxEvents);
     }
 
+    /// <summary>The bridge answers 'editor', and 'keep_ticking' without "on": true, from atomics, without the game thread.</summary>
+    private static bool OffGameThread(JsonObject request)
+    {
+        var op = request["op"] is JsonValue v && v.TryGetValue<string>(out var name) ? name : null;
+        return op == "editor" || (op == "keep_ticking" && !(request["on"] is JsonValue on && on.TryGetValue<bool>(out var value) && value));
+    }
+
     private static JsonObject Check(string line)
     {
         var reply = JsonNode.Parse(line)?.AsObject() ?? throw new IOException($"Bad reply from MeleBridge: {line}");
@@ -195,7 +203,7 @@ public static partial class LiveBridge
     /// answers ping on the game thread, so while the game loads it can fail: then nothing is kept, and the next request pings again.
     /// </summary>
     private const string PingNote = "The check ('ping', before the first request to a game process) runs on the game thread, which waits while the game "
-                                    + "loads: try again once it has loaded. live_editor needs no check.";
+                                    + "loads: try again once it has loaded. live_editor, and live_keep_ticking turning off or reading, need no check.";
 
     private static void CheckProtocol(NamedPipeClientStream pipe, double timeoutSeconds)
     {

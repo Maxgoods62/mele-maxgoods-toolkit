@@ -457,6 +457,11 @@ namespace MeleBridge
                            [](wchar_t x, wchar_t y) { return std::towlower(x) == std::towlower(y); }) != text.end();
     }
 
+    bool StartsWithNoCase(std::wstring_view text, std::wstring_view start)
+    {
+        return text.size() >= start.size() && EqualsNoCase(text.substr(0, start.size()), start);
+    }
+
     std::wstring MapName()
     {
         if (GWorld == nullptr || *GWorld == nullptr) return L"";
@@ -541,6 +546,16 @@ namespace MeleBridge
         int offset = -1;
         ForEachProperty(scope, [&](UProperty* p) { if (offset < 0 && EqualsNoCase(NameOf(p), name)) offset = p->Offset; });
         return offset;
+    }
+
+    bool BoolFieldOf(UStruct const* scope, std::wstring_view name, int& offset, DWORD& mask)
+    {
+        UProperty* found = nullptr;
+        ForEachProperty(scope, [&](UProperty* p) { if (!found && EqualsNoCase(NameOf(p), name)) found = p; });
+        if (found == nullptr || KindOf(found) != Kind::Bool) return false;
+        offset = found->Offset;
+        mask = static_cast<UBoolProperty const*>(found)->BitMask;
+        return true;
     }
 
     json SetProperty(UObject* object, std::wstring const& path, json const& value)

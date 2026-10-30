@@ -13,15 +13,16 @@ names (the map `BIOA_MYM01`, the NPC `guard`); use your own.
 
 | Contract | Version | Written by | Read by | A version it doesn't know |
 |---|---|---|---|---|
-| Pipe protocol | 1 (`MELE_PROTOCOL_VERSION`, `tools/mele-bridge/src/SharedVersion.h`) | MeleBridge (`ping`) | mele-mcp (`Versions.BridgeProtocol`) | mele-mcp refuses every request to that bridge but an `editor` one (§3.3). |
+| Pipe protocol | 1 (`MELE_PROTOCOL_VERSION`, `tools/mele-bridge/src/SharedVersion.h`) | MeleBridge (`ping`) | mele-mcp (`Versions.BridgeProtocol`) | mele-mcp refuses every request to that bridge but an `editor` one, or a `keep_ticking` one that turns the switch off or reads it (§3.3). |
 | `levels.json` | 1 | `level_build` (also through `mod_build` and `npc_place`) | MeleBridge; mele-mcp's mesh index, for its `dlc` keys (§4) | "levels.json can't be read (version N, and this bridge reads version 1): run mod_build"; every actor keeps Phase 3's rules. |
 | `sessions/<map>.json` | 1, 2 or 3 | MeleBridge (Save, passes), `editor_import` (marks) | both | The bridge leaves the file as it is: Save refuses, a pass skips it. `editor_import` refuses it. |
 | `catalog.json` | 1 | `catalog_build` | MeleBridge | The Props window says the file can't be read; sessions re-apply without catalog paths. |
 
-The bridge's own version is `ASI_VERSION` in the same header: `"bridge": "2"` in the `ping` reply. It is for people and logs;
+The bridge's own version is `ASI_VERSION` in the same header: `"bridge": "3"` in the `ping` and `status` replies. It is for people and logs;
 programs check `"protocol"`.
 
-When to bump: the pipe protocol goes up when an op changes its arguments or its reply. A file's version goes up when an
+When to bump: the pipe protocol goes up when an op changes its arguments or its reply. A new op needs no bump, since an
+older bridge answers it `unknown op` (§3.2): MeleBridge 3 added `status` and `keep_ticking` under protocol 1. A file's version goes up when an
 older reader would do something wrong with the new content. A reader that would only skip an unknown key needs no bump:
 Phase 5 added `npcs` and `characterLights` to `levels.json` and kept version 1, because a Phase 4 bridge skips them. It added
 session version 3, because a Phase 4 bridge would rewrite an NPC's light with its own writer.
@@ -59,7 +60,7 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
 - Lines: UTF-8 JSON, one request per line, each ending in `\n`. One reply line per request, in order. A line of only
   spaces, tabs or `\r` is skipped. More than 1 MB waiting without a newline closes the connection.
 - Threads: every op but `editor` runs on the game thread, in the `ProcessEvent` hook, at the next call the game makes
-  through it.
+  through it. `keep_ticking` with `on: false`, or without `on`, does not wait for the game thread either.
 
 ### 3.2 Requests and replies
 
@@ -82,7 +83,7 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
   thread has started always runs to the end, even when its reply then comes back late.
 - Faults: an access violation while a request runs is caught; the reply is
   `"access violation in the game while running the request"`.
-- Unknown op: `"unknown op X (ping, console, find, get, set, call, describe, subscribe, editor)"`.
+- Unknown op: `"unknown op X (ping, console, find, get, set, call, describe, subscribe, editor, status, keep_ticking)"`.
 - mele-mcp's client (`LiveBridge.cs`) drops `null` keys (a `set`'s `value` excepted, where `null` means None), sets
   `timeoutMs` from the tool's timeout, and waits 2 s longer than that for the reply line.
 
@@ -91,7 +92,7 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
 `ping` returns:
 
 ```json
-{"ok": true, "bridge": "2", "protocol": 1, "map": "BIOA_NOR00", "objects": 512345}
+{"ok": true, "bridge": "3", "protocol": 1, "map": "BIOA_NOR00", "objects": 512345}
 ```
 
 - mele-mcp pings before its first request to a game process (known by process id and start time), on the same connection,
@@ -103,9 +104,9 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
   times out or is refused is not cached: the error says to try again once the game has loaded, and the next request pings
   again.
 - A request made only of `editor` ops skips the check, so `live_editor` still answers while the game loads or the world is
-  paused (§3.7).
+  paused (§3.7). So does one made only of `keep_ticking` ops without `on: true`.
 - A bridge that reports another protocol, or none (MeleBridge 1 sent none), is refused, and so is every later request to that
-  process but an `editor` one. The error names the bridge's version and protocol, mele-mcp's version and the protocol it
+  process but an `editor` one or a `keep_ticking` one without `on: true`. The error names the bridge's version and protocol, mele-mcp's version and the protocol it
   needs, and says to build and install the MeleBridge.asi of the same toolkit release, game closed, then start the game
   again.
 
@@ -122,6 +123,8 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
 | `describe` | `object` or `class` (exactly one); `functions` (true) | `class` (path), `chain` (class names up to `Object`), `properties`: `[{name, type, owner}]`, `functions`: `[{name, owner, signature}]`. |
 | `subscribe` | `functions` (a non-empty list of function paths); `objectContains`; `params` (true) | `functions`: the paths resolved. Then the connection becomes an event stream (§3.6). |
 | `editor` | none | The in-game editor's state (§3.7). |
+| `status` | none | One look at the game for tests (MeleBridge 3), keys below. |
+| `keep_ticking` | `on` (a bool; missing reads the switch) | `keepTicking`, `worldTicks`, `focusPausesCleared`, `timerRaises`; `clearedFocusPause` and `world` (`null` unless `on` is true). |
 
 - `find`: `class` is a class name (any loaded class of that name, subclasses included); `name` and `path` are
   case-insensitive substrings of the object's name and full path. Class default objects are left out unless `defaults` is
@@ -133,6 +136,35 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
   `<return type> Name(optional out <type> Param, ...)`, `void` when nothing is returned. Types read `int`, `name`, `string`,
   `struct Vector`, `array<int>`, `class<Actor>`, an enum's name, or the class of an object property.
 - `subscribe`: a path may leave out the package (`SequenceOp.Activated` finds `Engine.SequenceOp.Activated`).
+- `status` runs on the game thread, so it times out while a map loads. Every key is always there; a part that can't be
+  read is `null`, with why in `notes` (a list of strings).
+  - `bridge`, `map`; `world` (the map's `BioWorldInfo`, `<map>.TheWorld.PersistentLevel.…`), its `begunPlay`,
+    `bPlayersOnly` and `pausedByFocusLoss` (`m_bPausedByFocusLoss`).
+  - `keepTicking`, `worldTicks`, `focusPausesCleared`, `timerRaises`: as `keep_ticking` returns them.
+  - `pc`: the map's live player controller (not being destroyed, under `<map>.TheWorld.`), else the first one in
+    memory; `console` sends to the same one. `pawn`: its `Pawn`.
+  - `streaming`: `{levels, pending, pendingNames}` over the world's `StreamingLevels`. A level is pending when a load or
+    unload is pending, it should be loaded and has no `LoadedLevel`, or `bShouldBeVisible` differs from `bIsVisible`.
+    `pendingNames`: the first 5 package names.
+  - `loadingMovie`: `{object, playing, state, inLoad}` of the first `SFXLoadMovieManager` (`IsLoadingMoviePlaying()`,
+    `PlaybackState`, `bIsInLoad`), or `null` when there is none (then looked for again after 5 s at the earliest).
+  - `partySelectOpen`: whether the player's GUI manager (`GetScaleFormManager()`) has a `PartySelect` panel
+    (`GetPanelByTag`). `partySelect`: `null` unless it is open; else `{panel, handler, handlerClass, membersAvailable,
+    varPath}`. `handler` is the panel's `BioSFHandler_PartySelection` (its default handler, else a script handler).
+    `membersAvailable` is the movie's `nMembersAvailable` read at `varPath` (`_root.nMembersAvailable`, else
+    `nMembersAvailable`): it is 0 until the screen has initialised its cards.
+- `keep_ticking` is a test switch, off at every game start. While it is on, `BioWorldInfo.Tick` never takes its focus-loss
+  pause, so the world and Kismet run with the game window in the background:
+  - Around each `BioWorldInfo.Tick` that goes through `ProcessEvent`, a `m_fNoBrowserWheelTimer` at 0 or below is raised
+    to 1e9, so `CanPause()` is false inside that Tick, then set back to 0 if it still reads 1e9. Outside Tick the pause
+    menu behaves as vanilla.
+  - `bPlayersOnly` is cleared only together with a set `m_bPausedByFocusLoss`, before and after each Tick. Pauses that
+    don't set that flag (menus, the squad screen, photo mode, the F8 editor) stay.
+  - `on: true` runs on the game thread: it finds the two fields by reflection (refused when one is missing), turns the
+    switch on and ends a focus pause already in place on the map's world (`clearedFocusPause`). `on: false` and a read
+    answer at once, even during a load.
+  - The counters run since the game started, and only while the switch is on: `worldTicks` (Ticks seen),
+    `timerRaises`, `focusPausesCleared`.
 
 ### 3.5 Objects, properties and values
 

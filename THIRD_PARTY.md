@@ -64,6 +64,14 @@ SDK's app host, MIT like the Microsoft .NET packages.
 | `TexConverter.dll` | Texture format conversion, called by LEC's `Textures/TexConverter.cs`. Built from the `TexConverter` folder of the Legendary Explorer repo, whose project writes it to `Libraries/Windows`, with Microsoft's DirectXTex. | GPL-3.0 (Legendary Explorer's `LICENSE`); DirectXTex is MIT |
 | `ISACTTools.dll` | An ISACT (LE1 audio) helper. Neither LEC nor mele-mcp calls it; lectool's `ogg` command calls its `CreateIPSOgg` export. | license not stated, and the Legendary Explorer repo has no source for it |
 
+## Python scripts
+
+The scripts in `tools/mele-mcp/scripts` use the Python standard library, plus one package that is not shipped:
+
+| Package | Version | License | Used by |
+|---|---|---|---|
+| [PyYAML](https://github.com/yaml/pyyaml) (Debian/Ubuntu `python3-yaml`) | 6.0.1 | MIT | `scenario.py` reads `.yaml` suites with it when it is installed. Without it only `.json` suites load. |
+
 ## The release zip
 
 `package.sh` writes `dist/mele-mcp-v<version>-win-x64.zip` and `dist/SHA256SUMS`. The zip holds the framework-dependent

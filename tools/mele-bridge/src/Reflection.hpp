@@ -15,6 +15,7 @@ namespace MeleBridge
     std::wstring PathOf(UObject const* object);
     std::wstring NameOf(UObject const* object);
     bool ContainsNoCase(std::wstring_view text, std::wstring_view part);
+    bool StartsWithNoCase(std::wstring_view text, std::wstring_view start);
 
     /// The persistent level's package, e.g. BIOA_MYM01.
     std::wstring MapName();
@@ -39,6 +40,9 @@ namespace MeleBridge
     /// A property's offset as the engine laid its class out, or -1 when the class has no property of that name. For fields the
     /// SDK's C++ layout puts elsewhere (Editor.cpp lists the ones checked).
     int PropertyOffset(UStruct const* scope, std::wstring_view name);
+
+    /// A bool property's word offset and bit as the engine laid its class out; false when the class has no bool of that name.
+    bool BoolFieldOf(UStruct const* scope, std::wstring_view name, int& offset, DWORD& mask);
 
     /// Sets one property (same paths as GetProperty) and returns its new value.
     json SetProperty(UObject* object, std::wstring const& path, json const& value);

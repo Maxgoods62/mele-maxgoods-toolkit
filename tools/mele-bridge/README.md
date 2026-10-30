@@ -7,7 +7,7 @@ streams events. mele-mcp's `live_*` tools and `game_plot` use it. It also holds 
 It does what the LEX Interop ASI can't. LEX Interop is one-way: replies go to a window titled "Legendary Explorer", it
 only handles whole classes (`getall`), and commands queued together run in reverse order.
 
-This is MeleBridge 2 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1. mele-mcp refuses a bridge with
+This is MeleBridge 3 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1. mele-mcp refuses a bridge with
 another protocol number ([formats §3.3](../../docs/formats.md#33-the-version-check)), so build the bridge and the server
 from the same commit.
 
@@ -585,8 +585,20 @@ How the catalog is read and used:
 ## Pipe protocol
 
 `\\.\pipe\MeleBridge_LE1` takes newline-delimited JSON: one request line in, one reply line out. The transport, the ops
-(`ping`, `console`, `find`, `get`, `set`, `call`, `describe`, `subscribe`, `editor`), their arguments and replies, the
-value types, the event stream and the version check are in [formats §3](../../docs/formats.md#3-pipe-protocol).
+(`ping`, `console`, `find`, `get`, `set`, `call`, `describe`, `subscribe`, `editor`, `status`, `keep_ticking`), their
+arguments and replies, the value types, the event stream and the version check are in
+[formats §3](../../docs/formats.md#3-pipe-protocol).
+
+`status` (MeleBridge 3) is one cheap look for unattended tests: the map and its world, the player, streaming levels still
+on their way, the loading movie, the squad screen and the switch below.
+
+Test switch: keep ticking. LE1 pauses its world and Kismet when its window loses focus (`BioWorldInfo.Tick` sets
+`m_bPausedByFocusLoss` and `bPlayersOnly`), so a test driven from another window stalls. `keep_ticking` (MeleBridge 3,
+mele-mcp's `live_keep_ticking`) stops that pause while it is on. Around each `BioWorldInfo.Tick` that would run
+`m_fNoBrowserWheelTimer` out, it raises that timer (`CanPause()` is then false) and puts it back afterwards, with requests
+held until that Tick is over. It clears `bPlayersOnly` only with `m_bPausedByFocusLoss`, so menus, the squad screen, photo
+mode and F8 still pause. It is off by default and again at every game start, so normal play still pauses on alt-tab. It is
+for tests only.
 
 A `subscribe` stream sees only calls that go through `ProcessEvent`. Script-to-script calls and natives called from
 script never show up.

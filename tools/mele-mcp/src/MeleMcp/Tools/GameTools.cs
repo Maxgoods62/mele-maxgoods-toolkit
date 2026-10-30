@@ -85,7 +85,8 @@ public static class GameTools
      Description("The whole test loop in one call: closes the running game WITHOUT SAVING (console exit; force kills it), runs mod_check "
                  + "(stops on errors) and mod_install with boot (or only boots, with no mod), waits for the main menu in the DebugLogger "
                  + "log, loads a developer save slot (BioLoadGame <n> loads Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's "
-                 + "BioSaveGame <n> writes where Shepard stands; career saves can't be loaded this way), runs console "
+                 + "BioSaveGame <n> writes where Shepard stands; career saves can't be loaded this way (load one with commands: "
+                 + "[\"nextframedefer loadgame <Career>_QuickSave DevId=-1\"] and waitForMap)), runs console "
                  + "commands (e.g. 'at BIOA_MYM01 start_mym01'), waits for the map and takes a screenshot to Read. Takes 1 to 3 minutes.")]
     public static GameCycleResult GameCycle(
         [Description("Mod to check and install first (as mod_install takes it, e.g. 'My Mod'); omit to only restart.")] string? mod = null,

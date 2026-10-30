@@ -31,6 +31,10 @@ namespace MeleBridge
         /// Set while the game thread runs jobs: the work calls ProcessEvent itself, and a job must not start inside another.
         thread_local bool InJobs = false;
 
+        /// Set while a BioWorldInfo.Tick runs with keep_ticking's raised timer (CanPause() false): jobs wait for the first
+        /// ProcessEvent after it, so a request (the pause menu, a save) never sees that timer.
+        thread_local bool InRaisedTick = false;
+
         struct GuardContext
         {
             std::function<json()>* Work;
@@ -193,6 +197,123 @@ namespace MeleBridge
         Watching.store(true, std::memory_order_relaxed);
     }
 
+    // ! Keep ticking (test switch)
+    // ========================================
+
+    // BioWorldInfo.Tick (SFXGame) pauses the world when the window loses focus: it sets m_bPausedByFocusLoss and bPlayersOnly
+    // when !bPlayersOnly && !HasFocus() && GameModeManager.CanPause(), and lifts that pause only once the focus is back.
+    // HasFocus is a native script calls, which never passes through ProcessEvent; Tick is an event, which does. CanPause
+    // (SFXGameModeBase) is false while BioWorldInfo.m_fNoBrowserWheelTimer > 0, and Tick first counts that timer down by its
+    // fDeltaT while it is > 0 (1e9 minus a frame's time is 1e9 in a float), then asks CanPause. So while the switch is on, a
+    // timer this Tick would bring to 0 or below is raised to 1e9 for the length of the Tick only, and put back to 0 afterwards
+    // (vanilla would have left it at 0 or below too): the pause menu (ShowMenuGui asks CanPause too) behaves as vanilla outside
+    // it. EndConversation sets the timer to 1.0 (StartNoBrowserWheelTimer) for its own reasons: that value counts down as
+    // vanilla until its last Tick, which gets the raise.
+
+    namespace
+    {
+        std::atomic<bool> KeepTicking{ false };
+        std::atomic<unsigned long long> WorldTicks{ 0 };
+        std::atomic<unsigned long long> FocusPausesCleared{ 0 };
+        std::atomic<unsigned long long> TimerRaises{ 0 };
+
+        /// BioWorldInfo's fields where the engine laid them out (Editor.cpp says why the SDK's C++ layout is not trusted). Game
+        /// thread only; resolved once, before the switch first goes on.
+        UClass* WorldClass = nullptr;
+        int TimerAt = -1;
+        int PausedAt = -1;
+        DWORD PausedMask = 0;
+
+        constexpr float RaisedTimer = 1e9f;
+
+        void ResolveWorldFields()
+        {
+            if (WorldClass != nullptr) return;
+            auto const cls = ABioWorldInfo::StaticClass();
+            if (cls == nullptr) throw BridgeError("no BioWorldInfo class is loaded");
+            auto const timer = PropertyOffset(cls, L"m_fNoBrowserWheelTimer");
+            if (timer < 0) throw BridgeError("BioWorldInfo has no m_fNoBrowserWheelTimer");
+            int paused = -1;
+            DWORD mask = 0;
+            if (!BoolFieldOf(cls, L"m_bPausedByFocusLoss", paused, mask)) throw BridgeError("BioWorldInfo has no m_bPausedByFocusLoss");
+            TimerAt = timer;
+            PausedAt = paused;
+            PausedMask = mask;
+            WorldClass = cls;
+        }
+
+        float& Timer(AWorldInfo* world) { return *reinterpret_cast<float*>(reinterpret_cast<BYTE*>(world) + TimerAt); }
+        DWORD& PausedWord(AWorldInfo* world) { return *reinterpret_cast<DWORD*>(reinterpret_cast<BYTE*>(world) + PausedAt); }
+
+        /// The only place the switch writes bPlayersOnly, and only to end the pause Tick takes on focus loss, the one pause that
+        /// sets m_bPausedByFocusLoss. The squad screen, the pause menu, photo mode, MelePause and the F8 editor set bPlayersOnly
+        /// on purpose and never that flag, so their pauses stay.
+        bool ClearFocusPause(AWorldInfo* world)
+        {
+            auto& word = PausedWord(world);
+            if ((word & PausedMask) == 0) return false;
+            word &= ~PausedMask;
+            world->bPlayersOnly = 0;
+            FocusPausesCleared.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        bool IsWorldTick(UObject* context, UFunction* function)
+        {
+            static SFXName const TickName{ L"Tick", 0 };
+            return WorldClass != nullptr && function->Name == TickName && context->IsA(WorldClass);
+        }
+
+        /// Before the world's Tick(float fDeltaT): returns whether the timer was raised (then AfterWorldTick puts it back).
+        /// fDeltaT is the event's only parameter, at offset 0 of its parameters.
+        bool BeforeWorldTick(AWorldInfo* world, void* parms)
+        {
+            WorldTicks.fetch_add(1, std::memory_order_relaxed);
+            ClearFocusPause(world);
+            auto& timer = Timer(world);
+            auto const delta = parms != nullptr ? *static_cast<float const*>(parms) : 0.f;
+            if (timer > (std::max)(delta, 0.f)) return false;
+            timer = RaisedTimer;
+            TimerRaises.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        void AfterWorldTick(AWorldInfo* world, bool raised)
+        {
+            // Still 1e9: ours, back to 0. Anything else was set during the Tick (EndConversation's 1.0): left as it is.
+            auto& timer = Timer(world);
+            if (raised && timer == RaisedTimer) timer = 0.f;
+            // A safety net: a pause the Tick took anyway.
+            ClearFocusPause(world);
+        }
+    }
+
+    bool KeepTickingOn(AWorldInfo* world)
+    {
+        ResolveWorldFields();
+        KeepTicking.store(true, std::memory_order_relaxed);
+        return world != nullptr && world->IsA(WorldClass) && ClearFocusPause(world);
+    }
+
+    void KeepTickingOff() { KeepTicking.store(false, std::memory_order_relaxed); }
+
+    json KeepTickingState()
+    {
+        return json{
+            { "keepTicking", KeepTicking.load(std::memory_order_relaxed) },
+            { "worldTicks", WorldTicks.load(std::memory_order_relaxed) },
+            { "focusPausesCleared", FocusPausesCleared.load(std::memory_order_relaxed) },
+            { "timerRaises", TimerRaises.load(std::memory_order_relaxed) },
+        };
+    }
+
+    bool PausedByFocusLoss(AWorldInfo* world)
+    {
+        ResolveWorldFields();
+        if (!world->IsA(WorldClass)) throw BridgeError(ToUtf8(PathOf(world)) + " is not a BioWorldInfo");
+        return (PausedWord(world) & PausedMask) != 0;
+    }
+
     // ! ProcessEvent hook
     // ========================================
 
@@ -215,7 +336,7 @@ namespace MeleBridge
 
             // The editor's own calls (Canvas.Project, Actor.Trace) only pass through.
             auto const editor = Editor::Busy();
-            if (HasJobs.load(std::memory_order_acquire) && !InJobs && !editor)
+            if (HasJobs.load(std::memory_order_acquire) && !InJobs && !InRaisedTick && !editor)
             {
                 InJobs = true;
                 RunJobs();
@@ -223,8 +344,24 @@ namespace MeleBridge
             }
             if (Watching.load(std::memory_order_relaxed) && !InJobs && !editor) Publish(Context, Function, Parms);
 
+            // keep_ticking wraps the world's own Tick, whoever calls it (jobs and the editor never do).
+            AWorldInfo* ticking = nullptr;
+            auto raised = false;
+            auto const outerRaised = InRaisedTick;
+            if (KeepTicking.load(std::memory_order_relaxed) && IsWorldTick(Context, Function))
+            {
+                ticking = static_cast<AWorldInfo*>(Context);
+                raised = BeforeWorldTick(ticking, Parms);
+                if (raised) InRaisedTick = true;
+            }
+
             orig(Context, Function, Parms, Result);
 
+            if (ticking != nullptr)
+            {
+                InRaisedTick = outerRaised;
+                AfterWorldTick(ticking, raised);
+            }
             if (!InJobs && !editor) Editor::AfterProcessEvent(Context, Function, Parms);
         }
     }

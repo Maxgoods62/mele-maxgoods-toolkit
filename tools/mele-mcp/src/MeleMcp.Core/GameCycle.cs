@@ -28,7 +28,8 @@ public static partial class GameCycle
     [GeneratedRegex(@"appLogErrorf: Loading (?<save>\S+) on device")]
     private static partial Regex SaveLoad();
 
-    [GeneratedRegex(@"appLogErrorf: (?<error>Failed to load game\..*)$")]
+    /// <summary>BioLoadGame's error, or loadgame's (a career save's name it can't find; the logger's prefix is not checked).</summary>
+    [GeneratedRegex(@"(?<error>Failed to load game\..*|Unable to load .* on device Id.*)$")]
     private static partial Regex LoadFailed();
 
     public sealed record Options(string? Mod, bool Check, IReadOnlyList<string> Languages, int? LoadSlot, IReadOnlyList<string> Commands,
@@ -134,7 +135,11 @@ public static partial class GameCycle
         }
         if (o.Commands.Count > 0 && o.WaitForMap is { Length: > 0 } && !map.Equals(o.WaitForMap, StringComparison.OrdinalIgnoreCase))
         {
-            if (!WaitForMap(log!, offset, o.WaitForMap, o.TimeoutSeconds, Step, out map)) return Stop($"{o.WaitForMap} did not load", check, install);
+            if (!WaitForMap(log!, offset, o.WaitForMap, o.TimeoutSeconds, Step, out map))
+            {
+                var failure = DebugLog.LinesAfter(log!, offset).Select(l => LoadFailed().Match(l)).FirstOrDefault(m => m.Success);
+                return Stop(failure is null ? $"{o.WaitForMap} did not load" : $"the game says: {failure.Groups["error"].Value.Trim()}", check, install);
+            }
         }
 
         // 5. Let streaming and the loading screen finish, then look.
