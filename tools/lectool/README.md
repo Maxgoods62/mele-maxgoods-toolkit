@@ -35,7 +35,7 @@ Build commands (the Galaxy Map Normandy build runs the first five):
 
 | Command | What it does |
 |---|---|
-| `compileclass <outPcc> <packageName> <Class.uc>...` | Writes a new LE1 package with the classes under a `Package` export, plus a `CombinedStartupReferencer` that keeps them loaded when the file is an AutoLoad startup package (LE1CP's layout). |
+| `compileclass <outPcc> <packageName> <Class.uc>... [--pkg=<name> <Class.uc>...] [--unforce=<name>] [--no-referencer]` | Writes a new LE1 package with the classes under a `Package` export, plus a `CombinedStartupReferencer` that keeps them loaded when the file is an AutoLoad startup package (LE1CP's layout). `--pkg=` starts another `Package` export for the files after it, such as a copy of another mod's base class next to our subclasses. LEC marks each `Package` export and its contents `ForcedExport` (looked up in memory by their own path); `--unforce=` clears that for one package, so its classes load from the file as `<file>.<name>.<class>`, as LE1CP's Mod Settings Menu loads its pages. `--no-referencer` leaves the referencer out. |
 | `addactor <levelPcc> <package> <class>` | Places one actor of a script class at the level's origin, with its class defaults. The class must be in an AutoLoad package. |
 | `portmesh <srcPcc> <srcUIndex> <pcc> <newName>` | Ports a `StaticMesh` with its materials, textures and the materials' local shaders to the top level of an existing package. |
 | `buildsound <donorPcc> <donorCue> <ogg> <samplesPerChannel> <channels> <rate> <outPcc> <newCue> <wavTitle> [volume]` | Clones a donor cue into `outPcc` (created if missing) and puts the Ogg into the waves under the new cue. `--loop` adds a looping node. |

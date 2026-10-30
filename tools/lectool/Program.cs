@@ -784,22 +784,44 @@ if (cmd == "2da") {
   }
 } else if (cmd == "compileclass") {
   // compileclass <outPcc> <packageName> <Class.uc>...: new LE1 package with the classes under a Package export, and a
-  // CombinedStartupReferencer that keeps them loaded when the file is an AutoLoad GlobalPackage (LE1CP's layout)
+  // CombinedStartupReferencer that keeps them loaded when the file is an AutoLoad GlobalPackage (LE1CP's layout).
+  // --pkg=<name> puts the .uc files after it into another Package export, so one file can hold a copy of another mod's
+  // base class next to our subclasses. LEC marks each Package export ForcedExport (found in memory by its own path);
+  // --unforce=<name> clears that, so its classes load from this file as <file>.<name>.<class> (LE1CP Mod Settings Menu
+  // pages, which the menu loads by path when it opens them). --no-referencer leaves out the referencer (a file that is
+  // not a GlobalPackage).
   var outPath = args[1];
   if (File.Exists(outPath)) File.Delete(outPath);
   MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
   using var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
-  var classes = args.Skip(3).Select(f => new LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.LooseClass(Path.GetFileNameWithoutExtension(f), File.ReadAllText(f), f)).ToList();
+  var looseByPackage = new List<LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.LooseClassPackage>();
+  var unforce = new List<string>();
+  var currentClasses = new List<LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.LooseClass>();
+  looseByPackage.Add(new(args[2], currentClasses));
+  foreach (var a in args.Skip(3)) {
+    if (a.StartsWith("--pkg=")) { currentClasses = new(); looseByPackage.Add(new(a["--pkg=".Length..], currentClasses)); }
+    else if (a.StartsWith("--unforce=")) unforce.Add(a["--unforce=".Length..]);
+    else if (a == "--no-referencer") continue;
+    else currentClasses.Add(new(Path.GetFileNameWithoutExtension(a), File.ReadAllText(a), a));
+  }
+  looseByPackage.RemoveAll(p => p.Classes.Count == 0);
   using var cache = new PackageCache();
   var usop = new LegendaryExplorerCore.UnrealScript.UnrealScriptOptionsPackage { Cache = cache };
-  var log = LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.CompileLooseClasses(pkg,
-    new List<LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.LooseClassPackage> { new(args[2], classes) }, usop);
+  var log = LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.CompileLooseClasses(pkg, looseByPackage, usop);
   foreach (var m in log.Content) Console.WriteLine("log: " + m);
   if (log.HasErrors) { Console.WriteLine("COMPILE FAILED"); Environment.Exit(1); }
-  var referencer = ExportCreator.CreateExport(pkg, "CombinedStartupReferencer", "ObjectReferencer", null, null, false, false, null, null);
-  var refs = new ArrayProperty<ObjectProperty>("ReferencedObjects");
-  foreach (var c in pkg.Exports.Where(x => x.ClassName == "Class")) refs.Add(new ObjectProperty(c));
-  referencer.WriteProperty(refs);
+  foreach (var name in unforce) {
+    var p = pkg.Exports.SingleOrDefault(x => x.ClassName == "Package" && x.Parent == null && x.ObjectName.Instanced == name)
+      ?? throw new Exception($"--unforce: no top-level Package export {name}");
+    foreach (var d in p.GetAllDescendants().OfType<ExportEntry>().Prepend(p))
+      d.ExportFlags &= ~LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+  }
+  if (!args.Contains("--no-referencer")) {
+    var referencer = ExportCreator.CreateExport(pkg, "CombinedStartupReferencer", "ObjectReferencer", null, null, false, false, null, null);
+    var refs = new ArrayProperty<ObjectProperty>("ReferencedObjects");
+    foreach (var c in pkg.Exports.Where(x => x.ClassName == "Class")) refs.Add(new ObjectProperty(c));
+    referencer.WriteProperty(refs);
+  }
   pkg.Save();
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
