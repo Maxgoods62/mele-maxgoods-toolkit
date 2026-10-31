@@ -750,6 +750,31 @@ if (cmd == "2da") {
   foreach (var b in LegendaryExplorerCore.Shaders.ShaderCacheManipulator.GetBrokenMaterials(pkg, null)) Console.WriteLine("BROKEN material " + b);
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
+} else if (cmd == "addtexture") {
+  // addtexture <pcc> <name> <png>: a new top-level texture in an existing package, made from a PNG: DXT5, one mip, not
+  // sRGB, TEXTUREGROUP_UI, NeverStream, stored in the package (as the vanilla UI textures are)
+  if (args.Length != 4) { Console.WriteLine("ERROR usage: addtexture <pcc> <name> <png>"); Environment.Exit(1); }
+  using var png = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Bgra32>(args[3]);
+  var (w, h) = (png.Width, png.Height);
+  var px = new byte[w * h * 4];
+  png.CopyPixelDataTo(px);
+  using var pkg = MEPackageHandler.OpenMEPackage(args[1], forceLoadFromDisk: true);
+  if (pkg.FindExport(args[2]) != null) { Console.WriteLine($"ERROR {args[2]}: already in {Path.GetFileName(args[1])}"); Environment.Exit(1); }
+  var tex = Texture2D.CreateTexture(pkg, new NameReference(args[2]), w, h, LegendaryExplorerCore.Textures.PixelFormat.DXT5, false, null, new NameReference("TEXTUREGROUP_UI"));
+  tex.ObjectFlags |= LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.Public | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForClient
+    | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForServer | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForEdit;
+  var img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, w, h);
+  foreach (var m in new Texture2D(tex).Replace(img, tex.GetProperties(), isPackageStored: true)) Console.WriteLine("note: " + m);
+  // LEC's Replace drops NeverStream below 6 mips, as in gfxpackage. CreateTexture leaves the original size out, and
+  // Canvas.DrawTile divides by it.
+  var tp = tex.GetProperties();
+  tp.AddOrReplaceProp(new BoolProperty(true, "NeverStream"));
+  tp.AddOrReplaceProp(new BoolProperty(false, "SRGB"));
+  tp.AddOrReplaceProp(new IntProperty(w, "OriginalSizeX"));
+  tp.AddOrReplaceProp(new IntProperty(h, "OriginalSizeY"));
+  tex.WriteProperties(tp);
+  pkg.Save();
+  Console.WriteLine($"{tex.UIndex}\t{tex.InstancedFullPath}\t{w}x{h}\t{tex.DataSize} bytes");
 } else if (cmd == "meshinfo") {
   // meshinfo <pcc> <uIndex>: a StaticMesh's bounds, LODs and element materials
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
