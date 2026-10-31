@@ -751,16 +751,18 @@ if (cmd == "2da") {
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
 } else if (cmd == "addtexture") {
-  // addtexture <pcc> <name> <png>: a new top-level texture in an existing package, made from a PNG: DXT5, one mip, not
-  // sRGB, TEXTUREGROUP_UI, NeverStream, stored in the package (as the vanilla UI textures are)
-  if (args.Length != 4) { Console.WriteLine("ERROR usage: addtexture <pcc> <name> <png>"); Environment.Exit(1); }
+  // addtexture <pcc> <name> <png> [--argb]: a new top-level texture in an existing package, made from a PNG: DXT5 (with
+  // --argb uncompressed, as the vanilla UI gradients are: DXT5 bands dark colours), one mip, not sRGB, TEXTUREGROUP_UI,
+  // NeverStream, stored in the package (as the vanilla UI textures are)
+  var argb = args.Length == 5 && args[4] == "--argb";
+  if (args.Length != 4 && !argb) { Console.WriteLine("ERROR usage: addtexture <pcc> <name> <png> [--argb]"); Environment.Exit(1); }
   using var png = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Bgra32>(args[3]);
   var (w, h) = (png.Width, png.Height);
   var px = new byte[w * h * 4];
   png.CopyPixelDataTo(px);
   using var pkg = MEPackageHandler.OpenMEPackage(args[1], forceLoadFromDisk: true);
   if (pkg.FindExport(args[2]) != null) { Console.WriteLine($"ERROR {args[2]}: already in {Path.GetFileName(args[1])}"); Environment.Exit(1); }
-  var tex = Texture2D.CreateTexture(pkg, new NameReference(args[2]), w, h, LegendaryExplorerCore.Textures.PixelFormat.DXT5, false, null, new NameReference("TEXTUREGROUP_UI"));
+  var tex = Texture2D.CreateTexture(pkg, new NameReference(args[2]), w, h, argb ? LegendaryExplorerCore.Textures.PixelFormat.ARGB : LegendaryExplorerCore.Textures.PixelFormat.DXT5, false, null, new NameReference("TEXTUREGROUP_UI"));
   tex.ObjectFlags |= LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.Public | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForClient
     | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForServer | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForEdit;
   var img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, w, h);
@@ -772,6 +774,7 @@ if (cmd == "2da") {
   tp.AddOrReplaceProp(new BoolProperty(false, "SRGB"));
   tp.AddOrReplaceProp(new IntProperty(w, "OriginalSizeX"));
   tp.AddOrReplaceProp(new IntProperty(h, "OriginalSizeY"));
+  if (argb) tp.AddOrReplaceProp(new BoolProperty(true, "CompressionNone"));
   tex.WriteProperties(tp);
   pkg.Save();
   Console.WriteLine($"{tex.UIndex}\t{tex.InstancedFullPath}\t{w}x{h}\t{tex.DataSize} bytes");
