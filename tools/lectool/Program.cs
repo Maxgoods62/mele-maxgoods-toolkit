@@ -778,6 +778,50 @@ if (cmd == "2da") {
   tex.WriteProperties(tp);
   pkg.Save();
   Console.WriteLine($"{tex.UIndex}\t{tex.InstancedFullPath}\t{w}x{h}\t{tex.DataSize} bytes");
+} else if (cmd == "tlkpackage") {
+  // tlkpackage <outPcc> <strings.tsv> [--ids-from <other.tsv>]: one language of a mod's GlobalTlk, in the layout of
+  // LE1CP's files: the exports GlobalTlk_tlk (female player) and GlobalTlk_tlk_M (male player), the same strings in both,
+  // public and marked as localized. With --ids-from the file must have exactly the ids of that other file, so no
+  // language can lack a string. Reads the package back and compares it with the input.
+  var idsFrom = args.Length == 5 && args[3] == "--ids-from";
+  if (args.Length != 3 && !idsFrom) { Console.WriteLine("ERROR usage: tlkpackage <outPcc> <strings.tsv> [--ids-from <other.tsv>]"); Environment.Exit(1); }
+  var strings = ReadStrings(args[2]);
+  if (idsFrom) {
+    var wanted = ReadStrings(args[4]);
+    var missing = wanted.Keys.Except(strings.Keys).OrderBy(i => i).ToList();
+    var extra = strings.Keys.Except(wanted.Keys).OrderBy(i => i).ToList();
+    if (missing.Count + extra.Count > 0) {
+      Console.WriteLine($"ERROR {Path.GetFileName(args[2])}: missing ids [{string.Join(", ", missing)}], ids not in {Path.GetFileName(args[4])} [{string.Join(", ", extra)}]");
+      Environment.Exit(1);
+    }
+  }
+  var outPath = args[1];
+  if (File.Exists(outPath)) File.Delete(outPath);
+  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  string[] tlkNames = { "GlobalTlk_tlk", "GlobalTlk_tlk_M" };
+  using (var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true)) {
+    foreach (var name in tlkNames) {
+      var exp = pkg.CreateExport(new NameReference(name), "BioTlkFile", indexed: false);
+      exp.ObjectFlags = LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.Public | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.Standalone
+        | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForClient | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForServer
+        | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForEdit | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LocalizedResource;
+      var huffman = new LegendaryExplorerCore.TLK.ME1.HuffmanCompression();
+      huffman.LoadInputData(strings.Select(s => new LegendaryExplorerCore.TLK.TLKStringRef(s.Key, s.Value)).ToList());
+      huffman.SerializeTalkfileToExport(exp);
+    }
+    pkg.Save();
+  }
+  using (var back = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true)) {
+    foreach (var name in tlkNames) {
+      var read = new LegendaryExplorerCore.TLK.ME1.ME1TalkFile(back.FindExport(name)).StringRefs.ToDictionary(r => r.StringID, r => r.Data);
+      var wrong = strings.Where(s => !read.TryGetValue(s.Key, out var t) || t != s.Value).Select(s => s.Key).ToList();
+      if (read.Count != strings.Count || wrong.Count > 0) {
+        Console.WriteLine($"ERROR {Path.GetFileName(outPath)} {name}: read {read.Count} strings of {strings.Count}, wrong ids [{string.Join(", ", wrong)}]");
+        Environment.Exit(1);
+      }
+    }
+  }
+  Console.WriteLine($"{Path.GetFileName(outPath)}\t{strings.Count} strings\t{strings.Keys.Min()}-{strings.Keys.Max()}");
 } else if (cmd == "meshinfo") {
   // meshinfo <pcc> <uIndex>: a StaticMesh's bounds, LODs and element materials
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
@@ -939,6 +983,22 @@ if (cmd == "2da") {
   }
 }
 
+// A strings file: UTF-8 lines of an id, one tab and the text. Empty lines and lines starting with # are skipped.
+static Dictionary<int, string> ReadStrings(string path) {
+  var strings = new Dictionary<int, string>();
+  var lines = File.ReadAllLines(path, new System.Text.UTF8Encoding(false, true));
+  void Fail(int line, string why) { Console.WriteLine($"ERROR {Path.GetFileName(path)} line {line}: {why}"); Environment.Exit(1); }
+  for (int i = 0; i < lines.Length; i++) {
+    if (lines[i].Length == 0 || lines[i][0] == '#') continue;
+    var parts = lines[i].Split('\t');
+    if (parts.Length != 2) Fail(i + 1, "not an id, one tab and the text");
+    else if (!int.TryParse(parts[0], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var id) || id == 0) Fail(i + 1, $"bad id '{parts[0]}'");
+    else if (parts[1].Trim().Length == 0) Fail(i + 1, $"no text for {id}");
+    else if (!strings.TryAdd(id, parts[1])) Fail(i + 1, $"id {id} twice");
+  }
+  if (strings.Count == 0) { Console.WriteLine($"ERROR {Path.GetFileName(path)}: no strings"); Environment.Exit(1); }
+  return strings;
+}
 // The cell's value in a cell of the given package (a name cell resolves its name there).
 static Bio2DACell CopyCell(Bio2DACell c, IMEPackage pkg) => c.Type switch {
   Bio2DACell.Bio2DADataType.TYPE_INT => new Bio2DACell(c.IntValue),

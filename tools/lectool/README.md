@@ -31,7 +31,7 @@ whose object database loads; add it to `WSLENV` as well when you set it.
 
 ## Commands
 
-Build commands (the Galaxy Map Normandy build runs the first six):
+Build commands (the Galaxy Map Normandy build runs the first seven):
 
 | Command | What it does |
 |---|---|
@@ -39,6 +39,7 @@ Build commands (the Galaxy Map Normandy build runs the first six):
 | `addactor <levelPcc> <package> <class>` | Places one actor of a script class at the level's origin, with its class defaults. The class must be in an AutoLoad package. |
 | `portmesh <srcPcc> <srcUIndex> <pcc> <newName>` | Ports a `StaticMesh` with its materials, textures and the materials' local shaders to the top level of an existing package. |
 | `addtexture <pcc> <name> <png> [--argb]` | Adds a new top-level `Texture2D` to an existing package from a PNG: DXT5 (with `--argb` uncompressed, as the vanilla UI gradients are, for dark colours that DXT5 would band), one mip, not sRGB, `TEXTUREGROUP_UI`, `NeverStream`, stored in the package. Refuses a name the package already has. |
+| `tlkpackage <outPcc> <strings.tsv> [--ids-from <other.tsv>]` | Writes a new LE1 package with one language of a mod's GlobalTlk: the exports `GlobalTlk_tlk` and `GlobalTlk_tlk_M`, the same strings in both, in the layout of the LE1 Community Patch's files. The strings file is UTF-8, one string per line: an id, one tab, the text; empty lines and lines starting with `#` are skipped. `--ids-from` requires exactly the ids of another strings file, so no language lacks a string. It reads the package back and exits 1 unless every string comes back unchanged. |
 | `buildsound <donorPcc> <donorCue> <ogg> <samplesPerChannel> <channels> <rate> <outPcc> <newCue> <wavTitle> [volume]` | Clones a donor cue into `outPcc` (created if missing) and puts the Ogg into the waves under the new cue. `--loop` adds a looping node. |
 | `wwise <pcc> <bankUIndex> [eventId]...` | Prints a Wwise bank's embedded files and objects, and follows each event ID given to its sounds. With `WEMDIR` (a folder) and `WEMIDS` (comma-separated IDs) set, it also writes those embedded files there as `.wem`. The galaxy map build takes its travel sound from LE3 this way, with `LECGAME=LE3`. |
 | `2dapart <src.pcc> <recipe.yaml> <out.pcc>` | Writes a package for ME3Tweaks Mod Manager's Bio2DA merge (`.m3da`): per table of the recipe, a `<Table>_part_1` export of the table's class under `Package` exports named like the table's parents in `src.pcc`, with the same columns and only the recipe's rows. Prints the tables as read back from `out.pcc`. The recipe format is below. |
