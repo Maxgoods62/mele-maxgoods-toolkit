@@ -6,6 +6,8 @@ using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Unreal.BinaryConverters;
 using LegendaryExplorerCore.Unreal;
 using LegendaryExplorerCore.Unreal.ObjectInfo;
+using BmfBinary = LegendaryExplorerCore.Unreal.BinaryConverters.BioMorphFace;
+using MeshBinary = LegendaryExplorerCore.Unreal.BinaryConverters.SkeletalMesh;
 
 // The Legendary Edition folder: MELE_LE_DIR as for mele-mcp (from WSL also set WSLENV=MELE_LE_DIR), else LEC's registry lookup.
 var leDir = Environment.GetEnvironmentVariable("MELE_LE_DIR");
@@ -14,7 +16,8 @@ LE1Directory.ReloadDefaultGamePath();
 var gameArg = Environment.GetEnvironmentVariable("LECGAME") ?? "LE1";
 var game = Enum.Parse<MEGame>(gameArg);
 if (game == MEGame.LE2) LE2Directory.ReloadDefaultGamePath(); if (game == MEGame.LE3) LE3Directory.ReloadDefaultGamePath();
-LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default, s => Console.Error.WriteLine(s), objectDBsToLoad: new[]{game});
+// morphface reads a donor of another game, so it needs that game's object database too.
+LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default, s => Console.Error.WriteLine(s), objectDBsToLoad: args[0] == "morphface" ? new[]{MEGame.LE1, MEGame.LE2, MEGame.LE3} : new[]{game});
 var cmd = args[0];
 if (cmd == "ogg") {
   var dllDir = Environment.GetEnvironmentVariable("EXTRADLLDIR"); if (dllDir != null) SetDllDirectoryW(dllDir);
@@ -433,6 +436,83 @@ if (cmd == "2da") {
   foreach (var x in pcc.Exports)
     Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{(x.IsForcedExport ? "F" : "-")}\t{(ulong)x.ObjectFlags:X}\t{x.DataSize}\t{(x.ClassName == "Texture2D" ? x.GetProperty<NameProperty>("TextureFileCacheName")?.Value.Instanced : "")}");
   foreach (var i in pcc.Imports) Console.WriteLine($"{i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
+} else if (cmd == "morphface") {
+  // morphface <donor.pcc> <donorFace> <pcc> <face> [--mic <path>] [--sha1 <hex>]: gives the BioMorphFace <face> of <pcc> the
+  // look of the BioMorphFace <donorFace>, in place: its LOD0 and LOD1 vertex positions, its bones (m_aFinalSkeleton, by
+  // name) and the colors, scalars and textures of its BioMaterialOverride (by parameter name, a texture by object name
+  // among the package's own). The donor may be a face of another game. LOD2 stays: the game draws it from the mesh. The two
+  // base heads must have the same vertices in the same order on LOD0 and LOD1, or the donor's positions would land on the
+  // wrong vertices, and every bone and parameter must exist on both sides: arrays keep their length. --mic also sets a
+  // baked material instance of the head (a level pawn holds one) from the same values. --sha1 stops on any other donor
+  // look. Saves, reads the file back and exits 1 unless it holds the donor's look; prints the look's SHA-1.
+  var a = args.Skip(1).ToList();
+  string Opt(string name) { int i = a.IndexOf(name); if (i < 0) return null; var v = i + 1 < a.Count ? a[i + 1] : null; a.RemoveRange(i, Math.Min(2, a.Count - i)); return v ?? ""; }
+  var (micPath, wantSha) = (Opt("--mic"), Opt("--sha1"));
+  if (a.Count != 4 || micPath == "" || wantSha == "") { Console.WriteLine("usage: morphface <donor.pcc> <donorFace> <pcc> <face> [--mic <path>] [--sha1 <hex>]"); Environment.Exit(1); return; }
+  var (donorPath, donorName, path, faceName) = (a[0], a[1], a[2], a[3]);
+  using var donorPkg = MEPackageHandler.OpenMEPackage(donorPath, forceLoadFromDisk: true);
+  var errors = new List<string>();
+  void Stop() { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
+  var donor = donorPkg.FindExport(donorName);
+  if (donor?.ClassName != "BioMorphFace") { errors.Add($"{donorName}: no BioMorphFace export with this path in {Path.GetFileName(donorPath)}"); Stop(); return; }
+  var dLook = FaceLook.Read(donor);
+  if (dLook.Lods.Length < 2) { errors.Add($"{donorName}: {dLook.Lods.Length} LODs in its binary, LOD0 and LOD1 needed"); Stop(); return; }
+  var dSha = dLook.Sha1();
+  if (wantSha != null && !dSha.Equals(wantSha, StringComparison.OrdinalIgnoreCase)) errors.Add($"{donorName}: its look is {dSha}, not the {wantSha} asked for (a mod changed {Path.GetFileName(donorPath)}?)");
+  using (var pcc = MEPackageHandler.OpenMEPackage(path, forceLoadFromDisk: true)) {
+    var face = pcc.FindExport(faceName);
+    if (face?.ClassName != "BioMorphFace") { errors.Add($"{faceName}: no BioMorphFace export with this path in {Path.GetFileName(path)}"); Stop(); return; }
+    var mic = micPath == null ? null : pcc.FindExport(micPath);
+    if (micPath != null && mic?.GetProperty<ArrayProperty<StructProperty>>("VectorParameterValues") == null) errors.Add($"--mic {micPath}: no material instance with parameters at this path");
+    var over = face.GetProperty<ObjectProperty>("m_oMaterialOverrides")?.ResolveToEntry(pcc) as ExportEntry;
+    if (over?.ClassName != "BioMaterialOverride") errors.Add($"{faceName}: m_oMaterialOverrides is no BioMaterialOverride export of this package");
+    var dHead = FaceLook.BaseHead(donor);
+    var head = FaceLook.BaseHead(face);
+    if (dHead == null || head == null) errors.Add("m_oBaseHead: both faces need a SkeletalMesh export in their own package");
+    else foreach (int l in new[] { 0, 1 }) {
+      if (l >= dHead.LODModels.Length || l >= head.LODModels.Length) { errors.Add($"the base heads need a LOD{l}"); continue; }
+      var (dv, v) = (dHead.LODModels[l].VertexBufferGPUSkin.VertexData, head.LODModels[l].VertexBufferGPUSkin.VertexData);
+      if (dv.Length != v.Length || dLook.Lods[l].Length != v.Length) { errors.Add($"LOD{l}: {dv.Length} verts on the donor's base head, {v.Length} on this one, {dLook.Lods[l].Length} in the donor's face"); continue; }
+      int off = Enumerable.Range(0, v.Length).Count(i => (dv[i].Position - v[i].Position).Length() > 0.001f);
+      if (off > 0) errors.Add($"LOD{l}: {off} of {v.Length} verts of the two base heads differ: not the same head, or not the same order");
+    }
+    if (errors.Count > 0) { Stop(); return; }
+    var bin = ObjectBinary.From<BmfBinary>(face);
+    if (bin.LODs.Length < 2) errors.Add($"{faceName}: {bin.LODs.Length} LODs in its binary, LOD0 and LOD1 needed");
+    var props = face.GetProperties();
+    var skel = props.GetProp<ArrayProperty<StructProperty>>("m_aFinalSkeleton");
+    if (skel == null) { errors.Add($"{faceName}: no m_aFinalSkeleton"); Stop(); return; }
+    var names = skel.Select(s => s.GetProp<NameProperty>("nName").Value.Instanced).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (!names.SetEquals(dLook.Bones.Keys)) errors.Add($"m_aFinalSkeleton: the bones differ: {string.Join(", ", names.Except(dLook.Bones.Keys, StringComparer.OrdinalIgnoreCase).Concat(dLook.Bones.Keys.Except(names, StringComparer.OrdinalIgnoreCase)))}");
+    foreach (var n in dLook.Params.OneSided(FaceParams.Read(over, false))) errors.Add($"{over.InstancedFullPath}: parameter {n} is not on both sides");
+    if (mic != null) foreach (var n in dLook.Params.OneSided(FaceParams.Read(mic, true))) errors.Add($"{mic.InstancedFullPath}: parameter {n} is not on both sides");
+    if (errors.Count > 0) { Stop(); return; }
+    int moved = Enumerable.Range(0, dLook.Lods[0].Length).Count(i => (dLook.Lods[0][i] - head.LODModels[0].VertexBufferGPUSkin.VertexData[i].Position).Length() > 0.001f);
+    bin.LODs[0] = dLook.Lods[0];
+    bin.LODs[1] = dLook.Lods[1];
+    foreach (var s in skel) {
+      var (p, d) = (s.GetProp<StructProperty>("vPos"), dLook.Bones[s.GetProp<NameProperty>("nName").Value.Instanced]);
+      p.GetProp<FloatProperty>("X").Value = d[0]; p.GetProp<FloatProperty>("Y").Value = d[1]; p.GetProp<FloatProperty>("Z").Value = d[2];
+    }
+    face.WritePropertiesAndBinary(props, bin);
+    int Texture(string objectName) {
+      var t = pcc.Exports.Where(e => e.ClassName == "Texture2D" && e.ObjectName.Instanced.Equals(objectName, StringComparison.OrdinalIgnoreCase)).ToList();
+      if (t.Count != 1) errors.Add($"texture {objectName}: {t.Count} Texture2D exports of this name in {Path.GetFileName(path)}, one needed");
+      return t.Count == 1 ? t[0].UIndex : 0;
+    }
+    dLook.Params.WriteTo(over, false, Texture, errors);
+    if (mic != null) dLook.Params.WriteTo(mic, true, Texture, errors);
+    if (errors.Count > 0) { Stop(); return; }
+    pcc.Save();
+    Console.WriteLine($"{Path.GetFileName(path)}: {face.InstancedFullPath} now looks like {donor.ObjectName.Instanced}: {moved} of {dLook.Lods[0].Length} LOD0 verts off the base head, {skel.Count} bones, {dLook.Params.Colors.Count} colors, {dLook.Params.Scalars.Count} scalars, {dLook.Params.Textures.Count} texture(s){(mic != null ? ", the same on " + mic.ObjectName.Instanced : "")}");
+  }
+  using var saved = MEPackageHandler.OpenMEPackage(path, forceLoadFromDisk: true);
+  var back = saved.FindExport(faceName);
+  var sha = FaceLook.Read(back).Sha1();
+  if (sha != dSha) errors.Add($"read back: {faceName} has the look {sha}, the donor {dSha}");
+  if (micPath != null && FaceParams.Read(saved.FindExport(micPath), true).Text() != dLook.Params.Text()) errors.Add($"read back: {micPath} differs from the donor's parameters");
+  if (errors.Count > 0) { Stop(); return; }
+  Console.WriteLine($"look sha1 {sha}");
 } else if (cmd == "gfxpackage") {
   // gfxpackage <src.pcc> <movie> <out.pcc> [--raw-data <file>] [--copy-textures] [--add-texture <name> <like>]...
   //            [--texture <name> <png|#RRGGBB>]...: a new package holding a copy of a GFx movie at its top level, not
@@ -1052,6 +1132,76 @@ static string PropText(Property p, IMEPackage pcc) => p switch {
   StrProperty s => "\"" + s.Value + "\"",
   _ => p.PropType.ToString(),
 };
+
+// The look morphface copies: a BioMorphFace's LOD0 and LOD1 positions, its bones and its BioMaterialOverride's parameters.
+class FaceLook {
+  public System.Numerics.Vector3[][] Lods;
+  public SortedDictionary<string, float[]> Bones = new(StringComparer.OrdinalIgnoreCase);
+  public FaceParams Params = new();
+  public static MeshBinary BaseHead(ExportEntry face) =>
+    face.GetProperty<ObjectProperty>("m_oBaseHead")?.ResolveToEntry(face.FileRef) is ExportEntry { ClassName: "SkeletalMesh" } m ? ObjectBinary.From<MeshBinary>(m) : null;
+  public static FaceLook Read(ExportEntry face) {
+    var look = new FaceLook { Lods = ObjectBinary.From<BmfBinary>(face).LODs.Take(2).ToArray() };
+    foreach (var s in face.GetProperty<ArrayProperty<StructProperty>>("m_aFinalSkeleton") ?? Enumerable.Empty<StructProperty>()) {
+      var p = s.GetProp<StructProperty>("vPos");
+      look.Bones[s.GetProp<NameProperty>("nName").Value.Instanced] = new[] { p.GetProp<FloatProperty>("X").Value, p.GetProp<FloatProperty>("Y").Value, p.GetProp<FloatProperty>("Z").Value };
+    }
+    if (face.GetProperty<ObjectProperty>("m_oMaterialOverrides")?.ResolveToEntry(face.FileRef) is ExportEntry over) look.Params = FaceParams.Read(over, false);
+    return look;
+  }
+  public string Sha1() {
+    using var ms = new MemoryStream();
+    using var w = new BinaryWriter(ms);
+    foreach (var lod in Lods) foreach (var v in lod) { w.Write(v.X); w.Write(v.Y); w.Write(v.Z); }
+    foreach (var (n, p) in Bones) { w.Write(n.ToLowerInvariant()); foreach (var f in p) w.Write(f); }
+    w.Write(Params.Text());
+    w.Flush();
+    return Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(ms.ToArray())).ToLowerInvariant();
+  }
+}
+// Material parameters by name, from a BioMaterialOverride or a material instance; a texture as its object name.
+class FaceParams {
+  public SortedDictionary<string, float[]> Colors = new(StringComparer.OrdinalIgnoreCase);
+  public SortedDictionary<string, float> Scalars = new(StringComparer.OrdinalIgnoreCase);
+  public SortedDictionary<string, string> Textures = new(StringComparer.OrdinalIgnoreCase);
+  static (string colors, string scalars, string textures, string name, string color, string scalar, string texture) Keys(bool mic) => mic
+    ? ("VectorParameterValues", "ScalarParameterValues", "TextureParameterValues", "ParameterName", "ParameterValue", "ParameterValue", "ParameterValue")
+    : ("m_aColorOverrides", "m_aScalarOverrides", "m_aTextureOverrides", "nName", "cValue", "sValue", "m_pTexture");
+  public static FaceParams Read(ExportEntry e, bool mic) {
+    var k = Keys(mic);
+    var r = new FaceParams();
+    IEnumerable<StructProperty> Items(string array) => e.GetProperty<ArrayProperty<StructProperty>>(array) ?? Enumerable.Empty<StructProperty>();
+    string Name(StructProperty s) => s.GetProp<NameProperty>(k.name).Value.Instanced;
+    foreach (var s in Items(k.colors)) { var c = s.GetProp<StructProperty>(k.color); r.Colors[Name(s)] = "RGBA".Select(ch => c.GetProp<FloatProperty>(ch.ToString()).Value).ToArray(); }
+    foreach (var s in Items(k.scalars)) r.Scalars[Name(s)] = s.GetProp<FloatProperty>(k.scalar).Value;
+    foreach (var s in Items(k.textures)) r.Textures[Name(s)] = s.GetProp<ObjectProperty>(k.texture).ResolveToEntry(e.FileRef)?.ObjectName.Instanced ?? "";
+    return r;
+  }
+  // The parameter names only one of the two has. Arrays keep their length, so a look carries over only between equal names.
+  public IEnumerable<string> OneSided(FaceParams o) {
+    IEnumerable<string> Diff(IEnumerable<string> a, IEnumerable<string> b) =>
+      a.Except(b, StringComparer.OrdinalIgnoreCase).Concat(b.Except(a, StringComparer.OrdinalIgnoreCase));
+    return Diff(Colors.Keys, o.Colors.Keys).Concat(Diff(Scalars.Keys, o.Scalars.Keys)).Concat(Diff(Textures.Keys, o.Textures.Keys));
+  }
+  // Sets these values on e, by parameter name. An array keeps its length: a name e lacks is an error.
+  public void WriteTo(ExportEntry e, bool mic, Func<string, int> texture, List<string> errors) {
+    var k = Keys(mic);
+    var props = e.GetProperties();
+    StructProperty Find(string array, string name) {
+      var s = props.GetProp<ArrayProperty<StructProperty>>(array)?.FirstOrDefault(x => x.GetProp<NameProperty>(k.name).Value.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase));
+      if (s == null) errors.Add($"{e.InstancedFullPath}: no {name} in {array}");
+      return s;
+    }
+    foreach (var (n, v) in Colors) if (Find(k.colors, n)?.GetProp<StructProperty>(k.color) is { } c) foreach (var (ch, f) in "RGBA".Zip(v)) c.GetProp<FloatProperty>(ch.ToString()).Value = f;
+    foreach (var (n, v) in Scalars) if (Find(k.scalars, n) is { } s) s.GetProp<FloatProperty>(k.scalar).Value = v;
+    foreach (var (n, v) in Textures) if (Find(k.textures, n) is { } s) s.GetProp<ObjectProperty>(k.texture).Value = texture(v);
+    e.WriteProperties(props);
+  }
+  public string Text() => string.Join("\n",
+    Colors.Select(c => $"c {c.Key.ToLowerInvariant()} {string.Join(" ", c.Value.Select(BitConverter.SingleToInt32Bits))}")
+      .Concat(Scalars.Select(s => $"s {s.Key.ToLowerInvariant()} {BitConverter.SingleToInt32Bits(s.Value)}"))
+      .Concat(Textures.Select(t => $"t {t.Key.ToLowerInvariant()} {t.Value.ToLowerInvariant()}")));
+}
 
 // actortype's recipe.
 class ActorTypeRecipe { public string name { get; set; } public ActorTypeTemplate template { get; set; } public ActorTypeLook look { get; set; } public Dictionary<string, string> set { get; set; } }
