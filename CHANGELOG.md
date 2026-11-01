@@ -9,7 +9,7 @@ version is mele-mcp's (`<Version>` in `tools/mele-mcp/src/MeleMcp/MeleMcp.csproj
 
 ### Added
 
-mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 87 tools:
+mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 91 tools:
 
 - Game files: `le_status`, `le_refresh_files`, and `le_find_file`, which says which copy of a file the game loads. For
   LE1 it follows the installed AutoTOC ASI.
@@ -45,6 +45,9 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 87 tools:
   plot values through MeleBridge, or without it through BioWare's cheat commands and the DebugLogger log.
 - The in-game editor's side: `catalog_index` and `catalog_build` (the prop catalog, its thumbnails and the Mele Catalog
   dev mod), and `editor_import`, a three-way merge of an editor session into a level YAML.
+- Saves, LE2 and LE3: `save_list`, `save_read`, `save_set` (fields and plot values) and `save_head_default`, which gives
+  one save or a whole career the game's default head. Trilogy Save Editor has no command line. Each file is read field
+  by field to its checksum, and every edit backs the file up first.
 - `scripts/scenario.py` runs in-game test suites (YAML or JSON) unattended against LE1 through `live_status` and
   `live_keep_ticking`, refuses save and load commands, backs a career's saves up before a run that saves and restores
   them with the game closed, and writes a report (`docs/scenarios.md`). Used in game on a suite of about 40 checks,

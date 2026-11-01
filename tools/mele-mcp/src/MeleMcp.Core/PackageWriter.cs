@@ -44,10 +44,15 @@ public static class PackageWriter
         }
     }
 
-    internal static string Backup(string path)
+    internal static string BackupRoot()
     {
         var dir = Environment.GetEnvironmentVariable(BackupDirEnvVar);
-        dir = string.IsNullOrWhiteSpace(dir) ? DefaultBackupDir : GamePaths.ToWindowsPath(dir);
+        return string.IsNullOrWhiteSpace(dir) ? DefaultBackupDir : GamePaths.ToWindowsPath(dir);
+    }
+
+    internal static string Backup(string path)
+    {
+        var dir = BackupRoot();
         Directory.CreateDirectory(dir);
         var target = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss-fff}_{Path.GetFileName(path)}");
         File.Copy(path, target);

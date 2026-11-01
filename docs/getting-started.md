@@ -258,6 +258,7 @@ that level file (names, imports, exports, the most common export classes).
 |---|---|---|
 | The packages a tool changes or creates | the ones you name, and the files a build writes beside them in the mod (forks, `AutoLoad.ini`, GlobalTlk packages); a file in the Legendary Edition folder is refused | |
 | A copy of that package, before each save | `%LOCALAPPDATA%\mele-mcp\backups\<date>-<time>_<file>` | `MELE_BACKUP_DIR` |
+| A copy of a game save, before `save_head_default` or `save_set` changes it | `%LOCALAPPDATA%\mele-mcp\backups\saves\<game>\<career>\<time>\<file>` | `MELE_BACKUP_DIR` |
 | `levels.json`, which MeleBridge reads | `%LOCALAPPDATA%\MeleBridge\LE1\levels.json` | `MELE_LEVELS_JSON` |
 | All of a `mod_build` with `out` | under `out`, backups aside; `levels.json` is left alone | the `out` parameter |
 | The in-game editor's sessions (MeleBridge) | `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json` | |

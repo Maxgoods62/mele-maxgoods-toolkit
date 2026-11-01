@@ -7,7 +7,7 @@ contract below is given as the code reads and writes it: the pipe's ops and thei
 
 A reference written "design §10" is a section of the [editor design](design/in-game-editor.md), which explains why the
 editor works as it does; a bare section number (§3.3) is one of this page. The examples use the editor design's example
-names (the map `BIOA_MYM01`, the NPC `guard`); use your own.
+names (the map `BIOA_MYM01`, the NPC `guard`); use your own. §7 is the game's own save format, which only mele-mcp reads.
 
 ## 1. Versions
 
@@ -453,3 +453,32 @@ of sessions' spawns (design §3.5, §10).
 - A missing file shows "No catalog yet (...): build it with catalog_build in mele-mcp, then Reload."
 - `catalog_build` writes the thumbnails into `thumbs.new` and swaps the folders, then writes `catalog.json`, so the overlay
   never reads entries whose thumbnails are missing.
+
+## 7. LE2 and LE3 saves
+
+The `.pcsav` career saves, as the `save_*` tools read them. Field order comes from
+[Trilogy Save Editor](https://github.com/KarlitosVII/trilogy-save-editor), whose format code is the reference; its
+own code is not used here. LE2 is format 30, LE3 format 59. LE1 is another layout and is not read.
+
+- Little-endian. A bool is 4 bytes, 0 or 1. A list or map starts with a 4-byte count. A string starts with a 4-byte length
+  that counts its terminator: positive for Latin-1, negative for UTF-16 (in characters), 0 for an empty one.
+- The last 4 bytes are a checksum of everything before them: CRC-32 with polynomial `04C11DB7`, most significant bit
+  first, start and final XOR `FFFFFFFF` (UE3's `appMemCrc`, CRC-32/BZIP2, LEC's `Crc32`). Plain zlib CRC-32 does not match.
+- Nothing holds a file offset, so a field can change size: only the checksum is redone.
+
+| Part | Fields, in order |
+|---|---|
+| Header | format, debug name, seconds played, disc, map; LE3: map override; difficulty (1 byte), end state, time (seconds since midnight, day, month, year), location, rotation, loading tip |
+| World lists | levels, streaming states, Kismet records, doors; LE3: placeables; pawns |
+| Player | female, class; LE3: combat, injured, casual; level, XP, first name, last name string, origin, notoriety (1 byte each), talent points, 3 mapped powers, appearance; LE3: emissive id; powers; LE3: war assets; weapons; LE3: weapon mods; loadout (6 strings); LE3: primary, secondary, weapon groups; hotkeys; LE3: health; credits, medigel, eezo, iridium, palladium, platinum, probes, fuel; LE3: grenades; face code, class name string; LE3: character guid |
+| After the player | LE2: ME1 import bonus (2 ints, 5 floats); squad, plot table, journal, codex, ME1 plot table; LE3: player variables; galaxy map, dependent DLC; LE3: treasures, use modules, conversation mode, objective markers, saved objective text |
+
+Appearance is the combat appearance (1 byte), 13 ints (casual, full body, torso, shoulder, arm, leg, specular, 3 tints,
+pattern, pattern colour, helmet), then `bHasMorphHead`. With the flag set a morph follows: hair mesh, accessory meshes,
+morph features, offset bones, 4 lists of vertices (12 bytes each, only lod 0 filled here), scalar, vector and texture
+parameters. A morph takes about 33 KB. With the flag off nothing follows, and `SFXSaveGame.LoadAppearance` leaves the pawn's
+`MorphHead` at `None`. LE2's `SFXPawn_Player` then keeps its template head, `HMM_HED_PROSheppard_MDL` for a man, and LE3's
+takes `SFXPlayerCustomization`'s iconic head and FaceFX asset.
+
+The plot table's bools are a list of 32-bit words, lowest bit first. LE2's ints and floats are lists indexed by id. LE3's
+are id and value pairs, and an id never set has no pair.
