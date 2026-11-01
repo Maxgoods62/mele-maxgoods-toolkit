@@ -32,7 +32,7 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 87 tools:
   boots, loads a save, runs console commands and takes a screenshot. A career save loads through its commands
   (`nextframedefer loadgame <name> DevId=-1`); a name the game can't find (`Unable to load … on device Id`) stops the
   cycle at once instead of at the timeout.
-- `game_cycle` runs on LE2 through MeleBridge, and loads the latest save with `loadLatest`. `game_close` closes a game
+- `game_cycle` runs on LE2 and LE3 through MeleBridge, and loads the latest save with `loadLatest`. `game_close` closes a game
   without saving.
 - The running game without MeleBridge, through the LEX Interop ASI, the logs of the DebugLogger and Kismet Logger
   ASIs, and the game window: `game_status`, `game_actors`, `game_actor_get`, `game_actor_set`, `game_player_location`,

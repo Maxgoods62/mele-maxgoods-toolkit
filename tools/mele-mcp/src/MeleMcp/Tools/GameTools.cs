@@ -89,7 +89,7 @@ public static class GameTools
                  + "Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's BioSaveGame <n> writes where Shepard stands; career "
                  + "saves can't be loaded this way (load one with commands: [\"nextframedefer loadgame <Career>_QuickSave DevId=-1\"] and "
                  + "waitForMap)), and needs the LEX Interop ASI. LE2 and LE3 need MeleBridge and the DebugLogger ASI, and load only the latest "
-                 + "save (loadLatest). Run on LE1 and LE2, not on LE3.")]
+                 + "save (loadLatest). Run on all three.")]
     public static GameCycleResult GameCycle(
         [Description("Mod to check and install first (as mod_install takes it, e.g. 'My Mod'); omit to only restart.")] string? mod = null,
         [Description("LE1: developer save slot to load from the menu: n for BioSaveGame<n>.sav, made once in game with game_console 'BioSaveGame <n>'.")] int? loadSlot = null,
