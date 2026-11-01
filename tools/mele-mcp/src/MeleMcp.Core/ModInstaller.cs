@@ -49,10 +49,12 @@ public static class ModInstaller
         if (bootGame) arguments.Add("--bootgame");
         StartM3(m3, arguments);
 
-        // "Initializing mod installer panel for mod: <name> ..." starts it; the main stage ends with "Main stage of mod installation
-        // has completed"; LE1 then merges Coalesced (ConfigDelta files) and ends with M3's AutoTOC panel.
+        // "Initializing mod installer panel for mod: <name> ..." starts it. After the main stage, which holds the merge mods, M3 still
+        // merges Coalesced on LE1, syncs PlotManager and shaders on LE2 and LE3, and on every game ends with its AutoTOC panel. A failed
+        // install logs "Exiting modinstaller", opens a dialog that waits for a click and never reaches that panel.
         var begin = $"Initializing mod installer panel for mod: {name}";
-        var end = game == MEGame.LE1 ? "Panel closing: AutoTOC" : "Main stage of mod installation has completed";
+        const string end = "Panel closing: AutoTOC";
+        const string failed = "<<<<<<< Exiting modinstaller";
         var log = new StringBuilder();
         var completed = false;
         while (DateTime.UtcNow - started < TimeSpan.FromSeconds(timeoutSeconds))
@@ -66,6 +68,7 @@ public static class ModInstaller
                 completed = true;
                 break;
             }
+            if (at >= 0 && text.IndexOf(failed, at, StringComparison.Ordinal) >= 0) break;
         }
 
         var differences = new List<string>();
@@ -85,9 +88,15 @@ public static class ModInstaller
         }
         GamePaths.RefreshLoadedFiles();
 
+        // The compare covers [CUSTOMDLC] files. A merge mod patches a core file in place, so M3's log is what shows that it did.
+        if (completed && Split(ini.GetValueOrDefault("BASEGAME")?.GetValueOrDefault("mergemods")).Count > 0 && !log.ToString().Contains("Saving package", StringComparison.Ordinal))
+            differences.Add("mergemods: M3 logged no 'Saving package', so no file was patched");
+
         var lines = log.ToString().Split('\n').Select(l => l.TrimEnd('\r'))
             .Where(l => l.Contains("[WRN]") || l.Contains("[ERR]") || l.Contains("[FTL]") || l.Contains("mod install", StringComparison.OrdinalIgnoreCase)
-                        || l.Contains("Merging M3 Config Delta") || l.Contains("Autotocing") || l.Contains("Panel closing"))
+                        || l.Contains("Merging M3 Config Delta") || l.Contains("Autotocing") || l.Contains("Panel closing")
+                        || l.Contains("Applying ") || l.Contains("Merging changes into") || l.Contains("Saving package") || l.Contains("was not modified")
+                        || l.Contains("File not found in game") || l.Contains("An error occurred installing mergemod") || l.Contains(failed))
             .ToList();
         return new ModInstallResult(name, moddesc, m3, completed, Math.Round((DateTime.UtcNow - started).TotalSeconds, 1),
             targets, checkedCount, differences, bootGame, lines);

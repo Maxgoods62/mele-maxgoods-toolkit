@@ -35,7 +35,7 @@ public static class ScaffoldTools
                  + "script_compile's route (errors keep Line and Column), each entry is found and normalized to its instanced full path, each property is checked against the export and its class, "
                  + "and a manifest is checked against M3's schema; on any error Stage is check-failed, nothing is written and M3 is not touched. Then the manifest and sources go in the mod's MergeMods "
                  + "folder, M3 compiles them (--compilemergemod to the running window, waiting on its log and the output) and the .m3m is added to moddesc.ini [BASEGAME] mergemods=. compile=false stops "
-                 + "after the manifest. M3 opens a dialog on a compile failure; that is reported, never clicked. M3 is never closed. Compiling reads no game file. Not tested in game.")]
+                 + "after the manifest. M3 opens a dialog on a compile failure; that is reported, never clicked. M3 is never closed. Compiling reads no game file. Applied through M3 and proved in LE2 once: M3 patches the core file in place, nothing undoes that but M3's Restore on the file's row, and merges stack on the file on disk.")]
     public static MergeBuildResult MergeModBuild(
         [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("The mod root holding moddesc.ini (Windows or /mnt/<drive> path).")] string modRoot,
