@@ -26,7 +26,8 @@ public static class StatusTools
                  + "other one is skipped (overridden by a higher mount, folder not mounted, dropped on a mount tie, extension not in the TOC). "
                  + "Reads the disk on each call, no cache. LE1 emulates the installed AutoTOC ASI, which writes the TOC the game loads from "
                  + "(Rules says which: v2 takes DLC_ folders and [ME1DLCMOUNT] ModMount, v3 DLC_MOD_ folders), then compares with "
-                 + "PCConsoleTOC.bin from the last boot. LE2/LE3 follow LEC (DLC_ folders with a Mount.dlc). FolderWarnings: mods that stop "
+                 + "PCConsoleTOC.bin from the last boot. LE2/LE3 follow LEC (DLC_ folders with a Mount.dlc); LE2 loads SFXGame, PlotManager and "
+                 + "Startup before it reads the DLC tables, so a DLC copy of those is named the winner here but never loads. FolderWarnings: mods that stop "
                  + "the game at boot, shared mounts, folders the Autoload ASI ignores. Notes: stale TOC, and LecPath when the other tools "
                  + "(LEC's cached list) open a different copy.")]
     public static FindFileResult LeFindFile(

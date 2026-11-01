@@ -9,7 +9,7 @@ version is mele-mcp's (`<Version>` in `tools/mele-mcp/src/MeleMcp/MeleMcp.csproj
 
 ### Added
 
-mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 86 tools:
+mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 87 tools:
 
 - Game files: `le_status`, `le_refresh_files`, and `le_find_file`, which says which copy of a file the game loads. For
   LE1 it follows the installed AutoTOC ASI.
@@ -32,6 +32,8 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 86 tools:
   boots, loads a save, runs console commands and takes a screenshot. A career save loads through its commands
   (`nextframedefer loadgame <name> DevId=-1`); a name the game can't find (`Unable to load … on device Id`) stops the
   cycle at once instead of at the timeout.
+- `game_cycle` runs on LE2 through MeleBridge, and loads the latest save with `loadLatest`. `game_close` closes a game
+  without saving.
 - The running game without MeleBridge, through the LEX Interop ASI, the logs of the DebugLogger and Kismet Logger
   ASIs, and the game window: `game_status`, `game_actors`, `game_actor_get`, `game_actor_set`, `game_player_location`,
   `game_console`, `game_get`, `game_stream_level`, `game_remote_event`, `game_hot_reload`, `game_log`,
@@ -72,7 +74,7 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 86 tools:
 - Native code research, for hooks in code the exes keep encrypted on disk: `exe_dump` reads the running game's mapped
   image into a per-game cache, `exe_dump_pe` turns a dump into a PE that REA can open, and `native_query` answers
   disassembly, callers, references, strings, byte patterns, class-to-vtable, vtable slots and name entries from a dump.
-  `exe_dump`'s reader has been tested on notepad.exe only, not on a running game.
+  `exe_dump` has run on LE2, not on LE1 or LE3.
 - MeleBridge builds for LE2 and LE3: `tools/mele-bridge/build.sh --game LE2|LE3` stages `LE2MeleBridge.asi` and
   `LE3MeleBridge.asi` with the pipe, reflection, console, status and keep ticking, without the editor or overlay. They
   passed one test run on each game, on a Normandy save. `live_place` and `live_remove` have not run there.

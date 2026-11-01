@@ -14,7 +14,7 @@ public static class NativeTools
                  + "Nothing is read when the cache already holds the exe on disk (Skipped, the game need not run). Errors when the game is not running, or still has its code encrypted. "
                  + "Never writes in the game install, and refuses a MELE_DUMP_DIR inside it. The dump shows the code as patched in memory: installed ASI mods' hooks are in it. "
                  + "Dumps are game code: keep them out of any repo. "
-                 + "Tested on a harmless process (notepad.exe) only, never on a running game.")]
+                 + "Run on LE2, not on LE1 or LE3.")]
     public static ExeDumpResult ExeDump(
         [Description("Game: LE1, LE2 or LE3.")] string game = "LE1",
         [Description("Read the game again even when the cached dump matches, e.g. to see hooks.")] bool force = false)

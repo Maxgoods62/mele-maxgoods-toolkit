@@ -83,17 +83,20 @@ public static class GameTools
 
     [McpServerTool(Name = "game_cycle", Destructive = true),
      Description("The whole test loop in one call: closes the running game WITHOUT SAVING (console exit; force kills it), runs mod_check "
-                 + "(stops on errors) and mod_install with boot (or only boots, with no mod), waits for the main menu in the DebugLogger "
-                 + "log, loads a developer save slot (BioLoadGame <n> loads Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's "
-                 + "BioSaveGame <n> writes where Shepard stands; career saves can't be loaded this way (load one with commands: "
-                 + "[\"nextframedefer loadgame <Career>_QuickSave DevId=-1\"] and waitForMap)), runs console "
-                 + "commands (e.g. 'at BIOA_MYM01 start_mym01'), waits for the map and takes a screenshot to Read. Takes 1 to 3 minutes.")]
+                 + "(LE1, stops on errors) and mod_install with boot (or only boots, with no mod), waits for the main menu in the DebugLogger "
+                 + "log, loads a save, runs console commands (e.g. 'at BIOA_MYM01 start_mym01'), waits for the map and takes a screenshot "
+                 + "to Read. Takes 1 to 3 minutes. LE1 loads a developer save slot (BioLoadGame <n> loads "
+                 + "Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's BioSaveGame <n> writes where Shepard stands; career "
+                 + "saves can't be loaded this way (load one with commands: [\"nextframedefer loadgame <Career>_QuickSave DevId=-1\"] and "
+                 + "waitForMap)), and needs the LEX Interop ASI. LE2 and LE3 need MeleBridge and the DebugLogger ASI, and load only the latest "
+                 + "save (loadLatest). Run on LE1 and LE2, not on LE3.")]
     public static GameCycleResult GameCycle(
         [Description("Mod to check and install first (as mod_install takes it, e.g. 'My Mod'); omit to only restart.")] string? mod = null,
-        [Description("Developer save slot to load from the menu: n for BioSaveGame<n>.sav, made once in game with game_console 'BioSaveGame <n>'.")] int? loadSlot = null,
+        [Description("LE1: developer save slot to load from the menu: n for BioSaveGame<n>.sav, made once in game with game_console 'BioSaveGame <n>'.")] int? loadSlot = null,
+        [Description("LE2 and LE3: load the latest save from the menu (console QuickLoad, the menu's Resume).")] bool loadLatest = false,
         [Description("Console commands to run after the load, in order.")] string[]? commands = null,
-        [Description("Map to wait for (persistent level file name without .pcc, e.g. BIOA_MYM01); default the first one the save loads.")] string? waitForMap = null,
-        [Description("Run mod_check before installing and stop on errors.")] bool check = true,
+        [Description("Map to wait for (persistent level file name without .pcc, e.g. BIOA_MYM01, BioP_Nor); default the first one the save loads.")] string? waitForMap = null,
+        [Description("LE1: run mod_check before installing and stop on errors.")] bool check = true,
         [Description("Languages mod_check requires text for, comma-separated.")] string languages = "INT,FR",
         [Description("Take a screenshot at the end.")] bool screenshot = true,
         [Description("Seconds to wait after the menu and after the map, for the loading screen to clear.")] double settleSeconds = 8,
@@ -101,8 +104,16 @@ public static class GameTools
         [Description("Seconds to wait for the menu, and again for the map.")] int timeoutSeconds = 240,
         [Description(GameParam)] string game = "LE1")
         => ToolErrors.Run(() => Core.GameCycle.Run(PackageTools.ParseGame(game), new Core.GameCycle.Options(
-            mod, check, languages.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), loadSlot,
+            mod, check, languages.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), loadSlot, loadLatest,
             commands ?? [], waitForMap, settleSeconds, screenshot, force, timeoutSeconds)));
+
+    [McpServerTool(Name = "game_close", Destructive = true),
+     Description("Closes the running game WITHOUT SAVING: console exit (LEX Interop on LE1, MeleBridge on LE2 and LE3), waits for the process "
+                 + "to end, and with force kills it after 30 s. Does nothing when the game is closed. game_cycle starts it again.")]
+    public static GameCloseResult GameClose(
+        [Description("Kill the game if it does not close within 30 s of exit.")] bool force = false,
+        [Description(GameParam)] string game = "LE1")
+        => ToolErrors.Run(() => Core.GameCycle.Close(PackageTools.ParseGame(game), force));
 
     [McpServerTool(Name = "game_remote_event"),
      Description("Fires every enabled Kismet SeqEvent_RemoteEvent with this name in the running game. "

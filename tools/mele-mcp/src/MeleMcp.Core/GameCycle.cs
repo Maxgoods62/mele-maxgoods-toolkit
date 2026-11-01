@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using LegendaryExplorerCore.Packages;
 
@@ -10,10 +11,14 @@ namespace MeleMcp.Core;
 /// <param name="Steps">What happened, with seconds since the start.</param>
 public sealed record GameCycleResult(bool Ready, string? Map, IReadOnlyList<string> Steps, ModCheckResult? Check, ModInstallResult? Install, Screenshot? Screenshot);
 
+/// <param name="Closed">No process of the game is left.</param>
+/// <param name="Steps">What happened, with seconds since the start.</param>
+public sealed record GameCloseResult(bool Closed, IReadOnlyList<string> Steps);
+
 /// <summary>
 /// The test loop in one call: quit the game (console "exit"), check and install the mod, boot through M3, wait for the main
-/// menu, load a save (cheat exec BioLoadGame), run console commands, wait for the map, take a screenshot. Progress is read from
-/// the DebugLogger ASI's log, which every game start rewrites.
+/// menu, load a save (LE1: cheat exec BioLoadGame; LE2 and LE3: QuickLoad, the latest save), run console commands, wait for the
+/// map, take a screenshot. Progress is read from the DebugLogger ASI's log, which every game start rewrites.
 /// </summary>
 public static partial class GameCycle
 {
@@ -32,11 +37,25 @@ public static partial class GameCycle
     [GeneratedRegex(@"(?<error>Failed to load game\..*|Unable to load .* on device Id.*)$")]
     private static partial Regex LoadFailed();
 
-    public sealed record Options(string? Mod, bool Check, IReadOnlyList<string> Languages, int? LoadSlot, IReadOnlyList<string> Commands,
+    public sealed record Options(string? Mod, bool Check, IReadOnlyList<string> Languages, int? LoadSlot, bool LoadLatest, IReadOnlyList<string> Commands,
                                  string? WaitForMap, double SettleSeconds, bool Screenshot, bool Force, int TimeoutSeconds);
+
+    /// <summary>The console's exit, without saving.</summary>
+    public static GameCloseResult Close(MEGame game, bool force)
+    {
+        var clock = Stopwatch.StartNew();
+        var steps = new List<string>();
+        void Step(string text) => steps.Add($"{clock.Elapsed.TotalSeconds,5:0.0}s {text}");
+        if (Quit(game, force, Step) is not { } why) return new GameCloseResult(true, steps);
+        Step(why);
+        return new GameCloseResult(false, steps);
+    }
 
     public static GameCycleResult Run(MEGame game, Options o)
     {
+        if (o.LoadSlot is not null && game != MEGame.LE1) throw new ArgumentException($"loadSlot is BioLoadGame, which {game} lacks: use loadLatest.");
+        if (o.LoadLatest && game == MEGame.LE1) throw new ArgumentException("loadLatest is for LE2 and LE3: LE1 uses loadSlot, or a loadgame command.");
+
         var clock = Stopwatch.StartNew();
         var steps = new List<string>();
         void Step(string text) => steps.Add($"{clock.Elapsed.TotalSeconds,5:0.0}s {text}");
@@ -46,20 +65,8 @@ public static partial class GameCycle
             return new GameCycleResult(false, null, steps, check, install, null);
         }
 
-        // 1. Quit: the console's exit lets the engine shut down; killing it only when asked.
-        if (GameBridge.IsGameRunning(game))
-        {
-            GameLink.Console(game, "exit");
-            Step("sent exit");
-            if (!WaitUntil(() => !GameBridge.IsGameRunning(game), 30))
-            {
-                if (!o.Force) return Stop("the game did not close within 30 s (pass force to kill it)");
-                foreach (var p in Process.GetProcessesByName(GameBridge.ProcessName(game))) using (p) p.Kill();
-                if (!WaitUntil(() => !GameBridge.IsGameRunning(game), 15)) return Stop("the game survived Kill");
-                Step("killed the game");
-            }
-            else Step("game closed");
-        }
+        // 1. Quit.
+        if (Quit(game, o.Force, Step) is { } stillUp) return Stop(stillUp);
 
         // 2. Check, install and boot, or only boot.
         ModCheckResult? check = null;
@@ -67,7 +74,7 @@ public static partial class GameCycle
         var bootAsked = DateTime.Now;
         if (o.Mod is { Length: > 0 } mod)
         {
-            if (o.Check)
+            if (o.Check && game.IsGame1())
             {
                 check = ModChecker.Check(game, mod, [], o.Languages, 50);
                 Step($"mod_check: {check.Errors} errors, {check.Warnings} warnings");
@@ -106,22 +113,23 @@ public static partial class GameCycle
             ModInstaller.Boot(game);
         }
         Step("main menu loaded");
-        if (!WaitUntil(() => GameBridge.IsPipeOpen(game), 30)) return Stop("the LEX Interop pipe did not open", check, install);
+        if (!WaitUntil(() => ConsoleOpen(game), 30)) return Stop(game == MEGame.LE1 ? "the LEX Interop pipe did not open" : "the MeleBridge pipe did not open", check, install);
         Thread.Sleep(TimeSpan.FromSeconds(o.SettleSeconds));
 
         // 4. Save, then commands; each map load is read from the log.
         var map = "EntryMenu";
         var offset = DebugLog.Length(log!);
-        if (o.LoadSlot is { } slot)
+        var load = o.LoadSlot is { } slot ? $"BioLoadGame {slot}" : o.LoadLatest ? "QuickLoad" : null;
+        if (load is not null)
         {
-            GameLink.Console(game, $"BioLoadGame {slot}");
-            Step($"sent BioLoadGame {slot}");
+            Console(game, load);
+            Step($"sent {load}");
             // With commands to run, the save's own map comes first, whatever it is; the wanted one is awaited after them.
             var wanted = o.Commands.Count > 0 ? null : o.WaitForMap;
-            if (!WaitForMap(log!, offset, wanted, o.TimeoutSeconds, Step, out map))
+            if (!WaitForMap(game, log!, offset, wanted, o.TimeoutSeconds, Step, out map))
             {
                 var failure = DebugLog.LinesAfter(log!, offset).Select(l => LoadFailed().Match(l)).FirstOrDefault(m => m.Success);
-                return Stop(failure is null ? "no map loaded after BioLoadGame" : $"the game says: {failure.Groups["error"].Value.Trim()}", check, install);
+                return Stop(failure is null ? $"no map loaded after {load}" : $"the game says: {failure.Groups["error"].Value.Trim()}", check, install);
             }
             offset = DebugLog.Length(log!);
             // The load line comes before the loading screen; console input sent during it is lost.
@@ -129,13 +137,13 @@ public static partial class GameCycle
         }
         foreach (var command in o.Commands)
         {
-            GameLink.Console(game, command);
+            Console(game, command);
             Step($"sent {command}");
             Thread.Sleep(1000);
         }
         if (o.Commands.Count > 0 && o.WaitForMap is { Length: > 0 } && !map.Equals(o.WaitForMap, StringComparison.OrdinalIgnoreCase))
         {
-            if (!WaitForMap(log!, offset, o.WaitForMap, o.TimeoutSeconds, Step, out map))
+            if (!WaitForMap(game, log!, offset, o.WaitForMap, o.TimeoutSeconds, Step, out map))
             {
                 var failure = DebugLog.LinesAfter(log!, offset).Select(l => LoadFailed().Match(l)).FirstOrDefault(m => m.Success);
                 return Stop(failure is null ? $"{o.WaitForMap} did not load" : $"the game says: {failure.Groups["error"].Value.Trim()}", check, install);
@@ -153,16 +161,56 @@ public static partial class GameCycle
         return new GameCycleResult(true, map, steps, check, install, shot);
     }
 
-    /// <summary>Waits for a save load and the map it brings (or <paramref name="wanted"/>), after <paramref name="offset"/> in the log.</summary>
-    private static bool WaitForMap(string log, long offset, string? wanted, int timeoutSeconds, Action<string> step, out string map)
+    /// <summary>
+    /// The console's exit lets the engine shut down; killing it only when asked. Returns why the game is still up, or null when it
+    /// is gone.
+    /// </summary>
+    private static string? Quit(MEGame game, bool force, Action<string> step)
     {
+        if (!GameBridge.IsGameRunning(game)) return null;
+        try
+        {
+            Console(game, "exit");
+            step("sent exit");
+        }
+        catch (Exception e) when (e is IOException or TimeoutException or InvalidOperationException)
+        {
+            // MeleBridge can go down before it answers; a game that stayed up is caught below.
+            step($"exit: {e.Message}");
+        }
+        if (WaitUntil(() => !GameBridge.IsGameRunning(game), 30))
+        {
+            step("game closed");
+            return null;
+        }
+        if (!force) return "the game did not close within 30 s (pass force to kill it)";
+        foreach (var p in Process.GetProcessesByName(GameBridge.ProcessName(game))) using (p) p.Kill();
+        if (!WaitUntil(() => !GameBridge.IsGameRunning(game), 15)) return "the game survived Kill";
+        step("killed the game");
+        return null;
+    }
+
+    /// <summary>LE1 has the LEX Interop ASI. LE2 and LE3 reach the console through MeleBridge.</summary>
+    private static bool ConsoleOpen(MEGame game) => game == MEGame.LE1 ? GameBridge.IsPipeOpen(game) : LiveBridge.IsAvailable(game);
+
+    private static void Console(MEGame game, string command)
+    {
+        if (game == MEGame.LE1) GameLink.Console(game, command);
+        else LiveBridge.Request(game, new JsonObject { ["op"] = "console", ["command"] = command });
+    }
+
+    /// <summary>Waits for a save load and the map it brings (or <paramref name="wanted"/>), after <paramref name="offset"/> in the log.</summary>
+    private static bool WaitForMap(MEGame game, string log, long offset, string? wanted, int timeoutSeconds, Action<string> step, out string map)
+    {
+        // Persistent levels: BIOA_NOR10 in LE1, BioP_Nor in LE2 and LE3.
+        var persistent = game == MEGame.LE1 ? "BIOA_" : "BioP_";
         string? found = null;
         var ok = WaitUntil(() =>
         {
             var lines = DebugLog.LinesAfter(log, offset);
             var save = lines.Select(l => SaveLoad().Match(l)).FirstOrDefault(m => m.Success);
             var loads = lines.Select(l => SyncLoad().Match(l)).Where(m => m.Success).Select(m => m.Groups["package"].Value)
-                             .Where(p => p.StartsWith("BIOA_", StringComparison.OrdinalIgnoreCase) && !p.EndsWith("_LOC", StringComparison.OrdinalIgnoreCase)).ToList();
+                             .Where(p => p.StartsWith(persistent, StringComparison.OrdinalIgnoreCase) && !p.EndsWith("_LOC", StringComparison.OrdinalIgnoreCase)).ToList();
             found = wanted is { Length: > 0 } ? loads.FirstOrDefault(p => p.Equals(wanted, StringComparison.OrdinalIgnoreCase)) : loads.FirstOrDefault();
             if (save is not null && found is not null) step($"save {save.Groups["save"].Value}");
             // A failed load logs an error and leaves the menu as it was: no map will come.
@@ -183,7 +231,10 @@ public static partial class GameCycle
             var path = DebugLog.LogPath(game);
             var first = DebugLog.LinesAfter(path, 0).FirstOrDefault();
             if (first is null || Stamp().Match(first) is not { Success: true } m) return false;
-            var started = DateTime.Today + TimeSpan.ParseExact(m.Groups["time"].Value, @"hh\:mm\:ss", CultureInfo.InvariantCulture);
+            var now = DateTime.Now;
+            var started = now.Date + TimeSpan.ParseExact(m.Groups["time"].Value, @"hh\:mm\:ss", CultureInfo.InvariantCulture);
+            // The stamp has no date: one later than now is from an earlier day, a stale log that must not pass for a new session.
+            if (started > now) started = started.AddDays(-1);
             if (started < after.AddSeconds(-2)) return false;
             log = path;
             return true;
