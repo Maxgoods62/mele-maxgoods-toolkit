@@ -75,7 +75,8 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 86 tools:
   `exe_dump`'s reader has been tested on notepad.exe only, not on a running game.
 - MeleBridge builds for LE2 and LE3: `tools/mele-bridge/build.sh --game LE2|LE3` stages `LE2MeleBridge.asi` and
   `LE3MeleBridge.asi` with the pipe, reflection, console, status and keep ticking, without the editor or overlay. They
-  compile and link but have never been loaded in a game. `--install` and `--uninstall` take `--game` too.
+  passed one test run on each game, on a Normandy save. `live_place` and `live_remove` have not run there.
+  `--install` and `--uninstall` take `--game` too.
 - lectool: `coalesced` reads LE3's `Coalesced.bin` and `Default_<DLC>.bin`.
 
 Set-up and settings:

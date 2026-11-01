@@ -29,7 +29,7 @@ cp build.env.example build.env    # optional: the settings that differ on your m
 ./build.sh --game LE2 --uninstall # remove it from there
 ```
 
-The LE2 and LE3 builds have never been loaded in a game: once installed, each one runs at every start of that game.
+Once installed, the LE2 and LE3 builds run at every start of their game.
 
 `build.sh` runs in WSL and calls Windows programs through interop. It needs:
 
@@ -627,39 +627,23 @@ script never show up.
 `status` reads no squad screen on LE3, which has no `BioSFHandler_PartySelection`, and `loadingMovie.inLoad` is null on both,
 which have no `bIsInLoad`.
 
-Built, never loaded. Nothing below has run on LE2 or LE3:
+One test run on each game, on a Normandy save (`Biop_Nor` in LE2, `BioP_Nor` in LE3), with `LE<n>MelePause.asi` and
+`LE<n>PhotoModeRevamp.asi` installed:
 
-- Loading: the ASI loader, the logger, the `ProcessEvent` hook, `GWorld` and the pipe.
-- The hand-mapped core layouts. `PropertyLink`, `PropertyLinkNext`, `Offset`, `BitMask`, `Enum`, `Inner` and `Struct` come from
-  the SDK and nothing of ours has used them on LE2 or LE3 yet. LE1's `static_assert`s and its `PropertyOffset` findings say
-  nothing about these two games.
-- Every op: `find`, `get`, `set`, `call` (opcode natives, out parameters, string and array arguments), `describe`, `subscribe`,
-  `console`.
-- `console` output: mele-mcp reads it from the DebugLogger log, as on LE1, and that flush (`getall BioWorldInfo bHasPathNodes`
-  answered as an `appLogErrorf` line) is LE1 behaviour.
-- `status`: the loading movie, streaming levels and, on LE2, the squad screen's panel tag, its `m_DefaultHandler` and
-  `ScriptHandlers` and the movie's `nMembersAvailable`.
-- Keep ticking: whether `BioWorldInfo.Tick` reaches `ProcessEvent` with the world as its object. `BioWorldInfoTick.Tick` calls it
-  from script in LE1 and LE2, and LE1's switch still saw it; LE3's class has no such function. Whether `TickLocal` or a timer
-  callback needs `m_bAllowBrowserWheel`. On LE3, `bPauseOnLossOfFocus` lives in `Coalesced.bin` and was not read (LE1 and LE2's `BIOEngine.ini`
-  say `FALSE`), and `ASFXGRI::bPauseForCommand` is read through the SDK's layout.
-- Living beside `LE<n>MelePause.asi` and `LE<n>PhotoModeRevamp.asi`, which hook `ProcessEvent` too.
+- Loading: the ASI loader, the logger, the `ProcessEvent` hook and the pipe.
+- `find`, `get`, `set`, `describe` and `status`. `subscribe` through `live_watch`, on `BioWorldInfo.Tick` with its parameters.
+- `call`: return values, out parameters, name, bool and int arguments, and `SetHidden` with its effect.
+- `console`: on LE3 the output comes back through DebugLogger's log. LE2 had no DebugLogger, so a `set` showed the command ran,
+  but its output was not seen.
+- Keep ticking, with the game in the background: on, the world keeps running and `worldTicks` climbs; off, `pausedByFocusLoss`
+  comes back at once; on again, `clearedFocusPause` is true. `BioWorldInfo.Tick` does reach `ProcessEvent` on both games.
 
-The first in-game test, on LE2 then LE3, with a save on a small map and the game focused:
+Not run on either game:
 
-1. Log and pipe: the ASI's log says `ProcessEvent hooked` and `ready`, and `live_status` answers. Check `bridge`, `map`, `world`,
-   `pc` and `pawn`. `pausedByFocusLoss` must be `false`, not null: a note there means the flags' offsets disagree.
-2. Reflection, read only: `live_find className=BioPawn`, `live_describe className=BioWorldInfo` (the property list must make
-   sense), `live_get` on a pawn's `Location`, a bool, an enum and an array, and `bPlayersOnly` against `live_status`.
-3. Writes and calls: `live_set` a harmless float and read it back; `live_call` a script function with a string argument and
-   one with an out parameter, and an opcode native.
-4. `live_console getall BioWorldInfo bHasPathNodes` with the DebugLogger ASI, then `live_watch Engine.SequenceOp.Activated`
-   while Kismet runs.
-5. Keep ticking: read the switch, turn it on, alt-tab. `worldTicks` must climb, and `bPlayersOnly` and `pausedByFocusLoss` must
-   stay false while NPCs keep moving. With focus back, Esc must still open the pause menu. Turned off, alt-tab must pause
-   again. If `worldTicks` stays at 0 the `Tick` arrives another way: turn it off and look at `BioWorldInfoTick`.
-6. `status` during a level change (streaming, loading movie), and on LE2 with the squad screen open.
-7. All of it again with MelePause and Photo Mode Revamp installed.
+- `call` with string or array arguments.
+- `live_place` and `live_remove`, and `live_watch` while Kismet runs.
+- `status` during a level change, and on LE2 with the squad screen open.
+- Keep ticking with the game focused: Esc must still open the pause menu.
 
 ## How it works
 

@@ -306,7 +306,7 @@ Close the game first:
 ```
 
 Add `--game LE2` or `--game LE3` for those games: `LE2MeleBridge.asi` goes to `Game\ME2`, `LE3MeleBridge.asi` to
-`Game\ME3`. Those two builds have never been loaded in a game, and once installed each runs at every start of that game.
+`Game\ME3`. Once installed, each runs at every start of that game.
 
 While that game's exe runs, `--install` builds but does not copy, and `--uninstall` refuses. A `tasklist` check that
 fails counts as running. You can also copy the staged `MeleBridge.asi` into that folder by hand while the game is

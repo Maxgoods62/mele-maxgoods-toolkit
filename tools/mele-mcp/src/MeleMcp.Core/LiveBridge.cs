@@ -101,7 +101,11 @@ public static partial class LiveBridge
         } while (!lines.Any(DebugLog.IsFlushLine) && clock.Elapsed.TotalSeconds < 3);
 
         var output = lines.Where(l => isFlush || !DebugLog.IsFlushLine(l)).Select(l => LogPrefix().Replace(l, "")).Where(l => l.Length > 0).ToList();
-        return new ConsoleOutput(command, output, lines.Any(DebugLog.IsFlushLine) ? null : "The log was not flushed within 3 s: info lines may still be missing.");
+        // A log left by an earlier run is still there when the ASI is gone: it just stops growing.
+        var note = lines.Any(DebugLog.IsFlushLine) ? null
+            : lines.Count == 0 ? "Ran, but the DebugLogger log did not grow, so no output: is the DebugLogger ASI installed?"
+            : "The log was not flushed within 3 s: info lines may still be missing.";
+        return new ConsoleOutput(command, output, note);
     }
 
     [GeneratedRegex(@"^\[[\d:.]+ \w+\] (?:appLogf: |appLogErrorf: )?")]

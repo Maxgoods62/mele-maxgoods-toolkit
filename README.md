@@ -21,8 +21,8 @@ same commit.
 
 The package, export, Kismet, FaceFX, string, script, config and GFx tools, conversation, plot and journal reading, and
 `mod_install` also take LE2 and LE3. Conversation, plot and journal writing, the YAML builds and the prop catalog are
-LE1 only. MeleBridge builds for LE2 and LE3 but has never been loaded there, so `live_*` is untested on them. Nearly
-all in-game testing was done on LE1: LE2 and LE3 support is tested on files, not in the game.
+LE1 only. MeleBridge also runs on LE2 and LE3, without the editor, and `live_*` passed one test run on each. All other
+in-game testing was done on LE1: the rest of LE2 and LE3 support is tested on files, not in the game.
 
 ## Requirements
 

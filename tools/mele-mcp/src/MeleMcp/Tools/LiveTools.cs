@@ -10,7 +10,8 @@ namespace MeleMcp.Tools;
 [McpServerToolType]
 public static class LiveTools
 {
-    private const string GameParam = "Game: LE1, LE2 or LE3. LE2 and LE3: the bridge compiles (tools/mele-bridge/build.sh --game) but was never loaded in a game, so this tool is untested there.";
+    private const string GameParam = "Game: LE1, LE2 or LE3. LE2 and LE3 need their own ASI: tools/mele-bridge/build.sh --game LE<n> --install.";
+    private const string UnrunGameParam = GameParam + " Not run on LE2 or LE3 yet.";
     private const string EditorGameParam = "Game: LE1 (the editor is built for LE1 only: LE2 and LE3 refuse).";
     private const string SaveGameParam = "Game: LE1 (the only game this tool handles).";
     private const string ObjectParam = "Object path as live_find returns it, e.g. BIOA_MYM01.TheWorld.PersistentLevel.BioPawn_3.";
@@ -82,7 +83,7 @@ public static class LiveTools
 
     [McpServerTool(Name = "live_console", Destructive = true),
      Description("Runs a console command (MeleBridge ASI: the player's console chain, cheats included) and returns what it printed or "
-                 + "logged, e.g. getall BioPawn bTickIsDisabled, or a cheat exec's LogInternal answer. LE1 hands no output back itself, so "
+                 + "logged, e.g. getall BioPawn bTickIsDisabled, or a cheat exec's LogInternal answer. The game hands no output back itself, so "
                  + "the lines come from the DebugLogger log (needs that ASI); unrelated lines logged meanwhile show too.")]
     public static ConsoleOutput LiveConsole(
         [Description("Console command text.")] string command,
@@ -125,11 +126,11 @@ public static class LiveTools
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "status" }, timeoutSeconds));
 
     [McpServerTool(Name = "live_keep_ticking", Destructive = true),
-     Description("Test switch (MeleBridge ASI 3+), off by default and again at every game start. While on, LE1 does not pause its "
+     Description("Test switch (MeleBridge ASI 3+), off by default and again at every game start. While on, the game does not pause its "
                  + "world and Kismet when its window loses focus (BioWorldInfo.Tick's focus pause); real pauses (menus, squad screen, "
                  + "photo mode, the F8 editor) are untouched. Turning it on also ends a focus pause already in place. Omit 'on' to read "
-                 + "it. Returns the switch and its counters. Tested on LE1 only: LE2 and LE3 hold m_bAllowBrowserWheel off for each Tick "
-                 + "instead of raising LE1's timer, a route read from their script and never run.")]
+                 + "it. Returns the switch and its counters. LE2 and LE3 hold m_bAllowBrowserWheel off for each Tick "
+                 + "instead of raising LE1's timer.")]
     public static JsonObject LiveKeepTicking(
         [Description("true: on; false: off; omit to read.")] bool? on = null,
         [Description(TimeoutParam)] double timeoutSeconds = 5,
@@ -155,7 +156,7 @@ public static class LiveTools
         [Description("Yaw in degrees (default: faces Shepard for front, her way for shepard, unchanged with x, y, z).")] float? yaw = null,
         [Description("Degrees added to the yaw, e.g. -90 for meshes whose front is +Y like the VI terminals.")] float turn = 0,
         [Description("Units above the floor (or above z), e.g. 80 for a table top.")] float raise = 0,
-        [Description(GameParam)] string game = "LE1")
+        [Description(UnrunGameParam)] string game = "LE1")
         => ToolErrors.Run(() => LivePlacer.Place(PackageTools.ParseGame(game), objectPath, template, tag, at, distance, x, y, z, yaw, turn, raise));
 
     [McpServerTool(Name = "live_remove", Destructive = true),
@@ -163,7 +164,7 @@ public static class LiveTools
                  + "(bNoDelete) is hidden without collision instead. Until the map reloads; no file changes.")]
     public static LivePlacement LiveRemove(
         [Description(ObjectParam)] string objectPath,
-        [Description(GameParam)] string game = "LE1")
+        [Description(UnrunGameParam)] string game = "LE1")
         => ToolErrors.Run(() => LivePlacer.Remove(PackageTools.ParseGame(game), objectPath));
 
     [McpServerTool(Name = "live_save", Destructive = true),
