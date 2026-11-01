@@ -32,12 +32,12 @@ public static class PackageWriter
     internal static void EnsureWritable(MEGame game, string path)
     {
         // Both spelled the same way, so \\?\D:\..., \\wsl$\<distro>\mnt\d\... and D:\... all match; the whole Legendary Edition
-        // folder counts, not only Game\ME1-3.
+        // folder counts, not only Game\ME1-3. PhysicalPaths catches what the spelling hides: shares, junctions, volume names.
         var full = GamePaths.Canonical(path);
         foreach (var root in new[] { LegendaryExplorerCoreLibSettings.Instance.LEDirectory, MEDirectories.GetDefaultGamePath(game) })
         {
             if (string.IsNullOrEmpty(root)) continue;
-            if (full.StartsWith(GamePaths.Canonical(root).TrimEnd('\\') + '\\', StringComparison.OrdinalIgnoreCase))
+            if (full.StartsWith(GamePaths.Canonical(root).TrimEnd('\\') + '\\', StringComparison.OrdinalIgnoreCase) || PhysicalPaths.IsInside(path, root))
             {
                 throw new InvalidOperationException($"Refusing to modify a file inside the game install ({path}). Edit the mod's copy in the M3 library, then install or copy it.");
             }
