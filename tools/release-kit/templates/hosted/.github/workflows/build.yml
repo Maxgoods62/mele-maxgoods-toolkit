@@ -1,0 +1,182 @@
+name: Build
+
+# Rendered from mele-maxgoods-toolkit tools/release-kit. Change it there; a hand edit here fails kit.sh check.
+# A push to main builds the zips and publishes them as "latest" on GitHub Pages. A vN tag builds them and publishes
+# release vN. docs/releasing.md has the rules. Pull requests don't start this workflow, so it never builds outside code.
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+jobs:
+  # Runs third-party build scripts (LExASIs' CMake), so it gets no write permission and no cache. Publishing is left to
+  # the jobs below, which run nothing from the repo.
+  build:
+    # Visual Studio 2026 image, on the private and public runner lists. build.sh stops if the label ever loses VS 18.
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      LABEL: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+    steps:
+      - name: Keep the scripts' LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Refuse a tag that is not on main
+        if: github.ref_type == 'tag'
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Refuse a tag with no dated CHANGELOG entry
+        if: github.ref_type == 'tag'
+        run: scripts/release-notes.sh --check "$LABEL"
+
+      - name: Build and package
+        run: MELE_LEXASIS="$(cygpath -u "$RUNNER_TEMP")/asi-build/LExASIs" ./package.sh --label "$LABEL"
+
+      - name: Write the release notes
+        if: github.ref_type == 'tag'
+        run: scripts/release-notes.sh "$LABEL" > dist/release-notes.md
+
+      - name: Show the hashes in the run's summary
+        run: |
+          {
+            echo '### SHA-256'
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 30
+
+      # For reading a player's crash dump: only these match the build's ASI.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pdb
+          path: dist/stage/*.pdb
+          if-no-files-found: error
+          retention-days: 90
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      # Before anything is signed: a re-run of a released tag would sign rebuilt zips nobody published, and those would
+      # pass gh attestation verify. Only a 404 goes on, so a failed lookup stops here too.
+      - name: Refuse a tag that already has a release
+        run: |
+          status="$(gh api -i "repos/$GH_REPO/releases/tags/$TAG" 2>/dev/null | head -n 1 | cut -d' ' -f2 || true)"
+          echo "release lookup: $status"
+          [[ "$status" == 404 ]]
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Check the zips against the build's hashes
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+
+      # GitHub offers attestations on a free account's public repos only.
+      - name: Sign the zips' provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.zip
+
+      # gh uploads to a draft and publishes it last, as immutable releases need.
+      - name: Publish the release
+        run: >
+          gh release create "$TAG" dist/*.zip dist/SHA256SUMS --verify-tag
+          --title "@TITLE@ $TAG" --notes-file dist/release-notes.md
+
+      - name: Check what was published against the build's hashes
+        run: |
+          gh release download "$TAG" --dir published
+          cmp dist/SHA256SUMS published/SHA256SUMS
+          cd published
+          sha256sum --check --strict SHA256SUMS
+
+  # Pages, not a release: an immutable release can't take new files, and its tag can't be used twice.
+  latest:
+    if: github.ref_type == 'branch' && !github.event.repository.private
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      attestations: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}latest/
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Check the zips against the build's hashes
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Sign the zips' provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.zip
+
+      - name: Make the page
+        run: |
+          mkdir -p site/latest
+          cp dist/*.zip dist/SHA256SUMS site/latest/
+          {
+            echo '<!doctype html><meta charset="utf-8"><title>@TITLE@ latest</title><h1>@TITLE@ latest</h1>'
+            echo "<p>Built from <a href=\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA\">$GITHUB_SHA</a>."
+            echo 'Newest code on main, less tested than a release.</p><ul>'
+            for zip in dist/*.zip; do
+              echo "<li><a href=\"${zip#dist/}\">${zip#dist/}</a></li>"
+            done
+            echo '</ul><p><a href="SHA256SUMS">SHA256SUMS</a></p><pre>'
+            cat dist/SHA256SUMS
+            echo '</pre>'
+          } > site/latest/index.html
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

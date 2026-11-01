@@ -85,6 +85,8 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 91 tools:
 - lectool: `coalesced` reads LE3's `Coalesced.bin` and `Default_<DLC>.bin`.
 - lectool: `morphface` gives a `BioMorphFace` the look of another, in place: LOD0 and LOD1 vertices, bones and material
   parameters. The donor may be a face of another game. `--sha1` stops the run on any other donor look.
+- release-kit: `kit.sh` renders one set of release files into each mod, checks them for drift, and scans a repo for game files
+  and private strings.
 
 Set-up and settings:
 
