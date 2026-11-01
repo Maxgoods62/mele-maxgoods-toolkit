@@ -100,7 +100,7 @@ Set-up and settings:
 - `.mcp.json.example`: an example entry that registers the server with an MCP client.
 - `package.sh` builds the release zip `dist/mele-mcp-v<version>-win-x64.zip`, with its license texts and no Oodle.
 
-MeleBridge 3, pipe protocol 1:
+MeleBridge 4, pipe protocol 1:
 
 - `MeleBridge.asi` serves `\\.\pipe\MeleBridge_LE1`: one JSON request per line, with the ops `ping`, `console`,
   `find`, `get`, `set`, `call`, `describe`, `subscribe`, `editor`, `status` and `keep_ticking`.
@@ -109,6 +109,8 @@ MeleBridge 3, pipe protocol 1:
 - MeleBridge 3 added `status` and `keep_ticking` (off at every game start: while on, `BioWorldInfo.Tick` takes no
   focus-loss pause), and `console` now sends to the current map's live player controller. Used in game by
   `scenario.py`.
+- MeleBridge 4 reads and writes `stringref` properties and parameters, as ints. `live_get` used to show
+  `<StringRefProperty>`, and `live_set` and `live_call` refused them.
 - `build.sh` builds in its own LExASIs checkout (default `%LOCALAPPDATA%\mele-asi-build\MeleBridge\LExASIs`), stages
   in `dist/` (`MELE_STAGE`), finds Visual Studio 18 with vswhere and the game in the registry, and runs one build of a
   checkout at a time.

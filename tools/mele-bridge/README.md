@@ -10,7 +10,7 @@ been loaded in a game: see [LE2 and LE3](#le2-and-le3).
 It does what the LEX Interop ASI can't. LEX Interop is one-way: replies go to a window titled "Legendary Explorer", it
 only handles whole classes (`getall`), and commands queued together run in reverse order.
 
-This is MeleBridge 3 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1. mele-mcp refuses a bridge with
+This is MeleBridge 4 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1. mele-mcp refuses a bridge with
 another protocol number ([formats §3.3](../../docs/formats.md#33-the-version-check)), so build the bridge and the server
 from the same commit.
 
@@ -659,7 +659,7 @@ Not run on either game:
   the game: the work runs inside `__try`.
 - Values. The SDK maps memory layouts (property offsets, bit masks, enum names), but not the engine's
   `ImportText`/`ExportText` virtuals, so `Reflection.cpp` converts values itself. Strings and arrays live on the game's
-  heap (`GMalloc`).
+  heap (`GMalloc`). A `stringref` is its TLK id as a plain int, read and written like an `int` (`12345`, not `$12345`).
 
 ## Findings
 

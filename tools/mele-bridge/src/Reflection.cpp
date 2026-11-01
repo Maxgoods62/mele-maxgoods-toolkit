@@ -44,13 +44,14 @@ namespace MeleBridge
             SFXName FunctionName;
         };
 
-        enum class Kind { Bool, Byte, Int, Float, Name, Str, Struct, Array, Delegate, Interface, Object, Other };
+        enum class Kind { Bool, Byte, Int, StringRef, Float, Name, Str, Struct, Array, Delegate, Interface, Object, Other };
 
         Kind KindOf(UProperty const* p)
         {
             if (p->IsA(UBoolProperty::StaticClass())) return Kind::Bool;
             if (p->IsA(UByteProperty::StaticClass())) return Kind::Byte;
             if (p->IsA(UIntProperty::StaticClass())) return Kind::Int;
+            if (p->IsA(UStringRefProperty::StaticClass())) return Kind::StringRef;
             if (p->IsA(UFloatProperty::StaticClass())) return Kind::Float;
             if (p->IsA(UNameProperty::StaticClass())) return Kind::Name;
             if (p->IsA(UStrProperty::StaticClass())) return Kind::Str;
@@ -89,6 +90,7 @@ namespace MeleBridge
                 break;
             }
             case Kind::Int: type = L"int"; break;
+            case Kind::StringRef: type = L"stringref"; break;
             case Kind::Float: type = L"float"; break;
             case Kind::Name: type = L"name"; break;
             case Kind::Str: type = L"string"; break;
@@ -158,7 +160,8 @@ namespace MeleBridge
                 if (e != nullptr && value < e->Names.Count()) return ToUtf8(ToStd(e->Names.GetData()[value].ToString()));
                 return value;
             }
-            case Kind::Int: return *reinterpret_cast<int*>(addr);
+            case Kind::Int:
+            case Kind::StringRef: return *reinterpret_cast<int*>(addr);
             case Kind::Float: return *reinterpret_cast<float*>(addr);
             case Kind::Name: return ToUtf8(ToStd(reinterpret_cast<SFXName*>(addr)->ToString()));
             case Kind::Str: return ToUtf8(ToStd(*reinterpret_cast<FString*>(addr)));
@@ -265,6 +268,7 @@ namespace MeleBridge
                 return;
             }
             case Kind::Int:
+            case Kind::StringRef:
             {
                 auto const d = ParseNumber(v);
                 if (d != static_cast<int>(d)) throw BridgeError("not an int: " + v.dump());
