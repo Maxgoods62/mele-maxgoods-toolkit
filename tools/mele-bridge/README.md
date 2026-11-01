@@ -633,8 +633,8 @@ One test run on each game, on a Normandy save (`Biop_Nor` in LE2, `BioP_Nor` in 
 - Loading: the ASI loader, the logger, the `ProcessEvent` hook and the pipe.
 - `find`, `get`, `set`, `describe` and `status`. `subscribe` through `live_watch`, on `BioWorldInfo.Tick` with its parameters.
 - `call`: return values, out parameters, name, bool and int arguments, and `SetHidden` with its effect.
-- `console`: on LE3 the output comes back through DebugLogger's log. LE2 had no DebugLogger, so a `set` showed the command ran,
-  but its output was not seen.
+- `console`: the output comes back through DebugLogger's log, with the game paused by focus loss and with it running in the
+  background.
 - Keep ticking, with the game in the background: on, the world keeps running and `worldTicks` climbs; off, `pausedByFocusLoss`
   comes back at once; on again, `clearedFocusPause` is true. `BioWorldInfo.Tick` does reach `ProcessEvent` on both games.
 
