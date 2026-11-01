@@ -1,3 +1,7 @@
+#include "MeleBridge/Bridge.hpp"
+
+#if MELEBRIDGE_EDITOR
+
 #include "MeleBridge/Editor.hpp"
 #include "MeleBridge/Reflection.hpp"
 #include "Common/Objects.hpp"
@@ -7001,3 +7005,5 @@ namespace MeleBridge::Editor
         return state;
     }
 }
+
+#endif

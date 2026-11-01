@@ -4,6 +4,9 @@
 game: it reads and writes any property of one live object, calls UnrealScript functions, runs console commands and
 streams events. mele-mcp's `live_*` tools and `game_plot` use it. It also holds the in-game editor that F8 opens.
 
+`LE2MeleBridge.asi` and `LE3MeleBridge.asi` are the same core without the editor. They compile and link, and they have never
+been loaded in a game: see [LE2 and LE3](#le2-and-le3).
+
 It does what the LEX Interop ASI can't. LEX Interop is one-way: replies go to a window titled "Legendary Explorer", it
 only handles whole classes (`getall`), and commands queued together run in reverse order.
 
@@ -21,7 +24,12 @@ cp build.env.example build.env    # optional: the settings that differ on your m
 ./build.sh                        # build, and stage MeleBridge.asi and its .pdb in MELE_STAGE
 ./build.sh --install              # also copy it to Game\ME1\Binaries\Win64\ASI (the game must be closed)
 ./build.sh --uninstall            # remove it from there (the game must be closed)
+./build.sh --game LE2             # build and stage LE2MeleBridge.asi instead (LE3: LE3MeleBridge.asi)
+./build.sh --game LE2 --install   # also copy it to Game\ME2\Binaries\Win64\ASI (MassEffect2.exe must be closed)
+./build.sh --game LE2 --uninstall # remove it from there
 ```
+
+The LE2 and LE3 builds have never been loaded in a game: once installed, each one runs at every start of that game.
 
 `build.sh` runs in WSL and calls Windows programs through interop. It needs:
 
@@ -38,7 +46,7 @@ environment wins over `build.env`. All are optional:
 | `MELE_LE_DIR` | The Legendary Edition folder, as a Windows path. Only `--install` and `--uninstall` use it. | From the registry: BioWare's `Install Dir` for the Legendary Edition, then Steam's uninstall entry (app 1328670) |
 | `MELE_VS` | The Visual Studio or Build Tools folder, as a WSL path | Found with `vswhere.exe` |
 | `MELE_LEXASIS` | The LExASIs checkout, as a WSL path. Keep it on the Windows disk: CMake and MSBuild do not work well on `\\wsl.localhost` paths. | `%LOCALAPPDATA%\mele-asi-build\MeleBridge\LExASIs` |
-| `MELE_STAGE` | Where `MeleBridge.asi` and `MeleBridge.pdb` are copied | `dist/` next to `build.sh` |
+| `MELE_STAGE` | Where the `.asi` and its `.pdb` are copied | `dist/` next to `build.sh` |
 
 How the build works:
 
@@ -49,7 +57,8 @@ How the build works:
   `asi_target` CMake helper.
 - Dear ImGui and ImGuizmo are fetched at pinned commits into `third_party`, next to the LExASIs checkout
   ([THIRD_PARTY.md](THIRD_PARTY.md)). They build as a library of their own, with their default flags.
-- `src/` is copied into the checkout as one more project and built for LE1 only, with that tree's flags (`/W4 /WX`).
+- `src/` is copied into the checkout as one more project and built for the one game `--game` names, with that tree's flags
+  (`/W4 /WX`).
   A `LEASI_GAME1_WIN64` variable would make that build copy the ASI into the game: the script clears it for the
   configure step, and stops when the configure output says one is still set (one set in the Windows environment
   reaches CMake all the same).
@@ -584,7 +593,8 @@ How the catalog is read and used:
 
 ## Pipe protocol
 
-`\\.\pipe\MeleBridge_LE1` takes newline-delimited JSON: one request line in, one reply line out. The transport, the ops
+`\\.\pipe\MeleBridge_LE1` (`_LE2`, `_LE3` in those builds) takes newline-delimited JSON: one request line in, one reply line
+out. The transport, the ops
 (`ping`, `console`, `find`, `get`, `set`, `call`, `describe`, `subscribe`, `editor`, `status`, `keep_ticking`), their
 arguments and replies, the value types, the event stream and the version check are in
 [formats §3](../../docs/formats.md#3-pipe-protocol).
@@ -600,8 +610,56 @@ held until that Tick is over. It clears `bPlayersOnly` only with `m_bPausedByFoc
 mode and F8 still pause. It is off by default and again at every game start, so normal play still pauses on alt-tab. It is
 for tests only.
 
+LE2 and LE3 have no such timer, and their `CanPause()` is only the mode's `bAllowPauseMenu`. Their `Tick` tests
+`m_bAllowBrowserWheel` before anything else, so the switch turns that flag off for the length of each `Tick` and back on
+afterwards, with requests held the same way. Only that `Tick` and `ShowBrowserWheel` (the pause menu's opener) read the flag
+in script. `Tick`'s timer callbacks and its native `TickLocal` run while the flag is off and were not audited. The switch
+refuses to write when the flags' offsets from reflection differ from the SDK's. None of this has run yet.
+
 A `subscribe` stream sees only calls that go through `ProcessEvent`. Script-to-script calls and natives called from
 script never show up.
+
+## LE2 and LE3
+
+`build.sh --game LE2` and `--game LE3` build the pipe, reflection, console, status and keep ticking from the same sources.
+`game/LE<n>.hpp` holds what differs. `MELEBRIDGE_EDITOR` is 1 only in `game/LE1.hpp`: without it `Editor.cpp`, `Overlay.cpp` and
+`Input.cpp` compile to nothing, `Editor.hpp` gives the core empty stubs, the `editor` op refuses, and no ImGui ends up in the ASI.
+`status` reads no squad screen on LE3, which has no `BioSFHandler_PartySelection`, and `loadingMovie.inLoad` is null on both,
+which have no `bIsInLoad`.
+
+Built, never loaded. Nothing below has run on LE2 or LE3:
+
+- Loading: the ASI loader, the logger, the `ProcessEvent` hook, `GWorld` and the pipe.
+- The hand-mapped core layouts. `PropertyLink`, `PropertyLinkNext`, `Offset`, `BitMask`, `Enum`, `Inner` and `Struct` come from
+  the SDK and nothing of ours has used them on LE2 or LE3 yet. LE1's `static_assert`s and its `PropertyOffset` findings say
+  nothing about these two games.
+- Every op: `find`, `get`, `set`, `call` (opcode natives, out parameters, string and array arguments), `describe`, `subscribe`,
+  `console`.
+- `console` output: mele-mcp reads it from the DebugLogger log, as on LE1, and that flush (`getall BioWorldInfo bHasPathNodes`
+  answered as an `appLogErrorf` line) is LE1 behaviour.
+- `status`: the loading movie, streaming levels and, on LE2, the squad screen's panel tag, its `m_DefaultHandler` and
+  `ScriptHandlers` and the movie's `nMembersAvailable`.
+- Keep ticking: whether `BioWorldInfo.Tick` reaches `ProcessEvent` with the world as its object. `BioWorldInfoTick.Tick` calls it
+  from script in LE1 and LE2, and LE1's switch still saw it; LE3's class has no such function. Whether `TickLocal` or a timer
+  callback needs `m_bAllowBrowserWheel`. On LE3, `bPauseOnLossOfFocus` lives in `Coalesced.bin` and was not read (LE1 and LE2's `BIOEngine.ini`
+  say `FALSE`), and `ASFXGRI::bPauseForCommand` is read through the SDK's layout.
+- Living beside `LE<n>MelePause.asi` and `LE<n>PhotoModeRevamp.asi`, which hook `ProcessEvent` too.
+
+The first in-game test, on LE2 then LE3, with a save on a small map and the game focused:
+
+1. Log and pipe: the ASI's log says `ProcessEvent hooked` and `ready`, and `live_status` answers. Check `bridge`, `map`, `world`,
+   `pc` and `pawn`. `pausedByFocusLoss` must be `false`, not null: a note there means the flags' offsets disagree.
+2. Reflection, read only: `live_find className=BioPawn`, `live_describe className=BioWorldInfo` (the property list must make
+   sense), `live_get` on a pawn's `Location`, a bool, an enum and an array, and `bPlayersOnly` against `live_status`.
+3. Writes and calls: `live_set` a harmless float and read it back; `live_call` a script function with a string argument and
+   one with an out parameter, and an opcode native.
+4. `live_console getall BioWorldInfo bHasPathNodes` with the DebugLogger ASI, then `live_watch Engine.SequenceOp.Activated`
+   while Kismet runs.
+5. Keep ticking: read the switch, turn it on, alt-tab. `worldTicks` must climb, and `bPlayersOnly` and `pausedByFocusLoss` must
+   stay false while NPCs keep moving. With focus back, Esc must still open the pause menu. Turned off, alt-tab must pause
+   again. If `worldTicks` stays at 0 the `Tick` arrives another way: turn it off and look at `BioWorldInfoTick`.
+6. `status` during a level change (streaming, loading movie), and on LE2 with the squad screen open.
+7. All of it again with MelePause and Photo Mode Revamp installed.
 
 ## How it works
 

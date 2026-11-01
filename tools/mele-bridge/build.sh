@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build MeleBridge.asi with the Visual Studio Build Tools, inside this tool's own checkout of ME3Tweaks/LExASIs on the
-# Windows disk (it provides the SDK, the ASI loader interface and the CMake helpers), then stage it in MELE_STAGE.
-#   ./build.sh              build and stage
-#   ./build.sh --install    also copy it to the game's ASI folder (the game must be closed)
-#   ./build.sh --uninstall  remove it from the ASI folder (the game must be closed)
+# Build MeleBridge for one game with the Visual Studio Build Tools, inside this tool's own checkout of ME3Tweaks/LExASIs on
+# the Windows disk (it provides the SDK, the ASI loader interface and the CMake helpers), then stage it in MELE_STAGE.
+#   ./build.sh              build and stage MeleBridge.asi, LE1's
+#   ./build.sh --game LE2   build and stage another game's instead: LE2MeleBridge.asi, LE3MeleBridge.asi
+#   ./build.sh --install    also copy that ASI to its game's ASI folder (the game must be closed)
+#   ./build.sh --uninstall  remove it from that folder, without building (the game must be closed)
 # Runs in WSL. Settings come from the environment or from build.env (not in git, see build.env.example); a variable the
 # caller set wins over build.env. All are optional:
 #   MELE_LE_DIR   the Legendary Edition folder, as a Windows path; only --install and --uninstall use it
@@ -12,8 +13,8 @@
 #   MELE_LEXASIS  the LExASIs checkout, cloned on the first build; the editor overlay's libraries go next to it in
 #                 third_party. Keep it on the Windows disk: CMake and MSBuild do not work well on \\wsl.localhost paths
 #                 (default: %LOCALAPPDATA%\mele-asi-build\MeleBridge\LExASIs)
-#   MELE_STAGE    where MeleBridge.asi and its .pdb are copied (default: dist/ next to this script)
-# MeleBridge.asi in Game\ME1\Binaries\Win64\ASI is the only file this tool writes inside the game install.
+#   MELE_STAGE    where the .asi and its .pdb are copied (default: dist/ next to this script)
+# The chosen game's ASI in Game\ME<n>\Binaries\Win64\ASI is the only file this tool writes inside the game install.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +30,23 @@ IMGUI_COMMIT=c1aaac65e896a45f81f47a4d68f9959e0f86c859      # v1.93.0
 IMGUIZMO_COMMIT=105e4fde45e4e74aae8973d98750820ef7aca7e2
 
 die() { echo "build.sh: $*" >&2; exit 1; }
+
+GAME=LE1
+ACTION=build
+while (( $# > 0 )); do
+    case "$1" in
+        --game) (( $# >= 2 )) || die "--game takes LE1, LE2 or LE3"; GAME="${2^^}"; shift 2 ;;
+        --install|--uninstall) ACTION="${1#--}"; shift ;;
+        *) die "unknown argument '$1': --game LE1|LE2|LE3, --install, --uninstall" ;;
+    esac
+done
+case "$GAME" in
+    LE1) ASI_NAME=MeleBridge ;;
+    LE2|LE3) ASI_NAME="${GAME}MeleBridge" ;;
+    *) die "unknown game '$GAME': LE1, LE2 or LE3" ;;
+esac
+GAME_NUMBER="${GAME#LE}"
+GAME_EXE="MassEffect$GAME_NUMBER.exe"
 
 # A Windows environment variable as a WSL path; empty if it is not set. PowerShell prints it in UTF-8 (cmd.exe would use
 # the OEM code page and break a non-ASCII user name).
@@ -55,22 +73,23 @@ le_dir() {
     [[ -n "$win" ]] || die "Legendary Edition not found in the registry: set MELE_LE_DIR to its folder, as a Windows path"
     win="${win%\\}"
     dir="$(wslpath -u "$win" 2>/dev/null || true)"
-    [[ -n "$dir" && -d "$dir/Game/ME1" ]] || die "no Game\\ME1 in '$win': set MELE_LE_DIR to the Legendary Edition folder"
+    [[ -n "$dir" && -d "$dir/Game/ME$GAME_NUMBER" ]] \
+        || die "no Game\\ME$GAME_NUMBER in '$win': set MELE_LE_DIR to the Legendary Edition folder"
     echo "$dir"
 }
 
-# Closed only when tasklist answers and lists no MassEffect1.exe: a failed tasklist counts as running.
+# Closed only when tasklist answers and lists no such exe: a failed tasklist counts as running.
 game_closed() {
     local out
-    out="$(tasklist.exe /FO CSV /NH /FI "IMAGENAME eq MassEffect1.exe" 2>/dev/null)" || return 1
-    ! grep -qi 'MassEffect1.exe' <<< "$out"
+    out="$(tasklist.exe /FO CSV /NH /FI "IMAGENAME eq $GAME_EXE" 2>/dev/null)" || return 1
+    ! grep -qi "$GAME_EXE" <<< "$out"
 }
 
-if [[ "${1:-}" == "--uninstall" ]]; then
-    ASI_DIR="$(le_dir)/Game/ME1/Binaries/Win64/ASI"
-    game_closed || { echo "MassEffect1.exe is running: close the game first." >&2; exit 1; }
-    rm -f "$ASI_DIR/MeleBridge.asi"
-    echo "removed $ASI_DIR/MeleBridge.asi"
+if [[ "$ACTION" == uninstall ]]; then
+    ASI_DIR="$(le_dir)/Game/ME$GAME_NUMBER/Binaries/Win64/ASI"
+    game_closed || { echo "$GAME_EXE is running: close the game first." >&2; exit 1; }
+    rm -f "$ASI_DIR/$ASI_NAME.asi"
+    echo "removed $ASI_DIR/$ASI_NAME.asi"
     exit 0
 fi
 
@@ -162,8 +181,12 @@ cd "$LEXASIS"
 # removes one WSLENV would forward to cmake.exe; one set on the Windows side still reaches it, so the configure output
 # is checked too. Every game flag is passed, so a value cached by an earlier configure never sticks.
 log="$(mktemp)"
+flags=()
+for g in LE1 LE2 LE3; do
+    if [[ "$g" == "$GAME" ]]; then flags+=("-DLEASI_BUILD_$g=ON"); else flags+=("-DLEASI_BUILD_$g=OFF"); fi
+done
 if ! env -u LEASI_GAME1_WIN64 -u LEASI_GAME2_WIN64 -u LEASI_GAME3_WIN64 -u LEASI_GAMEL_WIN64 "$CMAKE" \
-    --preset VisualStudio -DLEASI_BUILD_LE1=ON -DLEASI_BUILD_LE2=OFF -DLEASI_BUILD_LE3=OFF -DLEASI_BUILD_LEL=OFF \
+    --preset VisualStudio "${flags[@]}" -DLEASI_BUILD_LEL=OFF \
     "-DMELE_THIRD_PARTY=$(wslpath -m "$THIRD_PARTY")" > "$log" 2>&1; then
     rm -f "$log"
     die "cmake configure failed: run it by hand in $LEXASIS"
@@ -172,7 +195,7 @@ if grep -q 'User-provided Mass Effect' "$log"; then
     rm -f "$log"
     die "a LEASI_GAME*_WIN64 variable is set in the Windows environment, and it makes the build copy itself into the game: remove it (System Properties, Environment Variables), then open a new terminal and build again"
 fi
-if ! "$CMAKE" --build Build --config RELEASE --target MeleBridge-LE1 -- /m /v:minimal /nologo > "$log" 2>&1; then
+if ! "$CMAKE" --build Build --config RELEASE --target "MeleBridge-$GAME" -- /m /v:minimal /nologo > "$log" 2>&1; then
     tr -d '\r' < "$log" | grep -E 'error|warning' | sed -E 's| \[[^]]*vcxproj\]||; s|^.*LExASIs\\||' | sort -u
     rm -f "$log"
     exit 1
@@ -180,12 +203,12 @@ fi
 rm -f "$log"
 
 mkdir -p "$STAGE"
-cp Build/RELEASE/MeleBridge.asi Build/RELEASE/MeleBridge.pdb "$STAGE/"
-echo "built $STAGE/MeleBridge.asi"
+cp "Build/RELEASE/$ASI_NAME.asi" "Build/RELEASE/$ASI_NAME.pdb" "$STAGE/"
+echo "built $STAGE/$ASI_NAME.asi"
 
-if [[ "${1:-}" == "--install" ]]; then
-    ASI_DIR="$(le_dir)/Game/ME1/Binaries/Win64/ASI"
-    game_closed || { echo "MassEffect1.exe is running: close the game first (built, not installed)." >&2; exit 1; }
-    cp "$STAGE/MeleBridge.asi" "$ASI_DIR/MeleBridge.asi"
-    echo "installed $ASI_DIR/MeleBridge.asi"
+if [[ "$ACTION" == install ]]; then
+    ASI_DIR="$(le_dir)/Game/ME$GAME_NUMBER/Binaries/Win64/ASI"
+    game_closed || { echo "$GAME_EXE is running: close the game first (built, not installed)." >&2; exit 1; }
+    cp "$STAGE/$ASI_NAME.asi" "$ASI_DIR/$ASI_NAME.asi"
+    echo "installed $ASI_DIR/$ASI_NAME.asi"
 fi

@@ -4,6 +4,8 @@
 
 #include <array>
 
+#if MELEBRIDGE_EDITOR
+
 // The in-game editor (F8): see docs/design/in-game-editor.md. Three threads meet here:
 // - the game thread (ProcessEvent hook) does everything that touches game objects (Editor.cpp);
 // - the render thread (IDXGISwapChain::Present hook) draws the ImGui overlay from a snapshot and posts commands (Overlay.cpp);
@@ -397,3 +399,17 @@ namespace MeleBridge::Editor
     /// Game thread, on open and close: keep the cursor in the window while open, give the game its own clip back after.
     void HoldCursor(bool hold);
 }
+
+#else
+
+// No editor in this game's build: what the core calls does nothing, and the editor op says why.
+namespace MeleBridge::Editor
+{
+    inline void InstallInput(::LESDK::Initializer&) {}
+    inline void InstallOverlay(::LESDK::Initializer&) {}
+    inline bool Busy() { return false; }
+    inline void AfterProcessEvent(UObject*, UFunction*, void*) {}
+    inline json State() { throw BridgeError("the in-game editor is built for LE1 only"); }
+}
+
+#endif

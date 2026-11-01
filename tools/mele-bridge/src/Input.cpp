@@ -1,3 +1,7 @@
+#include "MeleBridge/Bridge.hpp"
+
+#if MELEBRIDGE_EDITOR
+
 #include "MeleBridge/Editor.hpp"
 
 #define DIRECTINPUT_VERSION 0x0800
@@ -294,3 +298,5 @@ namespace MeleBridge::Editor
         GameClipSet = false;
     }
 }
+
+#endif

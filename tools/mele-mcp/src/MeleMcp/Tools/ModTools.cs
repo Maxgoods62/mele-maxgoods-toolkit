@@ -26,7 +26,7 @@ public static class ModTools
         => ToolErrors.Run(() => ModBuilder.Build(PackageTools.ParseGame(game), folder, @out));
 
     [McpServerTool(Name = "mod_check", ReadOnly = true),
-     Description("Checks a mod's built files in M3's library before installing: refs (LEX's reference check), streaming (stream state "
+     Description("Checks an LE1 mod's built files in M3's library before installing: refs (LEX's reference check), streaming (stream state "
                  + "without InChunkName: pawns frozen and black), startpoints (pathless start point: henchmen 'destination blocked'), strings "
                  + "(strref without text per language), facefx (spoken line without FXA_<strref> lip sync), ids (plot, quest or string ids "
                  + "another installed mod also defines). Run it after mod_build, before mod_install.")]

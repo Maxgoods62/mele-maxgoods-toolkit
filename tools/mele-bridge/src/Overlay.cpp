@@ -1,3 +1,7 @@
+#include "MeleBridge/Bridge.hpp"
+
+#if MELEBRIDGE_EDITOR
+
 #include "MeleBridge/Editor.hpp"
 
 #include <d3d11.h>
@@ -2295,3 +2299,5 @@ namespace MeleBridge::Editor
                    Diag.Present1Hooked.load());
     }
 }
+
+#endif

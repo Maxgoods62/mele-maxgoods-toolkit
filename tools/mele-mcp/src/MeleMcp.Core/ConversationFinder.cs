@@ -11,15 +11,18 @@ namespace MeleMcp.Core;
 /// <param name="Speaker">Entry speaker tag (m_SpeakerList, e.g. hench_asari), "owner" (whoever owns the conversation) or "player".</param>
 /// <param name="Wheel">A reply's paraphrase on the dialogue wheel.</param>
 /// <param name="Plot">Its plot gate and effect as conv_read shows them, e.g. "if cond 415(-1)", "then transition 123(-1)".</param>
-public sealed record ConvLine(string File, string Conversation, int UIndex, string Node, string Speaker, int StrRef, string Text, string? Wheel, string? Plot);
+/// <param name="Female">LE2/LE3: the line's text for a female Shepard, where it differs from Text.</param>
+/// <param name="WheelFemale">The same for Wheel.</param>
+public sealed record ConvLine(string File, string Conversation, int UIndex, string Node, string Speaker, int StrRef, string Text, string? Wheel, string? Plot,
+                              string? Female = null, string? WheelFemale = null);
 
 /// <param name="Skipped">Packages that could not be read, with the reason.</param>
 public sealed record ConvFindResult(int FilesScanned, int Conversations, int Matches, IReadOnlyList<ConvLine> Lines, IReadOnlyList<string> Skipped);
 
 /// <summary>
-/// Searches every LE1 conversation the game loads (base game, DLC and mods) for lines by speaker, text or plot id. A
-/// conversation's text lives in its _LOC_&lt;LANG&gt; package, so only the asked language's copy is read; a mod's conversation
-/// kept in its level reads its text from the global strings.
+/// Searches every conversation the game loads (base game, DLC and mods) for lines by speaker, text or plot id. Only the asked
+/// language's _LOC_&lt;LANG&gt; packages are read. An LE1 conversation has its text in that package (a mod's conversation kept in its level
+/// reads the global strings); LE2/LE3 text comes from the .tlk files.
 /// </summary>
 public static partial class ConversationFinder
 {
@@ -31,16 +34,15 @@ public static partial class ConversationFinder
     public static ConvFindResult Find(MEGame game, string? speaker, string? text, int? plotId, string? conversation,
                                       string fileFilter, string language, int limit)
     {
-        if (!game.IsGame1()) throw new ArgumentException("conv_find handles Game 1 (LE1) conversations.");
         LecHost.EnsureInitialized();
-        var lang = language.Trim().ToUpperInvariant();
+        var lang = game.IsGame1() ? language.Trim().ToUpperInvariant() : TalkTables.Language(language);
         var files = MELoadedFiles.GetFilesLoadedInGame(game)
             .Where(kv => kv.Key.EndsWith(".pcc", StringComparison.OrdinalIgnoreCase)
                          && FileSystemName.MatchesSimpleExpression(fileFilter, kv.Key, ignoreCase: true)
                          && LocFile().Match(kv.Key) is var m && (!m.Success || m.Groups["lang"].Value.Equals(lang, StringComparison.OrdinalIgnoreCase)))
             .ToList();
 
-        var global = new Lazy<Dictionary<int, string>>(() => GlobalStrings.Load(game, lang));
+        var global = new Lazy<(Dictionary<int, string> Male, Dictionary<int, string> Female)>(() => game.IsGame1() ? (GlobalStrings.Load(game, lang), []) : TalkTables.Load(game, lang));
         var lines = new ConcurrentBag<ConvLine>();
         var skipped = new ConcurrentBag<string>();
         var conversations = 0;
@@ -55,7 +57,7 @@ public static partial class ConversationFinder
                 {
                     if (!string.IsNullOrEmpty(conversation) && !conv.ObjectName.Instanced.Contains(conversation, StringComparison.OrdinalIgnoreCase)) continue;
                     Interlocked.Increment(ref conversations);
-                    foreach (var line in Lines(kv.Key, pcc, conv, lang, global))
+                    foreach (var line in Lines(game, kv.Key, pcc, conv, lang, global))
                     {
                         if (Matches(line, speaker, text, plotId)) lines.Add(line);
                     }
@@ -76,18 +78,21 @@ public static partial class ConversationFinder
     private static bool Matches(ConvLine line, string? speaker, string? text, int? plotId) =>
         (string.IsNullOrEmpty(speaker) || line.Speaker.Contains(speaker, StringComparison.OrdinalIgnoreCase))
         && (string.IsNullOrEmpty(text) || line.Text.Contains(text, StringComparison.OrdinalIgnoreCase)
-                                       || (line.Wheel?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false))
+                                       || (line.Wheel?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false)
+                                       || (line.Female?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false)
+                                       || (line.WheelFemale?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false))
         && (plotId is not { } id || line.Plot is { } plot && Regex.IsMatch(plot, $@"\b{id}\("));
 
-    private static IEnumerable<ConvLine> Lines(string file, IMEPackage pcc, ExportEntry conv, string lang, Lazy<Dictionary<int, string>> global)
+    private static IEnumerable<ConvLine> Lines(MEGame game, string file, IMEPackage pcc, ExportEntry conv, string lang,
+                                               Lazy<(Dictionary<int, string> Male, Dictionary<int, string> Female)> global)
     {
         var props = conv.GetProperties();
         var (tlk, _) = ConversationReader.FindTalkFile(pcc, props, lang);
         string Text(int id) => id <= 0 ? ""
-            : tlk?.FindDataById(id, returnNullIfNotFound: true, noQuotes: true) ?? global.Value.GetValueOrDefault(id, "<no text>");
+            : tlk?.FindDataById(id, returnNullIfNotFound: true, noQuotes: true) ?? global.Value.Male.GetValueOrDefault(id, "<no text>");
+        string? Female(int id) => tlk is null && id > 0 ? global.Value.Female.GetValueOrDefault(id) : null;
 
-        var speakers = props.GetProp<ArrayProperty<StructProperty>>("m_SpeakerList")?
-            .Select(s => s.GetProp<NameProperty>("sSpeakerTag")?.Value.Instanced ?? "?").ToList() ?? [];
+        var speakers = ConversationReader.SpeakerTags(game, props);
         var entries = ConversationReader.Structs(props, "m_EntryList");
         var wheel = new Dictionary<int, int>();
         foreach (var r in entries.SelectMany(e => ConversationReader.Structs(e.Properties, "ReplyListNew")))
@@ -101,7 +106,7 @@ public static partial class ConversationFinder
             var index = entries[i].GetProp<IntProperty>("nSpeakerIndex")?.Value ?? -1;
             var who = index >= 0 && index < speakers.Count ? speakers[index] : index == -2 ? "player" : "owner";
             var id = entries[i].GetProp<StringRefProperty>("srText")?.Value ?? 0;
-            yield return new ConvLine(file, conv.ObjectName.Instanced, conv.UIndex, $"E{i}", who, id, Text(id), null, Plot(entries[i]));
+            yield return new ConvLine(file, conv.ObjectName.Instanced, conv.UIndex, $"E{i}", who, id, Text(id), null, Plot(entries[i]), Female(id));
         }
 
         var replies = ConversationReader.Structs(props, "m_ReplyList");
@@ -110,7 +115,7 @@ public static partial class ConversationFinder
             var id = replies[i].GetProp<StringRefProperty>("srText")?.Value ?? 0;
             var para = wheel.GetValueOrDefault(i);
             yield return new ConvLine(file, conv.ObjectName.Instanced, conv.UIndex, $"R{i}", "player", id, Text(id),
-                                      para > 0 ? Text(para) : null, Plot(replies[i]));
+                                      para > 0 ? Text(para) : null, Plot(replies[i]), Female(id), Female(para));
         }
     }
 }

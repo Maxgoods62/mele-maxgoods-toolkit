@@ -10,7 +10,9 @@ namespace MeleMcp.Tools;
 [McpServerToolType]
 public static class LiveTools
 {
-    private const string GameParam = "Game: LE1 (the bridge is built for LE1 only).";
+    private const string GameParam = "Game: LE1, LE2 or LE3. LE2 and LE3: the bridge compiles (tools/mele-bridge/build.sh --game) but was never loaded in a game, so this tool is untested there.";
+    private const string EditorGameParam = "Game: LE1 (the editor is built for LE1 only: LE2 and LE3 refuse).";
+    private const string SaveGameParam = "Game: LE1 (the only game this tool handles).";
     private const string ObjectParam = "Object path as live_find returns it, e.g. BIOA_MYM01.TheWorld.PersistentLevel.BioPawn_3.";
     private const string TimeoutParam = "Seconds to wait for the game thread.";
 
@@ -108,15 +110,15 @@ public static class LiveTools
                  + "Canvas.Project, in pixels), which hooks are in, thread ids and input counters. Answers without the game thread, so it "
                  + "works while paused or loading.")]
     public static JsonObject LiveEditor(
-        [Description(GameParam)] string game = "LE1")
+        [Description(EditorGameParam)] string game = "LE1")
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "editor" }, 5));
 
     [McpServerTool(Name = "live_status", ReadOnly = true),
      Description("One cheap look at the running game (MeleBridge ASI 3+): map, its BioWorldInfo (begunPlay, bPlayersOnly, the "
                  + "focus-loss pause flag), player controller and pawn, streaming levels still loading or changing visibility, the "
-                 + "loading movie (null when no SFXLoadMovieManager exists), the squad screen (partySelectOpen, its handler, the movie's "
-                 + "member count) and the keep_ticking switch with its counters. Times out while a map loads: the game thread runs no "
-                 + "script then.")]
+                 + "loading movie (null when no SFXLoadMovieManager exists; inLoad null on LE2 and LE3), the squad screen (partySelectOpen, "
+                 + "its handler, the movie's member count; null on LE3) and the keep_ticking switch with its counters. Times out while a "
+                 + "map loads: the game thread runs no script then.")]
     public static JsonObject LiveStatus(
         [Description(TimeoutParam)] double timeoutSeconds = 3,
         [Description(GameParam)] string game = "LE1")
@@ -126,7 +128,8 @@ public static class LiveTools
      Description("Test switch (MeleBridge ASI 3+), off by default and again at every game start. While on, LE1 does not pause its "
                  + "world and Kismet when its window loses focus (BioWorldInfo.Tick's focus pause); real pauses (menus, squad screen, "
                  + "photo mode, the F8 editor) are untouched. Turning it on also ends a focus pause already in place. Omit 'on' to read "
-                 + "it. Returns the switch and its counters.")]
+                 + "it. Returns the switch and its counters. Tested on LE1 only: LE2 and LE3 hold m_bAllowBrowserWheel off for each Tick "
+                 + "instead of raising LE1's timer, a route read from their script and never run.")]
     public static JsonObject LiveKeepTicking(
         [Description("true: on; false: off; omit to read.")] bool? on = null,
         [Description(TimeoutParam)] double timeoutSeconds = 5,
@@ -175,7 +178,7 @@ public static class LiveTools
         [Description("For a new props entry: the template given to live_place (a level actor's object path).")] string? template = null,
         [Description("For a new props entry: its name (default: the tag).")] string? name = null,
         [Description("Build the level after writing the file.")] bool build = true,
-        [Description(GameParam)] string game = "LE1")
+        [Description(SaveGameParam)] string game = "LE1")
         => ToolErrors.Run(() => LivePlacer.Save(PackageTools.ParseGame(game), file, objectPath, name, template, build));
 
     [McpServerTool(Name = "live_watch", ReadOnly = true),

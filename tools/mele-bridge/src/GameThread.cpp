@@ -209,6 +209,13 @@ namespace MeleBridge
     // (vanilla would have left it at 0 or below too): the pause menu (ShowMenuGui asks CanPause too) behaves as vanilla outside
     // it. EndConversation sets the timer to 1.0 (StartNoBrowserWheelTimer) for its own reasons: that value counts down as
     // vanilla until its last Tick, which gets the raise.
+    //
+    // LE2 and LE3 have no such timer, and their CanPause is only the mode's bAllowPauseMenu. Their Tick asks
+    // m_bAllowBrowserWheel first, so while the switch is on that flag is off for the length of each Tick and put back afterwards
+    // (a level that holds it off pauses on nothing anyway). In script only ShowBrowserWheel (the pause menu's opener) reads it
+    // beside Tick, and requests wait as above. Tick's timer callbacks (BioTimerList.Tick) and its native TickLocal run in that
+    // window and were not audited: one that opens the pause menu would find it held, and one that writes the flag false
+    // (BioSeqAct_SetBrowserWheelAvailable is the only writer in script) would be undone.
 
     namespace
     {
@@ -220,29 +227,54 @@ namespace MeleBridge
         /// BioWorldInfo's fields where the engine laid them out (Editor.cpp says why the SDK's C++ layout is not trusted). Game
         /// thread only; resolved once, before the switch first goes on.
         UClass* WorldClass = nullptr;
+#if MELEBRIDGE_FOCUS_TIMER
         int TimerAt = -1;
+#else
+        int AllowAt = -1;
+        DWORD AllowMask = 0;
+#endif
         int PausedAt = -1;
         DWORD PausedMask = 0;
 
+#if MELEBRIDGE_FOCUS_TIMER
         constexpr float RaisedTimer = 1e9f;
+#endif
 
         void ResolveWorldFields()
         {
             if (WorldClass != nullptr) return;
             auto const cls = ABioWorldInfo::StaticClass();
             if (cls == nullptr) throw BridgeError("no BioWorldInfo class is loaded");
+#if MELEBRIDGE_FOCUS_TIMER
             auto const timer = PropertyOffset(cls, L"m_fNoBrowserWheelTimer");
             if (timer < 0) throw BridgeError("BioWorldInfo has no m_fNoBrowserWheelTimer");
+#else
+            int allow = -1;
+            DWORD allowMask = 0;
+            if (!BoolFieldOf(cls, L"m_bAllowBrowserWheel", allow, allowMask)) throw BridgeError("BioWorldInfo has no m_bAllowBrowserWheel");
+#endif
             int paused = -1;
             DWORD mask = 0;
             if (!BoolFieldOf(cls, L"m_bPausedByFocusLoss", paused, mask)) throw BridgeError("BioWorldInfo has no m_bPausedByFocusLoss");
+#if MELEBRIDGE_FOCUS_TIMER
             TimerAt = timer;
+#else
+            // Written on every Tick once on: when reflection and the SDK disagree, one of them is wrong, so nothing is written.
+            if (allow != Game::FocusFlagsAt || allowMask != Game::AllowBrowserWheelMask || paused != Game::FocusFlagsAt || mask != Game::PausedByFocusLossMask)
+                throw BridgeError("BioWorldInfo's focus flags are not where the SDK puts them: keep_ticking stays off");
+            AllowAt = allow;
+            AllowMask = allowMask;
+#endif
             PausedAt = paused;
             PausedMask = mask;
             WorldClass = cls;
         }
 
+#if MELEBRIDGE_FOCUS_TIMER
         float& Timer(AWorldInfo* world) { return *reinterpret_cast<float*>(reinterpret_cast<BYTE*>(world) + TimerAt); }
+#else
+        DWORD& AllowWord(AWorldInfo* world) { return *reinterpret_cast<DWORD*>(reinterpret_cast<BYTE*>(world) + AllowAt); }
+#endif
         DWORD& PausedWord(AWorldInfo* world) { return *reinterpret_cast<DWORD*>(reinterpret_cast<BYTE*>(world) + PausedAt); }
 
         /// The only place the switch writes bPlayersOnly, and only to end the pause Tick takes on focus loss, the one pause that
@@ -253,7 +285,7 @@ namespace MeleBridge
             auto& word = PausedWord(world);
             if ((word & PausedMask) == 0) return false;
             word &= ~PausedMask;
-            world->bPlayersOnly = 0;
+            Game::EndFocusPause(world);
             FocusPausesCleared.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
@@ -264,6 +296,7 @@ namespace MeleBridge
             return WorldClass != nullptr && function->Name == TickName && context->IsA(WorldClass);
         }
 
+#if MELEBRIDGE_FOCUS_TIMER
         /// Before the world's Tick(float fDeltaT): returns whether the timer was raised (then AfterWorldTick puts it back).
         /// fDeltaT is the event's only parameter, at offset 0 of its parameters.
         bool BeforeWorldTick(AWorldInfo* world, void* parms)
@@ -286,6 +319,26 @@ namespace MeleBridge
             // A safety net: a pause the Tick took anyway.
             ClearFocusPause(world);
         }
+#else
+        /// Before the world's Tick: returns whether m_bAllowBrowserWheel was turned off (then AfterWorldTick turns it back on).
+        bool BeforeWorldTick(AWorldInfo* world, void*)
+        {
+            WorldTicks.fetch_add(1, std::memory_order_relaxed);
+            ClearFocusPause(world);
+            auto& word = AllowWord(world);
+            if ((word & AllowMask) == 0) return false;
+            word &= ~AllowMask;
+            TimerRaises.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        void AfterWorldTick(AWorldInfo* world, bool raised)
+        {
+            if (raised) AllowWord(world) |= AllowMask;
+            // A safety net: a pause the Tick took anyway.
+            ClearFocusPause(world);
+        }
+#endif
     }
 
     bool KeepTickingOn(AWorldInfo* world)

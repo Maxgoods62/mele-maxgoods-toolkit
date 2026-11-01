@@ -4,22 +4,24 @@ using ModelContextProtocol.Server;
 
 namespace MeleMcp.Tools;
 
-/// <summary>Game 1 journal: BioQuestMap quests and task evaluations.</summary>
+/// <summary>The journal: BioQuestMap quests and task evaluations, read for every game and written for LE1; the LE2/LE3 BioCodexMap, read.</summary>
 [McpServerToolType]
 public static class QuestTools
 {
     [McpServerTool(Name = "quest_map_get", ReadOnly = true),
-     Description("Reads an LE1 BioQuestMap (journal): quests with goals, tasks and plot items (strrefs with their global text, conditionals, states, "
-                 + "InstanceVersions), and the task evaluations a plot bool/int/float change runs (quest, task, conditional, state). "
-                 + "Base game: BIOC_Materials.pcc PlotManagerAuto.QuestMap; a DLC: PlotManagerAutoDLC_<name>.pcc QuestMap.")]
-    public static QuestMapInfo QuestMapGet(
-        [Description("Package with the map, e.g. BIOC_Materials.pcc. File name or full path.")] string package,
-        [Description("BioQuestMap export, e.g. QuestMap or PlotManagerAuto.QuestMap.")] string export = "QuestMap",
-        [Description("One quest id.")] int? questId = null,
-        [Description("Only task evaluations run by this plot variable id, and their quests.")] int? touches = null,
-        [Description("Language for the text: INT, FR, DE...")] string language = "FR",
-        [Description("Maximum quests returned.")] int limit = 20,
-        [Description("Game: LE1.")] string game = "LE1")
+     Description("Reads a BioQuestMap (journal): quests with goals, tasks and plot items (strrefs with their global text, conditionals, states, "
+                 + "InstanceVersions), and the task evaluations a plot bool/int/float change runs (quest, task, conditional, state). LE2/LE3 also read a BioCodexMap "
+                 + "(export DataCodexMap): sections and pages with their text. LE2/LE3 text comes from the .tlk files, base game and DLC, highest mount winning (male table). "
+                 + "LE1 base game: BIOC_Materials.pcc PlotManagerAuto.QuestMap; a DLC: PlotManagerAutoDLC_<name>.pcc QuestMap. "
+                 + "LE2 base game: Startup_INT.pcc; LE3: SFXGameInfoSP_SF.pcc; a DLC: its Startup_<name>_INT.pcc, PlotManagerAutoDLC_<name>.QuestMap.")]
+    public static object QuestMapGet(
+        [Description("Package with the map, e.g. BIOC_Materials.pcc, Startup_INT.pcc (LE2), SFXGameInfoSP_SF.pcc (LE3). File name or full path.")] string package,
+        [Description("BioQuestMap export, e.g. QuestMap or PlotManagerAuto.QuestMap; LE2/LE3 also DataCodexMap.")] string export = "QuestMap",
+        [Description("One quest id; for a codex map, one section or page id.")] int? questId = null,
+        [Description("Only task evaluations run by this plot variable id, and their quests. Not used for a codex map.")] int? touches = null,
+        [Description("Language for the text: INT, FR, DE... LE2/LE3 also take FRA, DEU, ESN, ITA, JPN, POL, RUS.")] string language = "FR",
+        [Description("Maximum quests returned; for a codex map, maximum sections and maximum pages.")] int limit = 20,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => QuestMaps.Get(PackageTools.ParseGame(game), package, export, questId, touches, language, limit));
 
     [McpServerTool(Name = "quest_set", Destructive = true),

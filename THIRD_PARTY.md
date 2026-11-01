@@ -24,6 +24,7 @@ domain), MassEffectModder (GPL-3.0), MiniZip and zlib (zlib license), FastZlib (
 |---|---|---|---|
 | [ModelContextProtocol](https://github.com/modelcontextprotocol/csharp-sdk), ModelContextProtocol.Core | 2.3.0 | Apache-2.0 | mele-mcp |
 | [YamlDotNet](https://github.com/aaubry/YamlDotNet) | 16.3.0 | MIT | both |
+| [Iced](https://github.com/icedland/iced) | 1.21.0 | MIT | mele-mcp |
 | [BCnEncoder.Net](https://github.com/Nominom/BCnEncoder.NET) | 2.2.1 | MIT or Unlicense | both, through LEC |
 | BCnEncoder.Net.ImageSharp | 1.1.2 | MIT or Unlicense | both, through LEC |
 | [CommunityToolkit.Diagnostics](https://github.com/CommunityToolkit/dotnet), CommunityToolkit.HighPerformance | 8.4.0 | MIT | both, through LEC |

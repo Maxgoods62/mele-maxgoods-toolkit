@@ -1,52 +1,65 @@
 using System.ComponentModel;
+using LegendaryExplorerCore.Packages;
 using MeleMcp.Core;
 using ModelContextProtocol.Server;
 
 namespace MeleMcp.Tools;
 
-/// <summary>Game 1 strings stored in packages (BioTlkFile exports).</summary>
+/// <summary>Strings (LE1: BioTlkFile exports in packages; LE2/LE3: loose .tlk files) and conversations.</summary>
 [McpServerToolType]
 public static class TalkTools
 {
     private const string PackageDescription =
-        "Package with BioTlkFile exports, e.g. the mod's DLC_MOD_<Name>_GlobalTlk_FR.pcc or a conversation's _LOC_ file. File name or full path.";
+        "LE1: package with BioTlkFile exports, e.g. the mod's DLC_MOD_<Name>_GlobalTlk_FR.pcc or a conversation's _LOC_ file. File name or full path. "
+        + "LE2/LE3: a .tlk file, one per module and language: BIOGame_INT.tlk, DLC_CON_DH1_INT.tlk, DLC_3_INT.tlk (LE2 names DLC files by the module number in "
+        + "BIOEngine.ini [Engine.DLCModules]: 3 is DLC_HEN_MT). File name (highest mounted copy) or full path.";
 
     [McpServerTool(Name = "tlk_get", ReadOnly = true),
-     Description("Reads strings from the BioTlkFile exports of an LE1 package (each file is listed: GlobalTlk packages have a male and a female copy).")]
-    public static IReadOnlyList<TlkFileStrings> TlkGet(
+     Description("Reads strings. LE1: from the BioTlkFile exports of a package (each file is listed: GlobalTlk packages have a male and a female copy). "
+                 + "LE2/LE3: from one loose .tlk file; female shows the file's female table text for an id (lines that differ for a female Shepard: "
+                 + "almost none in INT, hundreds to thousands in other languages). Tested offline on shipped files, not in game.")]
+    public static object TlkGet(
         [Description(PackageDescription)] string package,
         [Description("String id to look up. Omit to list.")] int? id = null,
         [Description("Case-insensitive text filter.")] string? textContains = null,
-        [Description("One BioTlkFile export (UIndex or path). Default: all of them.")] string? export = null,
+        [Description("LE1: one BioTlkFile export (UIndex or path). Default: all of them.")] string? export = null,
         [Description("Maximum strings per file.")] int limit = 50,
-        [Description("Game: LE1.")] string game = "LE1")
-        => ToolErrors.Run(() => TalkFiles.Get(PackageTools.ParseGame(game), package, export, id, textContains, limit));
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run<object>(() =>
+        {
+            var parsed = PackageTools.ParseGame(game);
+            if (parsed.IsGame1()) return TalkFiles.Get(parsed, package, export, id, textContains, limit);
+            if (export is not null) throw new ArgumentException(".tlk files have no exports: leave export out.");
+            return TalkTables.Get(parsed, package, id, textContains, limit);
+        });
 
     [McpServerTool(Name = "conv_read", ReadOnly = true),
-     Description("Reads an LE1 BioConversation as a text graph: start entries, entries (NPC lines, speaker -1 = owner) with their wheel choices, "
-                 + "replies (Shepard) with the entries they lead to, plot conditions/transitions, nExportID (link to the node's camera data). "
-                 + "Text comes from the conversation's own TLK for the language.")]
+     Description("Reads a BioConversation as a text graph: start entries, entries (NPC lines, speaker -1 = owner) with their wheel choices, "
+                 + "replies (Shepard) with the entries they lead to, plot conditions/transitions, nExportID (link to the node's camera data), "
+                 + "and the VO track's strref. Text comes from the conversation's own TLK for the language (LE1) or from the game's .tlk files, base game "
+                 + "and DLC, highest mount winning, with female: \"...\" after a line that differs for a female Shepard (LE2/LE3). "
+                 + "LE2/LE3 keep conversations in _LOC_<LANG> packages only.")]
     public static string ConvRead(
         [Description("Package holding the conversation, usually <area>_LOC_<LANG>.pcc. File name or full path.")] string package,
         [Description("BioConversation export (UIndex, path or unique name).")] string export,
-        [Description("TLK language: INT, FR, DE, IT, PLPC, RA...")] string language = "FR",
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("TLK language. LE1: INT, FR, DE, IT, PLPC, RA... LE2/LE3: INT, FRA, DEU, ESN, ITA, JPN, POL, RUS (the LE1 names work too).")] string language = "FR",
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => ConversationReader.Read(PackageTools.ParseGame(game), package, export, language));
 
     [McpServerTool(Name = "conv_find", ReadOnly = true),
-     Description("Searches every LE1 conversation the game loads (base game, DLC, mods) for lines by speaker tag, text or plot id, e.g. "
+     Description("Searches every conversation the game loads (base game, DLC, mods) for lines by speaker tag, text or plot id, e.g. "
                  + "every henchman comment gated by conditional 415, every line Wrex (hench_krogan) says about Saren, or a template to "
                  + "copy. Returns file, conversation, node (E<n>/R<n> as conv_read names them), speaker, strref, text and plot gate. "
-                 + "Filters combine; a search reads every package (a few seconds).")]
+                 + "Filters combine; a search reads every package (a few seconds, LE3 the slowest).")]
     public static ConvFindResult ConvFind(
         [Description("Substring of the speaker tag (e.g. hench_asari, hench_krogan, nor_chakwas), or owner / player.")] string? speaker = null,
         [Description("Case-insensitive substring of the line or its wheel paraphrase.")] string? text = null,
         [Description("A conditional, plot bool or transition id the line uses, e.g. 415.")] int? plotId = null,
         [Description("Substring of the conversation name, e.g. _dlg or nor10.")] string? conversation = null,
         [Description("Wildcard on package file names, e.g. BIOA_NOR*.")] string fileFilter = "*",
-        [Description("Language of the text and of the _LOC_ packages read: INT, FR, DE, IT...")] string language = "FR",
+        [Description("Language of the text and of the _LOC_ packages read: INT, FR, DE, IT... LE2/LE3 also take FRA, DEU, ESN, ITA, JPN, POL, RUS.")] string language = "FR",
         [Description("Maximum lines returned (Matches still counts all).")] int limit = 100,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => ConversationFinder.Find(PackageTools.ParseGame(game), speaker, text, plotId, conversation, fileFilter, language, limit));
 
     [McpServerTool(Name = "conv_audio", ReadOnly = true),
@@ -142,12 +155,22 @@ public static class TalkTools
         => ToolErrors.Run(() => ConversationEditor.SetIds(PackageTools.ParseGame(game), package, export, resRefId, nodeIdBase));
 
     [McpServerTool(Name = "tlk_set", Destructive = true),
-     Description("Adds or replaces strings in an LE1 package's BioTlkFile exports (all of them by default, so male and female stay in sync). "
-                 + "Backs the package up first and refuses files inside the game install. Use one id block per mod (mount x 10000).")]
-    public static TlkEdits TlkSet(
-        [Description(PackageDescription)] string package,
-        [Description("Strings to write: each has id and text.")] TlkString[] strings,
-        [Description("One BioTlkFile export (UIndex or path). Default: all of them.")] string? export = null,
-        [Description("Game: LE1.")] string game = "LE1")
-        => ToolErrors.Run(() => TalkFiles.Set(PackageTools.ParseGame(game), package, strings, export));
+     Description("Adds or replaces strings. LE1: in a package's BioTlkFile exports (all of them by default, so male and female stay in sync). "
+                 + "LE2/LE3: in one mod .tlk file, one file per language, created with the header strings every .tlk has if it is missing; an id in both "
+                 + "tables gets the new text in both, as LEC's ReplaceString does, unless the string gives female too. Notes warn when the file name is not one the DLC folder loads. "
+                 + "LE2/LE3 output is tested only as a file that reads back through LEC, including non-ASCII text; no such file has been loaded by the game. "
+                 + "Backs an existing file up first and refuses files inside the game install. Use one id block per mod (mount x 10000).")]
+    public static object TlkSet(
+        [Description("LE1: package with BioTlkFile exports, e.g. the mod's DLC_MOD_<Name>_GlobalTlk_FR.pcc or a conversation's _LOC_ file. File name or full path. "
+                     + "LE2/LE3: full path of the mod's <module>_<LANG>.tlk: <folder>_FRA.tlk for LE3, DLC_<n>_FRA.tlk for LE2, n from its BIOEngine.ini [Engine.DLCModules].")] string package,
+        [Description("Strings to write: each has id and text; LE2/LE3 also take female, the text for a female Shepard.")] TlkString[] strings,
+        [Description("LE1: one BioTlkFile export (UIndex or path). Default: all of them.")] string? export = null,
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        => ToolErrors.Run<object>(() =>
+        {
+            var parsed = PackageTools.ParseGame(game);
+            if (parsed.IsGame1()) return TalkFiles.Set(parsed, package, strings, export);
+            if (export is not null) throw new ArgumentException(".tlk files have no exports: leave export out.");
+            return TalkTables.Set(parsed, package, strings);
+        });
 }

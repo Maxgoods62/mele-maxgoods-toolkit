@@ -841,14 +841,36 @@ if (cmd == "2da") {
   if (tex is not { ClassName: "Texture2D" }) { Console.WriteLine($"ERROR {args[2]}: not a Texture2D export of {Path.GetFileName(args[1])}"); Environment.Exit(1); }
   Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(tex).ExportToPNG(args[3]));
 } else if (cmd == "coalesced") {
-  // coalesced <bin> <outDir> [filter]: writes every ini of a LE1/LE2 Coalesced file to outDir and prints the lines
-  // that contain filter, with tabs shown as \t (ConfigDelta removals must match a line exactly)
+  // coalesced <bin> <outDir> [filter]: writes every ini of a Coalesced file (LE1, LE2, or LE3's Coalesced.bin and DLC
+  // Default_<DLC>.bin) to outDir and prints the lines that contain filter, with tabs shown as \t (ConfigDelta removals
+  // must match a line exactly). LE3 files hold a type per value: written as the key prefixes LEC's ini reader knows,
+  // > overwrite (type 0), ! clear (1), none add (2), + add unique (3), - remove (4); a line break in a value as \n.
   using var fs = File.OpenRead(args[1]);
-  var inis = LegendaryExplorerCore.Coalesced.CoalescedConverter.DecompileLE1LE2ToMemory(fs, Path.GetFileName(args[1]));
+  var magic = new byte[4];
+  fs.ReadExactly(magic);
+  fs.Position = 0;
+  var files = new List<(string Name, string Text)>();
+  if (BitConverter.ToInt32(magic) == LegendaryExplorerCore.Coalesced.CoalescedConverter.CoalescedMagicNumber) {
+    var coal = new LegendaryExplorerCore.Coalesced.CoalescedFileXml();
+    coal.Deserialize(fs);
+    string[] prefixes = { ">", "!", "", "+", "-" };
+    foreach (var file in coal.Files) {
+      var sb = new System.Text.StringBuilder();
+      foreach (var section in file.Sections) {
+        if (sb.Length > 0) sb.Append("\r\n");
+        sb.Append($"[{section.Key}]\r\n");
+        foreach (var key in section.Value)
+          foreach (var value in key.Value)
+            sb.Append($"{prefixes[value.Type]}{key.Key}={(value.Type == 1 ? "CLEAR" : value.Value)?.Replace("\r", "\\r").Replace("\n", "\\n")}\r\n");
+      }
+      files.Add((file.Name.Replace('\\', '/').Split('/').Last(), sb.ToString()));
+    }
+  } else {
+    foreach (var kv in LegendaryExplorerCore.Coalesced.CoalescedConverter.DecompileLE1LE2ToMemory(fs, Path.GetFileName(args[1])))
+      files.Add((kv.Key.Replace('\\', '/').Split('/').Last(), kv.Value.ToString()));
+  }
   Directory.CreateDirectory(args[2]);
-  foreach (var kv in inis) {
-    var name = kv.Key.Replace('\\', '/').Split('/').Last();
-    var text = kv.Value.ToString();
+  foreach (var (name, text) in files) {
     File.WriteAllText(Path.Combine(args[2], name), text);
     if (args.Length < 4) continue;
     foreach (var line in text.Split('\n').Where(l => l.Contains(args[3], StringComparison.OrdinalIgnoreCase)))

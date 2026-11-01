@@ -2,7 +2,7 @@
 
 #include <thread>
 
-// \\.\pipe\MeleBridge_LE1: newline-delimited JSON, one request line in, one reply line out, any number of clients at once.
+// \\.\pipe\MeleBridge_LE<n>: newline-delimited JSON, one request line in, one reply line out, any number of clients at once.
 // A client that subscribes gets no more replies: the connection streams one event line per watched call, plus a heartbeat
 // line every 2 s when nothing happens, until the client closes it.
 namespace MeleBridge

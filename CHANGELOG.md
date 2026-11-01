@@ -9,7 +9,7 @@ version is mele-mcp's (`<Version>` in `tools/mele-mcp/src/MeleMcp/MeleMcp.csproj
 
 ### Added
 
-mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 74 tools:
+mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 86 tools:
 
 - Game files: `le_status`, `le_refresh_files`, and `le_find_file`, which says which copy of a file the game loads. For
   LE1 it follows the installed AutoTOC ASI.
@@ -47,6 +47,36 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 74 tools:
   `live_keep_ticking`, refuses save and load commands, backs a career's saves up before a run that saves and restores
   them with the game closed, and writes a report (`docs/scenarios.md`). Used in game on a suite of about 40 checks,
   with the cold start through `game_cycle`.
+- LE2 and LE3 support, offline and not tested in game: `tlk_get` and `tlk_set` on loose `.tlk` files with their female
+  table; `conv_read` and `conv_find`, with text from the base game and DLC `.tlk` files, highest mount winning, and
+  female variants; `quest_map_get`, which also reads a `BioCodexMap`; `plot_map_get`, which also reads a
+  `BioConsequenceMap` and an LE2/LE3 `BioOutcomeMap`. LE1 output of these tools is unchanged.
+- Script write loop: `script_compile` compiles UnrealScript into a function, state or class of a mod's package copy in
+  LE1, LE2 and LE3, or adds one member to a class. Compiler errors carry line and column, and the file is saved only on
+  success. LE1 and LE2 plot conditionals are `F<id>` functions, so it edits those too.
+- LE3 conditionals: `cnd_get` and `cnd_set` read and write `.cnd` files. `cnd_set` creates a mod's `Conditionals<DLC
+  folder name>.cnd`, and refuses text LEC's compiler would hang on or drop.
+- Config: `config_get` reads game config file by file for LE1, LE2 and LE3: base Coalesced, then DLC by rising mount,
+  with each row's file, mount, operation and native form. `config_set` writes entries into a mod's DLC folder in the
+  game's own form (LE1 `ConfigDelta-*.m3cd`, LE2 loose inis, LE3 `Default_<DLC>.bin`).
+- New mods: `dlc_new` starts an LE2 or LE3 mod in M3's layout and the forms of its Starter Kit (`moddesc.ini`,
+  `Mount.dlc`, a `.tlk` per language, the config skeleton), and refuses a mount, module or folder name already
+  installed. Every file is read back with LEC; not parsed by M3's mod loader yet, not tested in game.
+- Merge mods: `mergemod_build` builds an M3 `.m3m` for SFXGame and the other core files in LE1, LE2 and LE3, from
+  `changes` or an existing manifest. A dry check on a scratch copy comes first, so a script or property error stops
+  before M3 is touched; then M3 compiles it and `moddesc.ini` lists it. Compiled through real M3, not applied in game.
+- Cross-game script: `xgame_decompile`, one class, function, state, struct or enum in LE1, LE2 and LE3, with where each
+  winning file holds it and a unified diff against the first game that has it.
+- GFx, read only: `gfx_scan`, a C# inspector for a package's movies or a loose `.gfx`: movies, tags, images, and
+  ActionScript 2 as a disassembly or rough pseudo-code with constant pools resolved.
+- Native code research, for hooks in code the exes keep encrypted on disk: `exe_dump` reads the running game's mapped
+  image into a per-game cache, `exe_dump_pe` turns a dump into a PE that REA can open, and `native_query` answers
+  disassembly, callers, references, strings, byte patterns, class-to-vtable, vtable slots and name entries from a dump.
+  `exe_dump`'s reader has been tested on notepad.exe only, not on a running game.
+- MeleBridge builds for LE2 and LE3: `tools/mele-bridge/build.sh --game LE2|LE3` stages `LE2MeleBridge.asi` and
+  `LE3MeleBridge.asi` with the pipe, reflection, console, status and keep ticking, without the editor or overlay. They
+  compile and link but have never been loaded in a game. `--install` and `--uninstall` take `--game` too.
+- lectool: `coalesced` reads LE3's `Coalesced.bin` and `Default_<DLC>.bin`.
 
 Set-up and settings:
 

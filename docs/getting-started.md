@@ -264,8 +264,8 @@ that level file (names, imports, exports, the most common export classes).
 | The prop catalog (`catalog_build`) | `catalog.json` and thumbnails in `%LOCALAPPDATA%\MeleBridge\LE1\catalog`; `MeleCatalog_Core.pcc` in the dev mod `LE1\Mele Catalog` of M3's library | the `outDir` and `modFolder` parameters |
 | Screenshots (`game_screenshot`) | `%LOCALAPPDATA%\mele-mcp\screenshots` | the `path` parameter |
 | A mod in the game | M3 copies it (`mod_install`, refused while the game runs) | |
-| `MeleBridge.asi` | `<LE folder>\Game\ME1\Binaries\Win64\ASI`, copied by `build.sh --install` with the game closed | |
-| MeleBridge's log | `<LE folder>\Game\ME1\Binaries\Win64\Logs\MeleBridge.log`, rewritten at each game start | |
+| `MeleBridge.asi`, or `LE2MeleBridge.asi`, `LE3MeleBridge.asi` | `<LE folder>\Game\ME<n>\Binaries\Win64\ASI`, copied by `build.sh --install` with the game closed | |
+| MeleBridge's log | `<LE folder>\Game\ME<n>\Binaries\Win64\Logs\MeleBridge.log`, rewritten at each game start | |
 
 ## MeleBridge
 
@@ -283,9 +283,9 @@ cp build.env.example build.env    # optional: this machine's settings
 ./build.sh
 ```
 
-`build.sh` copies `src/` into the LExASIs checkout as one more ASI project, builds it for LE1 only, and copies
-`MeleBridge.asi` and `MeleBridge.pdb` to `MELE_STAGE`. LExASIs provides the SDK (LExSDKv2), the ASI loader interface
-and the CMake helpers.
+`build.sh` copies `src/` into the LExASIs checkout as one more ASI project, builds it for LE1 (`--game LE2|LE3` for the
+others), and copies `MeleBridge.asi` and `MeleBridge.pdb` to `MELE_STAGE`, or `LE2MeleBridge.*`, `LE3MeleBridge.*`.
+LExASIs provides the SDK (LExSDKv2), the ASI loader interface and the CMake helpers.
 
 Settings come from the environment, then from `build.env` (not in git). A variable you set wins over the file.
 
@@ -305,7 +305,10 @@ Close the game first:
 ./build.sh --uninstall    # remove MeleBridge.asi from that folder
 ```
 
-While `MassEffect1.exe` runs, `--install` builds but does not copy, and `--uninstall` refuses. A `tasklist` check that
+Add `--game LE2` or `--game LE3` for those games: `LE2MeleBridge.asi` goes to `Game\ME2`, `LE3MeleBridge.asi` to
+`Game\ME3`. Those two builds have never been loaded in a game, and once installed each runs at every start of that game.
+
+While that game's exe runs, `--install` builds but does not copy, and `--uninstall` refuses. A `tasklist` check that
 fails counts as running. You can also copy the staged `MeleBridge.asi` into that folder by hand while the game is
 closed. The game needs the ASI loader and the Visual C++ Redistributable ([above](#what-you-need)).
 

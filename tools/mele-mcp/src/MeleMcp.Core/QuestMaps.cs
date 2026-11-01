@@ -33,18 +33,29 @@ public sealed record QuestEdit(string Path, ExportRow Map, bool CreatedMap, Ques
 
 public sealed record QuestMapInfo(ExportRow Map, int QuestCount, int TaskEvalCount, int MinQuestId, int MaxQuestId, IReadOnlyList<QuestInfo> Quests, IReadOnlyList<TaskEvalInfo> TaskEvals);
 
-/// <summary>Game 1 journal: the BioQuestMap (quests with goals, tasks and plot items, and the task evaluations run by plot changes).</summary>
+public sealed record CodexSectionInfo(int Id, int Version, bool IsPrimary, int Title, string? TitleText, int Description, string? DescriptionText, int TextureIndex, int Priority, int CodexSound);
+
+/// <param name="Section">Id of the section the page is listed in.</param>
+public sealed record CodexPageInfo(int Id, int Version, int Section, int Title, string? TitleText, int Description, string? DescriptionText, int TextureIndex, int Priority, int CodexSound, string? CodexSoundString);
+
+public sealed record CodexMapInfo(ExportRow Map, int SectionCount, int PageCount, IReadOnlyList<CodexSectionInfo> Sections, IReadOnlyList<CodexPageInfo> Pages);
+
+/// <summary>
+/// The journal: the BioQuestMap (quests with goals, tasks and plot items, and the task evaluations run by plot changes), read for
+/// every game and written for Game 1. LE2/LE3 also read the BioCodexMap.
+/// </summary>
 public static class QuestMaps
 {
-    public static QuestMapInfo Get(MEGame game, string fileOrPath, string export, int? questId, int? touches, string language, int limit)
+    /// <summary>A <see cref="QuestMapInfo"/>, or a <see cref="CodexMapInfo"/> when <paramref name="export"/> is an LE2/LE3 BioCodexMap.</summary>
+    public static object Get(MEGame game, string fileOrPath, string export, int? questId, int? touches, string language, int limit)
     {
-        if (!game.IsGame1()) throw new ArgumentException("quest_map_get handles Game 1 (LE1).");
         using var pcc = PackageInspector.Open(game, fileOrPath);
         var map = ExportInspector.Resolve(pcc, export);
+        if (map.ClassName == "BioCodexMap" && !game.IsGame1()) return Codex(game, map, questId, language, limit);
         if (map.ClassName != "BioQuestMap") throw new ArgumentException($"#{map.UIndex} is a {map.ClassName}, not a BioQuestMap.");
 
         var bin = ObjectBinary.From<BioQuestMap>(map);
-        var strings = GlobalStrings.Load(game, language);
+        var strings = game.IsGame1() ? GlobalStrings.Load(game, language) : TalkTables.Load(game, language).Male;
         string? Text(int id) => strings.GetValueOrDefault(id);
 
         var evals = new[] { ("bool", bin.TaskEvals), ("int", bin.IntTaskEvals), ("float", bin.FloatTaskEvals) }
@@ -62,6 +73,21 @@ public static class QuestMaps
         return new QuestMapInfo(ExportInspector.Row(map), bin.Quests.Count, bin.TaskEvals.Sum(l => l.TaskEvals.Count),
             bin.Quests.Count == 0 ? 0 : bin.Quests.Min(q => q.ID), bin.Quests.Count == 0 ? 0 : bin.Quests.Max(q => q.ID),
             quests, evals.Take(limit * 4).ToList());
+    }
+
+    private static CodexMapInfo Codex(MEGame game, ExportEntry map, int? id, string language, int limit)
+    {
+        var bin = ObjectBinary.From<BioCodexMap>(map);
+        var strings = TalkTables.Load(game, language).Male;
+        string? Text(int strRef) => strings.GetValueOrDefault(strRef);
+
+        var sections = bin.Sections.Where(s => id is null || s.ID == id)
+            .Select(s => new CodexSectionInfo(s.ID, s.InstanceVersion, s.IsPrimary, s.Title, Text(s.Title), s.Description, Text(s.Description), s.TextureIndex, s.Priority, s.CodexSound))
+            .ToList();
+        var pages = bin.Pages.Where(p => id is null || p.ID == id)
+            .Select(p => new CodexPageInfo(p.ID, p.InstanceVersion, p.Section, p.Title, Text(p.Title), p.Description, Text(p.Description), p.TextureIndex, p.Priority, p.CodexSound, p.CodexSoundString))
+            .ToList();
+        return new CodexMapInfo(ExportInspector.Row(map), bin.Sections.Count, bin.Pages.Count, sections.Take(limit).ToList(), pages.Take(limit).ToList());
     }
 
     // InstanceVersions of every entry in the base game's QuestMap. The engine reads each struct by its version, so a

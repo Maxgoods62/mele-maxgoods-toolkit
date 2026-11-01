@@ -19,7 +19,7 @@ public sealed record LiveEvents(IReadOnlyList<string> Functions, IReadOnlyList<J
 public sealed record ConsoleOutput(string Command, IReadOnlyList<string> Lines, string? Note);
 
 /// <summary>
-/// Client of our own ASI, MeleBridge (tools/mele-bridge): newline-delimited JSON over \\.\pipe\MeleBridge_LE1, one reply line per
+/// Client of our own ASI, MeleBridge (tools/mele-bridge): newline-delimited JSON over \\.\pipe\MeleBridge_LE&lt;n&gt;, one reply line per
 /// request line, each request run on the game thread. Any property of one live object, UnrealScript function calls, console
 /// output, and a stream of ProcessEvent calls. Replies come back on the same pipe, so LEX can stay open.
 /// </summary>
@@ -176,12 +176,16 @@ public static partial class LiveBridge
         }
     }
 
+    private static string NotInstalled(MEGame game) => game == MEGame.LE1
+        ? "MeleBridge.asi is not installed (tools/mele-bridge/build.sh --install, game closed), or the game is still starting."
+        : $"{game}MeleBridge.asi is not installed, or the game is still starting. tools/mele-bridge/build.sh --game {game} builds it; its --install covers LE1 only.";
+
     /// <param name="checkProtocol">Whether to check the bridge's protocol first (<see cref="CheckProtocol"/>).</param>
     private static NamedPipeClientStream Connect(MEGame game, double timeoutSeconds = 5, bool checkProtocol = true)
     {
         if (!GameBridge.IsGameRunning(game)) throw new InvalidOperationException($"{game} is not running.");
         if (!IsAvailable(game))
-            throw new InvalidOperationException($"Pipe {PipeName(game)} not found: MeleBridge.asi is not installed (tools/mele-bridge/build.sh --install, game closed), or the game is still starting.");
+            throw new InvalidOperationException($"Pipe {PipeName(game)} not found: {NotInstalled(game)}");
         var pipe = new NamedPipeClientStream(".", PipeName(game), PipeDirection.InOut, PipeOptions.Asynchronous);
         try
         {

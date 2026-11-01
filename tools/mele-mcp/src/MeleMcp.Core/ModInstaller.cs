@@ -43,7 +43,7 @@ public static class ModInstaller
         if (Process.GetProcessesByName(process).Length > 0) throw new InvalidOperationException($"{process}.exe is running. Close the game first (the launcher can stay open).");
         var dlcRoot = Path.Combine(MEDirectories.GetDefaultGamePath(game) ?? throw new InvalidOperationException($"No {game} install found."), "BioGame", "DLC");
 
-        var offsets = Directory.Exists(LogDir) ? Directory.EnumerateFiles(LogDir, "*.txt").ToDictionary(f => f, f => new FileInfo(f).Length) : [];
+        var offsets = LogOffsets();
         var started = DateTime.UtcNow;
         var arguments = new List<string> { "--installmod", moddesc, "--game", game.ToString() };
         if (bootGame) arguments.Add("--bootgame");
@@ -100,7 +100,7 @@ public static class ModInstaller
         StartM3(M3Path(), ["--game", game.ToString(), "--bootgame"]);
     }
 
-    private static string M3Path()
+    internal static string M3Path()
     {
         var m3 = Registry.GetValue(@"HKEY_CURRENT_USER\SOFTWARE\ME3Tweaks", "ExecutableLocation", null) as string;
         if (m3 is null || !File.Exists(m3)) throw new FileNotFoundException("ME3TweaksModManager.exe not found (HKCU\\SOFTWARE\\ME3Tweaks ExecutableLocation). Start M3 once.");
@@ -111,7 +111,7 @@ public static class ModInstaller
     /// Shell execute, so M3 (and the game it boots) do not inherit this server's stdio pipes: an MCP client waits for those to
     /// close, which made calls hang until M3 exited.
     /// </summary>
-    private static void StartM3(string m3, IEnumerable<string> arguments) =>
+    internal static void StartM3(string m3, IEnumerable<string> arguments) =>
         Process.Start(new ProcessStartInfo(m3, string.Join(' ', arguments.Select(a => a.Contains(' ') ? $"\"{a}\"" : a))) { UseShellExecute = true })?.Dispose();
 
     /// <summary>The mod's moddesc.ini and its custom DLC folders (sourcedirs) in M3's library.</summary>
@@ -136,7 +136,7 @@ public static class ModInstaller
         return File.Exists(named) ? named : throw new FileNotFoundException($"No moddesc.ini at {path}, nor a mod '{mod}' in M3's library ({Path.Combine(library, game.ToString())}).");
     }
 
-    private static Dictionary<string, Dictionary<string, string>> ReadIni(string path)
+    internal static Dictionary<string, Dictionary<string, string>> ReadIni(string path)
     {
         var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         if (!File.Exists(path)) return sections;
@@ -157,8 +157,12 @@ public static class ModInstaller
 
     private static List<string> Split(string? value) => value?.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList() ?? [];
 
+    /// <summary>Where M3's logs end now: <see cref="ReadNew"/> from here gives only what it writes next.</summary>
+    internal static Dictionary<string, long> LogOffsets() =>
+        Directory.Exists(LogDir) ? Directory.EnumerateFiles(LogDir, "*.txt").ToDictionary(f => f, f => new FileInfo(f).Length) : [];
+
     /// <summary>Text M3 appended to its logs since the last read (M3 keeps them open; a new day starts a new file).</summary>
-    private static string ReadNew(Dictionary<string, long> offsets)
+    internal static string ReadNew(Dictionary<string, long> offsets)
     {
         if (!Directory.Exists(LogDir)) return "";
         var text = new StringBuilder();

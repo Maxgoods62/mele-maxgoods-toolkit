@@ -4,7 +4,8 @@ using LegendaryExplorerCore.TLK.ME1;
 
 namespace MeleMcp.Core;
 
-public sealed record TlkString(int Id, string Text);
+/// <param name="Female">LE2/LE3: the .tlk file's female table text for this id. LE1 keeps male and female in separate exports.</param>
+public sealed record TlkString(int Id, string Text, string? Female = null);
 
 public sealed record TlkFileStrings(ExportRow TalkFile, int StringCount, IReadOnlyList<TlkString> Strings);
 
@@ -39,6 +40,7 @@ public static class TalkFiles
     {
         RequireGame1(game);
         if (strings.Count == 0) throw new ArgumentException("No strings given.");
+        if (strings.Any(s => s.Female is not null)) throw new ArgumentException("LE1 has no female table: male and female are separate BioTlkFile exports (export).");
 
         var ((files, path), backup) = PackageWriter.Edit(game, fileOrPath, pcc =>
         {

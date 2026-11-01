@@ -4,23 +4,25 @@ using ModelContextProtocol.Server;
 
 namespace MeleMcp.Tools;
 
-/// <summary>Game 1 plot maps: state transitions and consequences.</summary>
+/// <summary>Plot maps: state transitions and consequences, read for every game and written for LE1.</summary>
 [McpServerToolType]
 public static class PlotTools
 {
     [McpServerTool(Name = "plot_map_get", ReadOnly = true),
-     Description("Lists state events of an LE1 BioStateEventMap (base game: BIOC_Materials.pcc PlotManagerAuto.StateTransitionMap/ConsequenceMap; "
-                 + "a DLC: PlotManagerAutoDLC_<name>.pcc StateTransitionMap/ConsequenceMap): id and what each element sets (bool, int, float, "
-                 + "consequence, function), with its InstanceVersion as [vN]. A conversation node's nStateTransition runs the StateTransitionMap event with that id.")]
+     Description("Lists state events of a BioStateEventMap or its subclass BioConsequenceMap (LE1 base game: BIOC_Materials.pcc "
+                 + "PlotManagerAuto.StateTransitionMap/ConsequenceMap; an LE1 DLC: PlotManagerAutoDLC_<name>.pcc StateTransitionMap/ConsequenceMap; LE2 base game: Startup_INT.pcc, "
+                 + "LE3: SFXGameInfoSP_SF.pcc; an LE2/LE3 DLC: its Startup_<name>_INT.pcc, PlotManagerAutoDLC_<name>.StateTransitionMap): id and what each element sets (bool, int, "
+                 + "float, consequence, function), with its InstanceVersion as [vN]. A conversation node's nStateTransition runs the StateTransitionMap event with that id. "
+                 + "An LE2/LE3 BioOutcomeMap (OutcomeMap) is a plain int-to-int map: each pair prints as event <key> 'outcome <value>'; what the game does with it is unverified.")]
     public static PlotMapEvents PlotMapGet(
-        [Description("Package with the map, e.g. BIOC_Materials.pcc. File name or full path.")] string package,
-        [Description("BioStateEventMap export, e.g. StateTransitionMap or PlotManagerAuto.StateTransitionMap.")] string export = "StateTransitionMap",
+        [Description("Package with the map, e.g. BIOC_Materials.pcc, Startup_INT.pcc (LE2), SFXGameInfoSP_SF.pcc (LE3). File name or full path.")] string package,
+        [Description("Map export, e.g. StateTransitionMap or PlotManagerAuto.StateTransitionMap.")] string export = "StateTransitionMap",
         [Description("One event id.")] int? id = null,
         [Description("Lowest id to list.")] int? fromId = null,
         [Description("Highest id to list.")] int? toId = null,
         [Description("Only events that write this plot variable or consequence id.")] int? touches = null,
         [Description("Maximum events returned (Matches still counts all).")] int limit = 50,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
         => ToolErrors.Run(() => PlotMaps.Get(PackageTools.ParseGame(game), package, export, id, fromId, toId, touches, limit));
 
     [McpServerTool(Name = "plot_map_new", Destructive = true),

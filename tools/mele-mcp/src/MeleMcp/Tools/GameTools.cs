@@ -45,7 +45,7 @@ public static class GameTools
         [Description("Also every id whose LEX database path contains this, e.g. Paragon.")] string? name = null,
         [Description("Set this value after reading the current one (one id; Was holds the old value): True/False or 1/0 for a bool, a number for int and float. Omit to only read.")] string? value = null,
         [Description("Seconds to wait for the answers (for each of read and set).")] double timeoutSeconds = 4,
-        [Description(GameParam)] string game = "LE1")
+        [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => LivePlot.Run(PackageTools.ParseGame(game), kind, ids ?? [], name, value, timeoutSeconds));
 
     [McpServerTool(Name = "game_log", ReadOnly = true),

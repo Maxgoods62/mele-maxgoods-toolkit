@@ -8,7 +8,7 @@ unmerged.
 
 | Tool | What it is |
 |---|---|
-| [mele-mcp](tools/mele-mcp/README.md) | An MCP server (C#, stdio) on [LegendaryExplorerCore](https://github.com/ME3Tweaks/LegendaryExplorer) (LEC). Its 74 tools inspect and edit packages, conversations, plot and journal data and Kismet, build a mod's levels, plot and conversations from YAML, check and install the mod, and drive the running game. |
+| [mele-mcp](tools/mele-mcp/README.md) | An MCP server (C#, stdio) on [LegendaryExplorerCore](https://github.com/ME3Tweaks/LegendaryExplorer) (LEC). Its 86 tools inspect and edit packages, conversations, plot and journal data and Kismet, build a mod's levels, plot and conversations from YAML, check and install the mod, and drive the running game. |
 | [MeleBridge](tools/mele-bridge/README.md) | `MeleBridge.asi`, an ASI for LE1. It opens a named pipe into the running game, through which mele-mcp's `live_*` tools read and write any property of a live object, call UnrealScript functions and run console commands. F8 opens a level editor drawn over the game. |
 | [lectool](tools/lectool/README.md) | A command-line tool on the same LEC for steps mele-mcp has no tool for: compiling script classes into a package, adding a script actor to a level, porting a mesh, building an LE1 sound, building and checking an M3 2DA merge, building an actor type from two packages and checking the result, copying a GFx movie into a package of its own. |
 
@@ -19,8 +19,10 @@ There are no releases or tags: build from a commit. The toolkit's version is mel
 version 2 and speaks pipe protocol 1. mele-mcp refuses a bridge that speaks another protocol, so build both from the
 same commit.
 
-The package, export, Kismet and FaceFX tools and `mod_install` also take LE2 and LE3. The YAML builds, conversations,
-plot, journal, prop catalog and `live_*` tools are LE1 only, and nearly all testing was done on LE1.
+The package, export, Kismet, FaceFX, string, script, config and GFx tools, conversation, plot and journal reading, and
+`mod_install` also take LE2 and LE3. Conversation, plot and journal writing, the YAML builds and the prop catalog are
+LE1 only. MeleBridge builds for LE2 and LE3 but has never been loaded there, so `live_*` is untested on them. Nearly
+all in-game testing was done on LE1: LE2 and LE3 support is tested on files, not in the game.
 
 ## Requirements
 
@@ -96,7 +98,7 @@ them. A write tool changes the package you name and refuses any file inside the 
 save it copies the package to `%LOCALAPPDATA%\mele-mcp\backups` (`MELE_BACKUP_DIR`). `level_build` writes
 `levels.json` for MeleBridge to `%LOCALAPPDATA%\MeleBridge\LE1` (`MELE_LEVELS_JSON`), where the in-game editor also
 saves its sessions. mele-mcp installs a mod only through M3 (`mod_install`), which it refuses while the game runs. The
-one file the toolkit copies into the game folder itself is `MeleBridge.asi`, and only when you run
+one file per game the toolkit copies into the game folder itself is MeleBridge's ASI, and only when you run
 `build.sh --install`. The full list is in [getting started](docs/getting-started.md#where-the-tools-write).
 
 ## Related repos

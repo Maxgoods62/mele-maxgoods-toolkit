@@ -145,10 +145,12 @@ namespace MeleBridge
                 { "object", ToUtf8(PathOf(movie)) },
                 { "playing", playing.value("return", json(nullptr)) },
                 { "state", GetProperty(movie, L"PlaybackState", 0) },
-                { "inLoad", GetProperty(movie, L"bIsInLoad", 0) },
+                // LE2 and LE3 have no bIsInLoad.
+                { "inLoad", PropertyOffset(movie->Class, L"bIsInLoad") >= 0 ? GetProperty(movie, L"bIsInLoad", 0) : json(nullptr) },
             };
         }
 
+#if MELEBRIDGE_PARTY_SELECT
         // ! Squad screen
         // ========================================
 
@@ -193,6 +195,7 @@ namespace MeleBridge
                 { "varPath", varPath },
             };
         }
+#endif
     }
 
     AWorldInfo* CurrentWorldInfo()
@@ -244,6 +247,7 @@ namespace MeleBridge
 
         reply["loadingMovie"] = section("loadingMovie", LoadingMovie);
 
+#if MELEBRIDGE_PARTY_SELECT
         // The squad screen: GetPanelByTag('PartySelect') on the player's GUI manager (BioPlayerController's returns the
         // MassEffectGuiManager).
         UObject* panel = nullptr;
@@ -254,6 +258,11 @@ namespace MeleBridge
             return json(panel != nullptr);
         });
         reply["partySelect"] = panel == nullptr ? json(nullptr) : section("partySelect", [panel] { return PartySelect(panel); });
+#else
+        reply["partySelectOpen"] = nullptr;
+        reply["partySelect"] = nullptr;
+        notes.push_back("partySelectOpen: not read in this game (no BioSFHandler_PartySelection)");
+#endif
 
         reply["notes"] = notes;
         return reply;

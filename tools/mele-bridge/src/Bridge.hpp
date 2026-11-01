@@ -5,6 +5,7 @@
 #include <SPI.h>
 #include "Common/Base.hpp"
 #include "Common/json.hpp"
+#include "MeleBridge/game/Game.hpp"
 
 #include <atomic>
 #include <chrono>

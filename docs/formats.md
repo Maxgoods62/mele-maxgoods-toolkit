@@ -54,7 +54,9 @@ session version 3, because a Phase 4 bridge would rewrite an NPC's light with it
 
 ### 3.1 Transport
 
-- Name: `\\.\pipe\MeleBridge_LE1`. The suffix is the game's name; only LE1 is built.
+- Name: `\\.\pipe\MeleBridge_LE1`. The suffix is the game's name. LE2 and LE3 builds exist but have never been
+  loaded: on them the `editor` op refuses, `status` gives `null` for `loadingMovie.inLoad`, and for the squad screen
+  on LE3.
 - Pipe: byte mode, local clients only (`PIPE_REJECT_REMOTE_CLIENTS`), any number of connections at once, each served on
   its own thread.
 - Lines: UTF-8 JSON, one request per line, each ending in `\n`. One reply line per request, in order. A line of only

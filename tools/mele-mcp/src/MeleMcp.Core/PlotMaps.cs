@@ -17,8 +17,9 @@ public sealed record NewPlotMapsResult(string Path, string PackageName, IReadOnl
 public sealed record PlotEventEdit(string Path, ExportRow Map, int Id, IReadOnlyList<string>? Before, IReadOnlyList<string>? After, string BackupPath);
 
 /// <summary>
-/// Game 1 plot maps (BioStateEventMap: StateTransitionMap, ConsequenceMap). A conversation node's nStateTransition and
-/// Kismet's BioSeqAct_PMExecuteTransition run a state event of the StateTransitionMap by id.
+/// Plot maps (BioStateEventMap: StateTransitionMap, ConsequenceMap; in LE2/LE3 ConsequenceMap's class is BioConsequenceMap, a subclass
+/// with the same binary, and OutcomeMap a BioOutcomeMap). A conversation node's nStateTransition and Kismet's
+/// BioSeqAct_PMExecuteTransition run a state event of the StateTransitionMap by id. Writing is Game 1 only.
 /// </summary>
 public static partial class PlotMaps
 {
@@ -137,7 +138,8 @@ public static partial class PlotMaps
     {
         using var pcc = PackageInspector.Open(game, fileOrPath);
         var map = ExportInspector.Resolve(pcc, export);
-        if (map.ClassName != "BioStateEventMap") throw new ArgumentException($"#{map.UIndex} is a {map.ClassName}, not a BioStateEventMap.");
+        if (map.ClassName == "BioOutcomeMap" && !game.IsGame1()) return Outcomes(map, id, fromId, toId, touches, limit);
+        if (map.ClassName is not ("BioStateEventMap" or "BioConsequenceMap")) throw new ArgumentException($"#{map.UIndex} is a {map.ClassName}, not a BioStateEventMap.");
 
         var events = ObjectBinary.From<BioStateEventMap>(map).StateEvents;
         var matches = events
@@ -147,6 +149,26 @@ public static partial class PlotMaps
         return new PlotMapEvents(ExportInspector.Row(map), events.Count,
             events.Count == 0 ? 0 : events.Min(e => e.ID), events.Count == 0 ? 0 : events.Max(e => e.ID), matches.Count,
             matches.Take(limit).Select(e => new PlotEvent(e.ID, e.InstanceVersion, e.Elements.Select(Describe).ToList())).ToList());
+    }
+
+    /// <summary>
+    /// BioOutcomeMap is no state event map: its SDK class is a native int-to-int map (OutcomeMapping), stored as a count and key, value
+    /// pairs. Every LE3 file has it empty, LE2's only full one is the base game's (57 pairs). What the game does with it is unverified.
+    /// </summary>
+    private static PlotMapEvents Outcomes(ExportEntry map, int? id, int? fromId, int? toId, int? touches, int limit)
+    {
+        var data = map.GetBinaryData();
+        var count = data.Length >= 4 ? BitConverter.ToInt32(data, 0) : -1;
+        if (count < 0 || data.Length != 4 + 8L * count) throw new InvalidDataException($"#{map.UIndex}: {data.Length} bytes do not fit a count and {count} int pairs.");
+
+        var pairs = Enumerable.Range(0, count).Select(i => (Key: BitConverter.ToInt32(data, 4 + 8 * i), Value: BitConverter.ToInt32(data, 8 + 8 * i))).ToList();
+        var matches = pairs
+            .Where(p => (id is null || p.Key == id) && (fromId is null || p.Key >= fromId) && (toId is null || p.Key <= toId)
+                        && (touches is null || p.Value == touches))
+            .ToList();
+        return new PlotMapEvents(ExportInspector.Row(map), pairs.Count,
+            pairs.Count == 0 ? 0 : pairs.Min(p => p.Key), pairs.Count == 0 ? 0 : pairs.Max(p => p.Key), matches.Count,
+            matches.Take(limit).Select(p => new PlotEvent(p.Key, 0, [$"outcome {p.Value}"])).ToList());
     }
 
     /// <summary>The plot variable or consequence an element writes, for the touches filter.</summary>
