@@ -140,8 +140,8 @@ if [[ -z "$pinned" || "$current" != "$pinned" ]] || grep -q '^[-+U]' <<< "$subs"
     # script's line is added again below). Any other change is someone's own work: the checkout keeps it, or refuses.
     CML="$LEXASIS/CMakeLists.txt"
     if [[ -f "$CML" ]]; then
-        sed -i -e '/^if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}\/Mele[A-Za-z]*")$/,/^endif ()$/d' \
-            -e '/^add_subdirectory ("Mele[A-Za-z]*")$/d' "$CML"
+        sed -i -e '/^if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}\/\(Mele[A-Za-z]*\|PauseAnytime\)")$/,/^endif ()$/d' \
+            -e '/^add_subdirectory ("\(Mele[A-Za-z]*\|PauseAnytime\)")$/d' "$CML"
         lexasis_git diff --quiet -- CMakeLists.txt \
             || die "CMakeLists.txt in $LEXASIS has changes of your own: commit or stash them, then build again"
     fi

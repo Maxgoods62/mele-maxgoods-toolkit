@@ -40,7 +40,8 @@ drift.
 ## Change a shared file
 
 1. Edit the template and commit it in the toolkit.
-2. `kit.sh apply mods/mele-pause`, read the diff, commit, push, and wait for a green run. mele-pause goes first every time.
+2. `kit.sh apply mods/pause-anytime`, read the diff, commit, push, and wait for a green run. pause-anytime goes first every
+   time.
 3. Apply to the other repos, then commit and push each.
 4. `kit.sh check` prints `ok` for every repo.
 

@@ -278,7 +278,7 @@ namespace MeleBridge
         DWORD& PausedWord(AWorldInfo* world) { return *reinterpret_cast<DWORD*>(reinterpret_cast<BYTE*>(world) + PausedAt); }
 
         /// The only place the switch writes bPlayersOnly, and only to end the pause Tick takes on focus loss, the one pause that
-        /// sets m_bPausedByFocusLoss. The squad screen, the pause menu, photo mode, MelePause and the F8 editor set bPlayersOnly
+        /// sets m_bPausedByFocusLoss. The squad screen, the pause menu, photo mode, Pause Anytime and the F8 editor set bPlayersOnly
         /// on purpose and never that flag, so their pauses stay.
         bool ClearFocusPause(AWorldInfo* world)
         {
