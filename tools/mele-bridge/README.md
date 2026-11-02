@@ -66,7 +66,7 @@ How the build works:
 
 `MeleBridge.asi` in the ASI folder is the only file this tool writes inside the game install. It is written only while
 `MassEffect1.exe` is closed, and the check counts a failed `tasklist` as "running".
-[Pause Anytime](https://github.com/Maxgoods62/pause-anytime) keeps the same rule for its own ASI.
+[Pause Anytime](https://github.com/Maxgoods62/mele-pause-anytime) keeps the same rule for its own ASI.
 
 The log is `Game\ME1\Binaries\Win64\Logs\MeleBridge.log`, rewritten at each start.
 

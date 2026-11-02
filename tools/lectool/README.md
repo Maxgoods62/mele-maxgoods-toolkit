@@ -2,8 +2,8 @@
 
 A small command-line tool on LegendaryExplorerCore (LEC), for jobs mele-mcp has no tool for yet: compiling script
 classes into a package, adding a script actor to a level, porting a mesh and building an LE1 (ISACT) sound. It grew
-out of the galaxy map work, and the [Galaxy Map Normandy](https://github.com/Maxgoods62/galaxy-map-normandy) build runs
-it to make that mod's packages.
+out of the galaxy map work, and the [Galaxy Map Normandy](https://github.com/Maxgoods62/mele-galaxy-map-normandy) build
+runs it to make that mod's packages.
 
 ## Build
 
