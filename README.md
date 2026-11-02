@@ -104,9 +104,8 @@ one file per game the toolkit copies into the game folder itself is MeleBridge's
 
 ## Related repos
 
-- [mele-pause-anytime](https://github.com/Maxgoods62/mele-pause-anytime): Pause Anytime (MelePause up to version 17),
-  `LE<n>PauseAnytime.asi`, an ASI for LE1, LE2 and LE3. Esc or a gamepad's Start pauses a conversation, a cutscene or a
-  fullscreen movie. On a paused conversation or cutscene, a gamepad's Y or F7 opens photo mode.
+- [mele-pause-anytime](https://github.com/Maxgoods62/mele-pause-anytime): Pause Anytime, `LE<n>PauseAnytime.asi`, an ASI
+  for LE1, LE2 and LE3. Esc or a gamepad's Start pauses a conversation, a cutscene or some fullscreen movies. On a paused conversation or cutscene, a gamepad's Y or F7 opens photo mode.
 - [mele-galaxy-map-normandy](https://github.com/Maxgoods62/mele-galaxy-map-normandy): a script mod that puts the SR-1
   Normandy on LE1's galaxy map. Its `build.sh` uses mele-mcp and lectool from this repo.
 

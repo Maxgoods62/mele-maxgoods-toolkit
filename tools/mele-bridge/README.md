@@ -627,7 +627,7 @@ script never show up.
 `status` reads no squad screen on LE3, which has no `BioSFHandler_PartySelection`, and `loadingMovie.inLoad` is null on both,
 which have no `bIsInLoad`.
 
-One test run on each game, on a Normandy save (`Biop_Nor` in LE2, `BioP_Nor` in LE3), with `LE<n>MelePause.asi` and
+One test run on each game, on a Normandy save (`Biop_Nor` in LE2, `BioP_Nor` in LE3), with `LE<n>PauseAnytime.asi` and
 `LE<n>PhotoModeRevamp.asi` installed:
 
 - Loading: the ASI loader, the logger, the `ProcessEvent` hook and the pipe.
