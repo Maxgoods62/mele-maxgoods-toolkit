@@ -30,15 +30,15 @@ With the [GitHub CLI](https://cli.github.com), signed in to a free GitHub accoun
 this release's, then that this repo's workflow built it from this tag:
 
 \`\`\`
-gh release verify-asset $TAG LE1@NAME@-$TAG.zip -R @REPO@
-gh attestation verify LE1@NAME@-$TAG.zip -R @REPO@ --source-ref refs/tags/$TAG
+gh release verify-asset $TAG @NAME@-$TAG.zip -R @REPO@
+gh attestation verify @NAME@-$TAG.zip -R @REPO@ --source-ref refs/tags/$TAG
 \`\`\`
 
 Or compare the hash in PowerShell with the table below. The table is a copy of this release's \`SHA256SUMS\`, which can't
 change after publishing; these notes can.
 
 \`\`\`powershell
-Get-FileHash .\\LE1@NAME@-$TAG.zip -Algorithm SHA256
+Get-FileHash .\\@NAME@-$TAG.zip -Algorithm SHA256
 \`\`\`
 
 | File | SHA-256 |

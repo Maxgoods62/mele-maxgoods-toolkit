@@ -27,9 +27,11 @@ immutable release show that a file didn't change after publishing, not what it w
 
 1. `./package.sh --label <latest|v<N>>` runs in Git Bash on `windows-2025` with only `MELE_LEXASIS` set. It uses no game
    files and no `build.env`.
-2. It writes `dist/LE<n><stem>-<label>.zip`, with an LE1 zip among them, `dist/SHA256SUMS` over exactly those zips, and
-   `dist/stage/*.pdb`.
-3. It stops before building when a `v<N>` label differs from the version.
+2. It writes one zip, `dist/<stem>-<label>.zip`, `dist/SHA256SUMS` over exactly that zip, and `dist/stage/*.pdb`. The zip
+   holds a single `README.txt` that covers every game the mod is for, a `LICENSE` folder with the license texts
+   (`LICENSE`, `THIRD_PARTY.md`, font and library licenses), and the mod's files: in a folder per game (`LE1/`, `LE2/`,
+   `LE3/`) when the mod is for more than one game, at the root when it is for one.
+3. It stops before building when a `v<N>` label differs from the version, or leaves out a released game.
 4. Tags are `v<N>`, with N equal to `ASI_VERSION` in `src/SharedVersion.h`.
 5. `CHANGELOG.md` has exactly one `## v<N> (YYYY-MM-DD)` heading per tag, with text under it.
 6. Scripts are LF and executable. `dist/` and `*.zip` are ignored.

@@ -7,11 +7,12 @@ with the same `package.sh` and `build.sh` you run at home.
 
 | Push | Build | Published at |
 |---|---|---|
-| `main` | `LE<n>@NAME@-latest.zip`, `SHA256SUMS` | <@PAGES@latest/>, replaced by each push |
-| tag `v<N>` | `LE<n>@NAME@-v<N>.zip`, `SHA256SUMS` | [Releases](https://github.com/@REPO@/releases), never replaced |
+| `main` | `@NAME@-latest.zip`, `SHA256SUMS` | <@PAGES@latest/>, replaced by each push |
+| tag `v<N>` | `@NAME@-v<N>.zip`, `SHA256SUMS` | [Releases](https://github.com/@REPO@/releases), never replaced |
 
-Each run's summary shows the hashes. The run also keeps the `.pdb` files for 90 days, as the `pdb` artifact: only these
-match that build's ASI.
+The zip holds one `README.txt`, a folder per game with that game's files (`LE1`, `LE2`, `LE3`; a mod for one game has none)
+and a `LICENSE` folder with the license texts. Each run's summary shows the hashes. The run also keeps the `.pdb` files
+for 90 days, as the `pdb` artifact: only these match that build's ASI.
 
 ## First setup
 
@@ -32,7 +33,7 @@ N is `ASI_VERSION`.
 1. In the toolkit, run `tools/release-kit/kit.sh check`.
 2. Set `ASI_VERSION` and its two strings in `src/SharedVersion.h`, and date its entry in `CHANGELOG.md`:
    `## v<N> (YYYY-MM-DD)`.
-3. Push `main`, and test the zips from the latest page in the game.
+3. Push `main`, and test the zip from the latest page in the game.
 4. Tag that commit and push the tag:
 
    ```bash
@@ -51,8 +52,8 @@ With the [GitHub CLI](https://cli.github.com), signed in to a free GitHub accoun
 that release's, then that this repo's workflow built it from that tag:
 
 ```bash
-gh release verify-asset v<N> LE1@NAME@-v<N>.zip -R @REPO@
-gh attestation verify LE1@NAME@-v<N>.zip -R @REPO@ --source-ref refs/tags/v<N>
+gh release verify-asset v<N> @NAME@-v<N>.zip -R @REPO@
+gh attestation verify @NAME@-v<N>.zip -R @REPO@ --source-ref refs/tags/v<N>
 ```
 
 On a latest zip, `gh attestation verify` works without `--source-ref`.
@@ -60,7 +61,7 @@ On a latest zip, `gh attestation verify` works without `--source-ref`.
 Without the CLI, compare the SHA-256 hash in PowerShell with `SHA256SUMS`. It shows that the file matches the list:
 
 ```powershell
-Get-FileHash .\LE1@NAME@-v<N>.zip -Algorithm SHA256
+Get-FileHash .\@NAME@-v<N>.zip -Algorithm SHA256
 ```
 
 ## What stops a rebuilt tag
