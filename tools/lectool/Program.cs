@@ -575,7 +575,7 @@ if (cmd == "2da") {
   foreach (var dup in refEntries.Where(e => e != null).GroupBy(e => e.ObjectName.Instanced, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
     errors.Add($"the movie references two objects named {dup.Key}: their top-level copies would share a path");
   if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
-  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  MEPackageHandler.CreateAndSavePackage(outPath, game);
   var pcc = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   try {
     using var cache = new PackageCache();
