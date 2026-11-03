@@ -70,10 +70,19 @@ from that tag:
 
 ```bash
 gh release verify-asset v<N> @NAME@-v<N>.zip -R @REPO@
-gh attestation verify @NAME@-v<N>.zip -R @REPO@ --source-ref refs/tags/v<N>
+gh attestation verify @NAME@-v<N>.zip -R @REPO@ --source-ref refs/tags/v<N> \
+  --signer-workflow @REPO@/.github/workflows/build.yml
 ```
 
-On a latest zip, `gh attestation verify` works without `--source-ref`.
+A latest zip is built from `main`:
+
+```bash
+gh attestation verify @NAME@-latest.zip -R @REPO@ --source-ref refs/heads/main \
+  --signer-workflow @REPO@/.github/workflows/build.yml
+```
+
+Keep both flags. Without `--source-ref`, a run on another branch or tag can sign a zip that passes. Without
+`--signer-workflow`, another workflow file in this repo can.
 
 ## What stops a rebuilt tag
 
