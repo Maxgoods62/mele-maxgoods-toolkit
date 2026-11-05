@@ -1,8 +1,9 @@
 mele-mcp @VERSION@ for Windows x64
 
-mele-mcp is an MCP server for modding Mass Effect Legendary Edition, mostly LE1. It reads and
-writes the game's packages with LegendaryExplorerCore, builds mods from YAML files and talks to
-the running game.
+mele-mcp is an MCP server for modding the Mass Effect Legendary Edition games LE1, LE2 and LE3.
+It reads and writes the game's packages with LegendaryExplorerCore and talks to the running
+game. Some features are for one game only: YAML mod builds are LE1 only, and save editing is
+LE2 and LE3 only. The full list is in docs/games.md, on the repo linked below.
 
 This is a personal tool, shared as-is. It comes with no support and no warranty (see LICENSE).
 
@@ -10,7 +11,7 @@ What it needs:
 - Windows x64.
 - The .NET 8 runtime, x64: https://dotnet.microsoft.com/download/dotnet/8.0
 - Mass Effect Legendary Edition. The server finds it in the registry. If it does not, set
-  MELE_LE_DIR to the folder that holds Game\ME1.
+  MELE_LE_DIR to the folder that holds Game\ME1, Game\ME2 and Game\ME3.
 - ME3Tweaks Mod Manager, for mod_install and game_cycle.
 
 Unzip everything into a folder of your own, such as %LOCALAPPDATA%\mele-mcp\server, and check
@@ -18,7 +19,10 @@ it in a terminal:
 
     MeleMcp.exe --selftest
 
-It prints what the le_status tool returns, then a summary of BIOA_CRD00.pcc.
+It prints what the le_status tool returns, then a summary of BIOA_CRD00.pcc. That file is LE1's,
+so this check reads LE1 whichever game you mod.
+
+Most tools take a game parameter that defaults to LE1. Pass LE2 or LE3 for the other games.
 
 To register it with Claude Code for all your projects, run this in a Command Prompt:
 

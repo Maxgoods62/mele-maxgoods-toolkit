@@ -1,224 +1,406 @@
 # mele-mcp
 
-MCP server that gives Claude Code headless access to Mass Effect Legendary Edition packages through
-[LegendaryExplorerCore](https://github.com/ME3Tweaks/LegendaryExplorer) (LEC). Build and setup:
-[getting started](../../docs/getting-started.md).
+This page covers the toolkit's MCP server: how its parts fit, all 91 tools by area, its scripts, the dev loop and the
+known traps. Build and setup steps are in [getting started](../../docs/getting-started.md).
 
-```
-Claude Code (Windows or WSL) ─stdio─► MeleMcp.exe (Windows) ─► LEC ─► .pcc files
+## What it is
+
+mele-mcp is an MCP server for modding Mass Effect Legendary Edition. An MCP client such as Claude Code starts it and
+calls its tools over stdio. The tools read and write game files, build mods and talk to the running game.
+
+The server is a Windows x64 program, version 0.1.0, licensed GPL-3.0. The client can run on Windows or in WSL. Its
+dependencies and their licenses are listed in [THIRD_PARTY.md](../../THIRD_PARTY.md).
+
+## How the parts fit
+
+```text
+MCP client (Windows or WSL)
+   | stdio, JSON-RPC
+   v
+MeleMcp ........ host and tool classes
+   |
+   v
+MeleMcp.Core ... tool logic, no MCP dependency
+   |-- LEC ................ packages, .tlk, .cnd and config files
+   |-- M3 ................. mod installs, merge mods
+   |-- MeleBridge pipe .... running game (live_*)
+   `-- LEX Interop pipe ... running game (game_*)
 ```
 
-Version 0.1.0. GPL-3.0, like LEC: see [LICENSE](../../LICENSE).
+| Part | Role |
+|---|---|
+| LEC | [LegendaryExplorerCore](https://github.com/ME3Tweaks/LegendaryExplorer), the library behind Legendary Explorer (LEX). A git submodule, pinned at `43bf73a`, tag `6.5.0.6522`. |
+| M3 | ME3Tweaks Mod Manager. Mods reach the game through it, with `mod_install`. |
+| MeleBridge | The toolkit's own ASI, one build per game: see [its README](../mele-bridge/README.md). An ASI is a DLL the game loads at start. |
+| LEX Interop | An ASI from ME3Tweaks. The live link tools below speak its protocol, as LEX does. |
+
+## Calling a tool
+
+| Parameter | What it takes |
+|---|---|
+| `game` | `LE1`, `LE2` or `LE3`. Most tools default to `LE1`, so pass it for other games. `cnd_get` and `cnd_set` default to `LE3`. `dlc_new`, `mergemod_build` and `save_*` require it. |
+| `package` | A file name, resolved to the highest mounted copy, or a full path. |
+| `export` | A UIndex (the export's number in the package), an instanced full path, or a unique name. |
+| Any path | A Windows path or `/mnt/<drive>/...`. |
+| `language`, `languages` | The text language. `conv_read`, `conv_find`, `conv_audio` and `quest_map_get` default to `FR`. `mod_check` and `game_cycle` default to `INT,FR`. |
 
 ## Tools
 
-### Game files, packages, text, plot, Kismet and builds
+LE1, LE2 and LE3 are all targets, and the Games column shows what the code allows for each tool. `All three` means the
+tool handles each game. `LE1 only`, `LE2, LE3` and `LE3 only` mean the other games get an error. `Accepted` means the
+tool takes all three with no guard. [docs/games.md](../../docs/games.md) records what has actually run on each game.
 
-| Tool | What it does |
-|---|---|
-| `le_status` | LEC version, resolved LE1/LE2/LE3 game paths, Oodle loaded, init time |
-| `le_refresh_files` | Forget the cached game/DLC file list (call after installing or copying files) |
-| `le_find_file` | Which copy of a file the game loads (name, `.pcc` by default, or a wildcard): every copy in BioGame, Engine and the DLC folders, the winner first, why each other one is skipped (overridden, folder not mounted, left out on a mount tie, extension not in the TOC). Reads the disk on each call. LE1 emulates the installed AutoTOC ASI, which writes the TOC the game loads from: v2 (`AutoTOCLE-v2.asi`, no version resource: `DLC_` folders, `[ME1DLCMOUNT] ModMount`) or v3 (LExASIs: `DLC_MOD_` folders, a `ModMount` line anywhere); then compares with `PCConsoleTOC.bin` from the last boot and with LEC's cached list (what the other tools open). `AutoLoad.ini` is read byte for byte as Windows does (only the first `[ME1DLCMOUNT]`; a UTF-8 BOM hides a header on line 1). With no AutoTOC ASI, the TOC on disk is the answer. Folder warnings: mount 0 or missing (the game closes at boot), shared mounts, `DLC_` folders the Autoload ASI ignores, LEC's list failing. LE2/LE3 follow LEC (`DLC_` + `Mount.dlc`) (tested: predictions equal the live LE1 TOC for all 9,777 files; edge cases on a fake install) |
-| `pkg_info` | Package summary: names/imports/exports, embedded LE1 talk files, top export classes. Takes a file name (highest mounted copy) or a Windows or `/mnt/<drive>/` path |
-| `pkg_search` | Exports filtered by exact class and/or path substring → UIndex, class, instanced full path |
-| `pkg_find_name` | Loaded packages whose name table contains a substring (tags, object and Kismet names), optional file wildcard. Partial load: no export data read |
-| `pkg_to_text` | A package's export properties as git-friendly text: one `Begin Object Class=… Name='<path>' … End Object` block per export (optional `//#<UIndex>` line), the format LEC's `CompileBulkPropertiesFile` reads back. Filters `className`, `pathContains`; leaves out script exports, class defaults and trash; an export that fails is listed in `Skipped`, not fatal (LEC's `DecompileBulkProps` gives up on the first), and so is an export whose path and class another entry has, unless LEC's compiler finds that one (`FindEntry`), so a block never lands in another export. `BinaryNotInText` counts exports whose binary (meshes, textures) the text lacks. Returns the text (up to `maxChars`) or writes `outPath` (UTF-8, `\n`; replaces only this package's earlier text, refuses any other file and the whole Legendary Edition folder). `roundTrip`: empties each export's properties in an unsaved copy, compiles the text back, compares text and bytes (tested: byte-identical on LE1 `SFXGame`, `BIOA_NOR10_07_DSG` and its `_LOC_FR`, LE2 `BioD_Nor_000Cabin`, LE3 `SFXGame`, `BioP_Nor`, `BioD_Nor_100Cabin`; LE1 `Startup_INT` fails in LEC's compiler: `GFxMovieInfo has no member named 'SourceFilePath'`) |
-| `export_get` | One export's header (NetIndex, flags, archetype, data offset and size) and properties as an indented tree; object references resolved to class, path, UIndex |
-| `export_refs` | Exports in the same package that reference an export, and via which property (function bytecode included, so it answers "who calls X") |
-| `export_diff` | Two exports compared property by property (e.g. our actor vs the vanilla one it was cloned from): class, archetype, flags, every property flattened (`StreamingStates[0].InChunkName`), subobjects paired by class and order; references by path, `<self>` inside the export; `(not set)` = class default |
-| `export_decompile` | UnrealScript source of a class, state or function, e.g. `SFXGame.pcc` `SideloaderFramework` (LE1CP) |
-| `xgame_decompile` | One class, function, state, struct or enum across games: for each game the winning file (as `le_find_file` picks it), the export, and a unified diff against the first game that has it, or a note when absent. Searches the core script files without a package name, `deepSearch` reads every package's tables. `mode=full` returns each game's text. `maxChars` caps the output, `Cuts` says what was cut. Inherited members are not followed |
-| `script_compile` | Compiles UnrealScript into a mod's package copy, in LE1, LE2 and LE3, with LEC's compiler. `export` is a Function or State (full text; `export_decompile`'s output works as is) or a Class: the whole class, or one var, struct, enum, function or state, added or replaced through LEC's `AddOrReplaceInClass`, which compiles the rest of the class again from its decompiled text. `source` or `sourceFile`, `dryRun`. Errors carry 1-based `Line` and `Column`; the file is saved only on success. A core file (`SFXGame`, `Engine`, `Startup*`, not `*DLC_MOD_*`) still compiles on the copy, with a warning that shipping needs a merge mod. LE3: warns when a class's virtual function table changes, since subclasses keep their own copy. LE1 and LE2 plot conditionals are `F<id>` functions of `BioAutoConditionals`, so this edits those too. Refuses a source whose name differs from the export, and any file inside the Legendary Edition folder, for a dry run too. Tested on scratch copies, not in game: LEC recompiles LE3 `SFXGame` 7429 of 7429 functions, 7427 to the same text; LE2 4353 of 4355; LE1 2854 of 2854; `PlotManager` LE1 and LE2 byte-identical. Native functions cannot be compiled; add-to-class takes no const or defaultproperties |
-| `level_new` | Empty level package (`TheWorld.PersistentLevel` + `BioWorldInfo`) from LEC's embedded template; the file name is the level name. Refuses an existing file and the game install |
-| `export_set` | Set one leaf property by path (`VectorParameterValues[11].ParameterValue.G`), save. A property the export lacks (still at its class default) is created from LEC's class info |
-| `export_set_batch` | Several leaf properties, any exports of one package, validated together, one save |
-| `export_clone` | Duplicate an export and its children (references inside the copy relinked); a level actor is added to the level's `Actors` list |
-| `export_import` | Copy an export from another package with everything it references (LEX "clone all references"); globally loaded classes and assets become imports. Optional add to `Actors`. Refuses if the target already has that path |
-| `export_rename` | Rename an export (children follow). Use it after cloning or importing a forced export (actor type, conversation package): two loaded files with the same path share one object |
-| `tlk_get` / `tlk_set` | Read, add or replace strings. LE1: a package's `BioTlkFile` exports (all of them by default: male/female copies, every language of a conversation's set). LE2/LE3: one loose `.tlk` file, with its female table; `tlk_set` takes a full path, creates a missing file with its header strings, and warns when the DLC folder does not load that name. LE2/LE3 output reads back through LEC, not tested in game |
-| `conv_read` | Conversation as a text graph, LE1/LE2/LE3: start entries, entries and wheel choices, replies, plot conditions/transitions, node data (interp length, VO track and its strref). LE2/LE3 text comes from the `.tlk` files, base game and DLC, highest mount winning, with `female:` where a line differs |
-| `conv_find` | Lines of every conversation the game loads (base, DLC, mods), LE1/LE2/LE3, by speaker tag, text or wheel text, plot id, conversation name, file wildcard; only the asked language's `_LOC_` copies; mod lines read the global strings. LE1 3,100 files in ~3 s, LE2 2,900 in ~4 s, LE3 3,900 in ~7 s |
-| `conv_audio` | Lines with no voice yet, in a mod (all its packages, the asked language's `_LOC_` copies) or one package: follows each spoken line's VO-track strref → `FXA_<strref>` / `FXA_<strref>_M` in the speaker's FaceFX sets → sound cue → `SoundNodeWave` → its ISACT sound (embedded, or in the `BioSoundNodeWaveStreamingData` content index). Status per Shepard gender, worst first: `broken`, `other-voice` (a wave named for another line: a template's words), `no-vo-track`, `no-set`, `no-facefx`, `silent` (lip flap, cue index -1), `unchecked`, `voiced`. Lines no link leads to are hidden unless asked. Vanilla `BIOA_NOR10_11_DSG_LOC_FR`: 586/586 voiced in 3.5 s; a test mod: its 25 new lines `silent`; a planted `facefx_copy_lines withSound` shows `other-voice` |
-| `conv_add_node` | Append a line copied from a template node (E or R): new strref and export id, plot cleared, node data (ConvNode → Interp → InterpData → EndCurrentConvNode) and FaceFX lines copied, VO track set to the strref |
-| `conv_build` | Build a conversation from a YAML file ([format](../../docs/yaml-reference.md#conversation-files)): a missing conversation copied from a `from` template (own names, resref and node ids, vanilla plot removed), new text for kept nodes (voice track and lip sync follow), new lines from templates, text in every language, plot conditions and transitions, wheels, next lines, starting list, in one save; running it again changes nothing new |
-| `conv_link` | Add or remove a link: start → E, E → R (wheel choice: paraphrase strref, category), R → E |
-| `facefx_get` / `facefx_copy_lines` | List the lip-sync lines of a `FaceFXAnimSet` (name, sound cue path and index, length); copy lines under new names, silent by default (LE1 plays `FXA_<strref>[_M]` for a VO track) |
-| `plot_map_get` | State events of a `BioStateEventMap` or `BioConsequenceMap` (LE1 `BIOC_Materials.pcc`, LE2 `Startup_INT.pcc`, LE3 `SFXGameInfoSP_SF.pcc`, `PlotManagerAuto.StateTransitionMap`; a DLC: its `Startup_<name>_INT.pcc`): id and elements (`bool 8421 = True [v0]`, `int 47 += 2 [v1]`, consequence, function), filters by id range or by the variable written. An LE2/LE3 `BioOutcomeMap` prints as int pairs, meaning unverified |
-| `plot_map_new` | New DLC plot package `PlotManagerAutoDLC_<name>.pcc` with empty `StateTransitionMap` and `ConsequenceMap`; returns the `AutoLoad.ini` lines to add |
-| `plot_event_set` | Add, replace or remove one state event from elements in `plot_map_get` notation; int and float elements are written as InstanceVersion 1, as the game expects |
-| `id_alloc` | Free LE1 plot ids (bool, int, float, conditional, transition, consequence), quest ids or string ids from a start id, or a check of given ids. Sources: LEX's base-game plot database and `ModPlotsLE1` mod databases, the base game's plot maps, conditionals and GlobalTlk, and every installed DLC's `AutoLoad.ini` wiring; optional extra DLC folders (the M3 library copy) and packages (conversation TLKs). Each used id names its users |
-| `quest_map_get` | A journal map (`BioQuestMap`), LE1/LE2/LE3: quests with goals, tasks and plot items (strrefs with their global text, states, InstanceVersions) and the evaluations a plot change runs. LE2/LE3 also read a `BioCodexMap` (`DataCodexMap`): sections and pages with their text
-| `cnd_get` | LE3 conditionals (`.cnd`): the ids, one conditional's text, or all of them. File name (default `Conditionals.cnd`) or path. An entry with `Hex` holds an operator LEC decompiles as `()`. `roundTrip` recompiles every entry and counts: `Conditionals.cnd` 2501 byte-identical and 6 same meaning of 2507; `DLC_EXP_Pack002` 185 of 187 and `DLC_EXP_Pack003` 718 of 751, the rest fail on `()` |
-| `cnd_set` | Compiles one conditional into a mod's LE3 `.cnd`: adds or replaces the id, creates the file if missing, other entries keep their bytes. The file is `<DLC folder>\CookedPCConsole\Conditionals<DLC folder name>.cnd`; `Warnings` says when the path differs. Every comparison in its own parentheses, as `cnd_get` prints them. Checks the tokens first (LEC's parser hangs on an unknown word), then decompiles the result and writes only if it matches the text (LEC's compiler drops what it does not parse, with no error). No `-`, `/` or fractional floats. Tested on scratch copies, not in game |
-| `config_get` | Game config file by file, in load order: the base Coalesced, then each mounted DLC by rising mount. LE1: `Coalesced_INT.bin`, `ConfigDelta-*.m3cd` (M3 merges these into the bin at install, so a modded install's base rows already hold them). LE2: `Coalesced_<language>.bin`, the DLC's loose inis. LE3: `Coalesced.bin`, `Default_<DLC>.bin`. Filters: asset, file, section, key (wildcards), text. Each row gives file, mount, operation (`set`, `add`, `addunique`, `remove`, `clear`) and native form (key prefix, or LE3 type 0-4). `Effective` replays a key's rows when more than one file holds it (LE1: the base file's rows, all the game loads). The replay follows the formats' rules; not checked in game. Results capped by `limit`, totals still count all |
-| `config_set` | Write config entries into a mod's DLC folder in the game's native form, merging with what is there: LE1 a `ConfigDelta-*.m3cd` (the same form `level_build` writes, byte for byte), LE2 the asset's loose ini, LE3 `Default_<DLC>.bin`. Inis and deltas change only on the entry's lines. Operations `set`, `add`, `addunique`, `remove`, `clear`; an entry already there changes nothing. Backs up and refuses the game install. Tested on copies: `DLC_HEN_MT`'s inis stay byte-equal, `DLC_CON_DH1`'s bin stays equal row for row but not byte for byte (LEC lays out the file differently). Nothing tested in game |
-| `quest_set` | Add, replace or remove one journal quest and its evaluations, with the base game's InstanceVersions; creates the `QuestMap` export (and returns the `AutoLoad.ini` line) when the package has none |
-| `plot_build` | Build a DLC plot package from a YAML file ([format](../../docs/yaml-reference.md#plot-files)): transitions, consequences, journal quests with their GlobalTlk text, and the missing `AutoLoad.ini` lines; creates the package if missing; reports each event and quest as added, replaced or unchanged |
-| `level_build` | Build a level from a YAML file ([format](../../docs/yaml-reference.md#level-files)). The level: vanilla sub-levels it shows inside a stream volume copied from a vanilla map, its post-process, start points (a location of our own: `at <map> <tag>`). Its usables: placeables (e.g. a terminal) that take Shepard to another map and start point. Its NPCs: pawn found by tag or imported from a template, place, own name, skin/hair/eye colors, lights that follow her, the Kismet that starts her conversation (listed in `missingConversations` while the level has none of that name), an idle pose with fidgets (a vanilla action-station prefab: left to talk, resumed after), the Sideloader config. Its props: copied, placed, turned (`yaw` or `rotation`) and scaled (`scale`, `scale3d`), or hidden (`removed`), lit by prop lights when one covers them, else by their light environment (a note names them). Its lights (`lights:`): prop lights and room lights, placed, sized, coloured, on or off. Its vanilla actors (`vanilla:`): meshes moved, turned, scaled or hidden, effects (emitters) moved, turned or hidden, in a fork of their file, which the level streams in its place; lights of its light collections (`<file>.<collection>.<light>`) moved, sized, brightened, coloured, on or off, in the fork, or in the map for a `characterLights` copy; then MeleBridge's `levels.json` (its NPCs with their lights' offsets, its character lights too). Creates a missing level; writes only what differs |
-| `mod_build` | Build every YAML file of a mod folder: plot files through `plot_build`, levels (`npcs`, `usables`, `props`, `streaming`, `characterLights`, `startPoints` or `squad`) through `level_build`, conversations through `conv_build`, then again the levels that were missing a conversation. A new NPC builds from her YAML files alone. Every file's `requires` is checked first. `out`: build into another mod root, changing nothing outside it ([YAML reference](../../docs/yaml-reference.md#building-into-out)) |
-| `dlc_new` | Starts an LE2 or LE3 mod in an empty folder: `moddesc.ini` (cmmver 9.2), `DLC_MOD_<Name>` at the mod root as M3's `[CUSTOMDLC]` expects, `Mount.dlc`, one `.tlk` per language and the config skeleton, in the forms of M3's Starter Kit. LE2: `BIOEngine.ini` with `[Engine.DLCModules]` and `DLC_<module>_<LANG>.tlk`; `moduleId` defaults to the mount priority. LE3: `Default_DLC_MOD_<Name>.bin` with the Starter Kit's 22 rows and `DLC_MOD_<Name>_<LANG>.tlk`. The DLC's name string goes in every `.tlk`, at `nameStrRef` or the first free id from mount priority x 1000. Refuses LE1 (`mod_build` starts those), a folder that holds anything, the game install, a name M3 refuses (letters, digits, `_`; 25 characters after `DLC_MOD_`; LE3 no capital `MP`), a mount outside M3's range (LE2 over 2500, LE3 over 4000, both under 32000), and a folder name, mount or LE2 module already installed, naming its owner. Every file is read back with LEC; a mismatch removes the output. Compared with vanilla DLC (mount and `.tlk` headers) and M3's template (config rows); `le_find_file` on a fake install sees it mounted at its priority, for LE2 and LE3. Not parsed by M3's mod loader yet, not tested in game |
-| `mergemod_build` | Builds an M3 merge mod (`.m3m`), the supported route to patch `SFXGame`, `Engine`, `Startup` and the other core files, in LE1, LE2 and LE3. Takes `changes` with `targetFile` and `name`, or an existing `manifest`; the mod must exist. A dry check runs first on a scratch copy of the target, in order, as M3 will apply them: function text and class members compile through `script_compile`'s route (errors keep line and column), each entry is found and normalized to its instanced full path, each property is checked against the export and its class, a manifest against M3's schema. On any error `Stage` is `check-failed`, nothing is written and M3 is not touched. Then the manifest and sources go in the mod's `MergeMods` folder, M3 compiles them (`--compilemergemod` to the running window, waiting on its log and the output file) and the `.m3m` joins `moddesc.ini` `[BASEGAME]` `mergemods=`, keeping that file's other bytes. `compile=false` stops after the manifest. M3 opens a dialog on a compile failure: the tool reports that and never clicks it, and never closes M3. Run through real M3 9.2.1 on LE1, LE2 and LE3: function and property updates, class members, assets, all localizations, the `.m3m` decoded back. The `m3-error` and `m3-timeout` paths are written but not run. One applied by M3 and proved in LE2: a function added to the empty class `BioDeprecated` in `SFXGame.pcc`, called on the class default object at the main menu. Target an empty class in a test: add-to-class recompiles the whole class. M3 patches the file in place and merges stack on the file on disk. The only way back is the Restore button on the file's row in M3's Manage Target, Modified basegame files |
-| `mod_check` | Check an LE1 mod's built files in M3's library before installing: `refs` (LEX's reference check), `streaming` (a stream state without `InChunkName`: pawns frozen and black), `startpoints` (a pathless, unblocked start point: henchmen "destination blocked"), `strings` (a strref without text, per language), `facefx` (a line of the mod's own strings without `FXA_<strref>[_M]`), `ids` (plot, quest or string ids another installed mod or the base game defines). Planted bugs of each kind are caught; a test mod passes |
-| `mod_install` | Install a mod with ME3Tweaks Mod Manager (`--installmod`, optional `--bootgame`): DLC copy, Coalesced merge of ConfigDelta files, AutoTOC, merge mods listed in `[BASEGAME]`. Waits on M3's log to the end of its AutoTOC, stops at once on a failed install (M3's dialog stays open for a click), then compares every `[CUSTOMDLC]` file with its installed copy. A merge mod patches a core file in place, so `differences` names it only when M3 logged no save, and `log` holds M3's merge lines. Refuses while the game runs |
-| `conv_set_ids` | New `m_nResRefID` and node ids for a copied LE1 conversation (port of LEX `ChangeConvoIDandConvNodeIDs`) |
-| `kismet_read` | A sequence as text in flow order (events first, then along output links): settings, `Out → Target.In` links (input names from class defaults when not serialized), variables with values; with the Kismet Logger's log, each op marked ✓ (input pins × count) or ✗, and nested sequences with how many of their ops fired; `recurse` follows `SequenceReference`s; `show` fired/unfired |
-| `kismet_add` / `kismet_link` | Create a sequence object with class defaults (returns its link names); link output → input, variable slot → variable, event slot → event |
-| `gfx_scan` | Read-only GFx inspector, for a package's `GFxMovieInfo` exports or a loose `.gfx`/`.swf`. `movies`: size, SWF and exporter version, counts, SHA-1, referenced textures. `tags`: tag counts, labels, placements, linkage, imports, fonts, edit texts, tag list with offsets. `images`: GFx image and gradient tags matched to the package's textures. `as2`: ActionScript 2 of a movie, sprite or frame, constant pools resolved, as `disasm` or rough `pseudo` code. Long text pages with `offset` |
-| `exe_dump` | Copy the running game's mapped exe image, read-only, to `%LOCALAPPDATA%\mele-mcp\dumps\<game>\image.bin` (`MELE_DUMP_DIR` replaces the folder), with `image.json` (exe SHA-256, size, base address, unreadable pages). The exes keep their code encrypted on disk. Skips the read when the cache matches the exe on disk, and refuses a game not running, code still encrypted, or a folder inside the game install. The dump holds game code and any installed ASI hooks. Run on LE2, not on LE1 or LE3 |
-| `exe_dump_pe` | Write a dump as a PE that REA can open: section raw offsets set to their RVAs, certificate and debug directories removed. Default `image-pe.exe` next to the dump. Refuses the game install and any existing file it did not write. Tested in REA on an LE2 dump: Ghidra's analysis took about 10 minutes, redone each session |
-| `native_query` | Query a mapped dump, the cached one or any `image.bin` through `dump`: `info`, `disasm`, `callers`, `xrefs`, `strings`, `pattern`, `class` (native class name to vtable through its registration, the exes have no RTTI), `vtable`, `slot_of`, `name` (name entries in the image; heap name chunks and GObjects are not in a dump). Needs no analysis step. Use REA on `exe_dump_pe`'s file for pseudocode, cross-function comparison and annotation |
+### Status
 
-### Live link (`game_*`)
-
-These tools reach the running game through ME3Tweaks' LEX Interop ASI, with the protocol LEX uses.
-
-| Tool | What it does | Tested on LE1 |
+| Tool | Purpose | Games |
 |---|---|---|
-| `game_status` | Game running, interop pipe present, reply round trip | yes |
-| `game_actors` | Every visible level with its actors (name, tag), filters | yes: 21 levels, 1,051 actors |
-| `game_actor_get` / `game_actor_set` | Live location, rotation, scale, hidden; move/turn/hide one actor (not saved) | yes |
-| `npc_place` | Put an NPC of a `level_build` YAML where Shepard stands: writes `location`/`yaw` into the file, builds the level, moves her and her lights live as a preview. Warns ("the editor's session for BIOA_MYM01 holds an unimported edit of mymod_npc_01 or its lights: editor_import first, or this move will conflict") when a session holds an edit of her or her lights no import has applied | yes: medbay, then kept after `mod_install` |
-| `game_player_location` | Shepard's position and rotation (reported only after a change, so it may ask you to take a step) | yes |
-| `game_console`, `game_stream_level`, `game_remote_event` | Fire-and-forget commands | sent, effect not checked |
-| `game_hot_reload` | Swap a streamed level for a package file under the name `<level>_LIVE<hhmmss>` | partly: loads, but reverted within 2 to 4 s, see below |
-| `game_get` | A property of every live object of a class (subclasses too), through the console's `getall`, read back from `DebugLogger.log`: values, structs, arrays (one element per line); a wrong name returns the game's "Unrecognized ..." | yes: `bTickIsDisabled`, `Location`, `StreamingStates` |
-| `game_plot` | LE1 plot bools, ints and floats in the running game, by id or by name from LEX's plot databases (base game + `ModPlotsLE1`); reads, then sets one id (`Was` keeps the old value); no transition or consequence runs. With MeleBridge: the plot table's own `GetBool`/`SetBool` (and Int, Float), answered on the pipe (`via: MeleBridge`). Without: BioWare's cheat execs `DumpPlotManagerValueByIndex` / `InitPlotManagerValueByIndex`, whose LogInternal answers are read from `DebugLogger.log`; that ASI writes info lines out only on a warning or every 5 s, so the wait sends a `getall` (logged as an error) each second. Commands queued together over LEX run nested, last first (LEX Interop runs them inside its `ProcessEvent` hook), so `GameBridge` leaves 50 ms between sends and the set waits for the read | yes: both paths: ints 46/47 four times in a row, 10 bools, `Paragon` by name, bool 8440 False→True→False; 0.8 s through the bridge |
-| `game_log` | The DebugLogger ASI's log (`Binaries\Win64\Logs\DebugLogger.log`): from the last load of a map, errors only, text filter. Reads the file, no pipe | yes: found the henchmen's stasis (black, frozen pawns) in a test map |
-| `game_kismet_log` | The Kismet Logger ASI's trace (`Binaries\Win64\Logs\KismetLogger.log`): every sequence op activated, in order, with level, instanced path (for `export_get`) and input pin; text filter, last N seconds, grouped with counts. Needs that ASI (M3 ASI Manager, dev-only). Conversation node ops show under the conversation's `_N` package | yes: a squad prefab and an NPC's conversation traced; paths resolve in `export_get` |
-| `game_screenshot` | PNG of the game window's client area (PrintWindow with `PW_RENDERFULLCONTENT`, so a covered windowed game still captures; screen copy as fallback), scaled to 1280 wide by default; returns the WSL path to open with Read | yes: windowed, freighter |
-| `game_cycle` | Quit (console `exit`, `force` kills) → `mod_check` → `mod_install` with boot (or M3 `--bootgame` alone) → main menu (DebugLogger log of the new session) → `BioLoadGame <n>` → console commands → map loaded → screenshot. Slots are developer saves: `BioSaveGame <n>` (console, in game) writes `Game\ME1\BioGame\Save\BioSaveGame<n>.sav` where Shepard stands, `BioLoadGame <n>` loads it, even over a career; career saves (`Insane00_10.pcsav`) are not slots ("Can not find specified save slot"): load one with `commands: ["nextframedefer loadgame <Career>_QuickSave DevId=-1"]` and `waitForMap`, and a name the game can't find stops the cycle with its `Unable to load … on device Id` line (not tried in game). M3 is now started with shell execute, so neither M3 nor the game holds the MCP stdio pipes open | yes: quit, install, boot, menu, slot 99 from the menu: 38 s from a closed game to a screenshot. A boot crashed once at start (call through address 0 while the ASI loader hooked `ProcessEvent`); the cycle now boots again once |
-| `game_cycle` on LE2 and LE3 | The same loop through MeleBridge (no LEX Interop there), so it needs MeleBridge and DebugLogger. `loadLatest` sends `QuickLoad`, the menu's Resume: the latest save only. A chosen save has no console route on LE2: `BioLoadGame` does not exist, `LoadExternalSave` is an empty native in the shipped exe, and `LoadGame <name>` compares `SFXSaveGame.DebugName`, which is empty. `mod_check` is LE1 only, so it is skipped | LE2 yes: from a closed game, mod installed and map loaded in 33 s, screenshot at 41 s. LE3 yes, no mod: boot to `BioP_Nor` in 31 s, restart from a running game in 40 s |
-| `game_close` | Console `exit` without saving, waits for the process to end; `force` kills it after 30 s. Used by `game_cycle` | yes on all three: 4 to 14 s. `force` not run |
+| `le_status` | Reports the LEC version, the LE folder and its source, all three game paths and Oodle. | No `game` parameter |
+| `le_refresh_files` | Forgets the cached file list, for an install that `mod_install` did not run. | No `game` parameter |
+| `le_find_file` | Names the copy of a file the game loads, and why each other copy loses. | All three |
 
-Requirements: the LEX Interop ASI, and LEX closed. M3's ASI Manager does not list that ASI: install it from Legendary Explorer (Live Level Editor, requirements, "Interop ASI"), which asks M3 to install ASI group 42. The game sends replies to the first window titled "Legendary Explorer", and the server owns a hidden one.
+On LE1, `le_find_file` emulates the installed AutoTOC ASI, which writes the file table the game reads, and compares with
+`PCConsoleTOC.bin`. On LE2 and LE3 it follows LEC. On LE2 a DLC copy of `SFXGame`, `PlotManager` or `Startup` is named
+the winner, but it never loads.
 
-Hot-reload notes:
-- The ASI serves precached bytes only for package names not found on disk (`FindPackageFile` hook), so reloading under the same name silently loads the disk file. Hence the `_LIVE` name.
-- The bytes must be uncompressed (LEX sends `SaveToStream(false)`). Sending a compressed file hung LE1: the engine's memory reader cannot decompress, falls back to opening the file by name, and that file is not on disk.
-- On LE1 + LE1CP the copy does not last. `BioTriggerStream.Touch`/`UnTouch` and Kismet `BioSeqAct_SetStreamingState` re-apply the area's streaming state (hand-streamed levels unload) and then call `SideloaderFramework.RunSideloader`, which re-forces every Sideloader level by name (`ClientUpdateLevelStreamingStatus`). Tested on the Normandy: reverted in 2 to 4 s with Shepard standing still. Never fire LE1CP framework events by hand (`Poll_NPC_*`, `Live_NPC_*`): doing so re-spawned several NPC files twice and hung LE1 in a loading loop. Streaming a framework-managed `BIONPC_*` file out and in also leaves the framework's NPC dormant (the medbay doctor vanished).
+On LE1, a mod's `AutoLoad.ini` needs a `ModMount` above 0. Without one, the AutoTOC ASI closes the game at boot with a
+"Broken Mod Warning". AutoTOC v2 reads only the first `[ME1DLCMOUNT]` section. It also misses a header on line 1 after a
+UTF-8 BOM, so save that file without a BOM. The Autoload ASI reads only folders whose names start with `DLC_MOD_`, in
+that exact case. `le_find_file` lists each of these problems in its warnings.
 
-### Live objects (`live_*`)
+### Packages
 
-These tools go through the toolkit's own ASI, [MeleBridge](../mele-bridge/README.md): request and reply on one pipe,
-run on the game thread. LEX may stay open.
+These tools only read, and they never change a package. The optional `outPath` of `pkg_to_text` refuses the game install
+and any existing file that is not this package's earlier text.
 
-MeleBridge also runs on LE2 and LE3 (`build.sh --game LE2|LE3 --install`), without the editor. Each passed one test run
-on a Normandy save; `live_place` and `live_remove` have not run there. `live_editor` and `live_save` stay LE1 only.
-
-| Tool | What it does | Tested on LE1 |
+| Tool | Purpose | Games |
 |---|---|---|
-| `live_find` | Live objects by class (subclasses, any package), name and path filters; paths for the tools below | yes: 4 pawns in the freighter, the plot table |
-| `live_get` | One object's properties, all or one by path (`Location.X`, `Arr[2]`): enums as names, objects as paths, structs nested | yes: pawn `Location`, `Tag`, `Physics` = `PHYS_Walking`, all 26 KB |
-| `live_set` | One property of one object in memory (JSON value; struct members, `Arr[i]`); returns the new value | yes: `DrawScale` 1.5 then back to 1.0; a wrong name returns "no property 'Nope' in BioPawn". `bHidden true` changed the value but the NPC stayed visible: components take it in at attach time. `live_call SetHidden [true]` hid it (after setting the field back to false: SetHidden does nothing when the value does not change); its name and Talk prompt stay |
-| `live_call` | An UnrealScript function on one object through `ProcessEvent`, args as JSON; return and out values | yes: `BioGlobalVariableTable.GetInt 46` = 272, `SetBool 8440` true then false |
-| `live_describe` | A class's chain, typed properties with their declaring class, function signatures | yes: `BioGlobalVariableTable`, `BioPawn` |
-| `live_console` | A console command (player chain, cheats included) and what it printed or logged, read from the DebugLogger log between the command and a flushing `getall` | yes: `getall BioPawn bTickIsDisabled`, `DumpPlotManagerValueByIndex 47 int` |
-| `live_watch` | `ProcessEvent` calls of functions for N seconds: time, object, class, params, Kismet input pin; overrides match (`Actor.Tick` catches `BioPawn.Tick`) | yes: `Engine.Actor.Tick` |
-| `live_place` | Moves an actor, or spawns a copy of one (`Actor.Spawn` with it as the template), in front of Shepard facing her, where she stands, or at coordinates; `yaw`, `turn`, `raise`. Props land on the floor (Shepard's Z − 94), pawns at her height. A copy goes into the map's level (`Spawn` called on the player controller). A StaticMeshActor can't spawn: a BioInert copy shows its mesh, materials and scale, lit by its light environment (the copy of a built prop lit by prop lights is set back to it). Pawn copies are refused (the engine crashed) | yes: a freighter crate (stand-in) next to an NPC; a VI terminal copy; Shepard teleported (the camera follows the controller's `Rotation`, set apart) |
-| `live_remove` | Destroys an actor through Kismet's Destroy handler (`OnDestroy` with `Default__SeqAct_Destroy`); `bNoDelete` level actors are shut down (hidden, no collision), `bStatic` ones hidden | yes: spawned copies removed, no script warning |
-| `live_editor` | The in-game editor's state (F8): open, free cam, camera, selection (tag, yaw, spawned, why Delete refuses it), edits and unsaved count, status line, meshes in memory, last click, projection check against `Canvas.Project`, hooks, threads, input counters; no game-thread round trip | yes: open, free cam, crate selected, projection error 0.1 to 0.6 px, 10,587 DirectInput reads held back |
-| `live_status` | One cheap look for unattended tests (MeleBridge 3): the map and its `BioWorldInfo` (`begunPlay`, `bPlayersOnly`, `pausedByFocusLoss`), the map's live player controller and its pawn, streaming levels still on their way (a load or unload pending, not loaded, visibility changing; the first 5 names), the loading movie (`SFXLoadMovieManager`: playing, state, in load; `null` when there is none; in load is `null` on LE2 and LE3), the squad screen (`partySelectOpen`; when open, its panel, handler and the movie's `nMembersAvailable`; `null` on LE3), and the `keep_ticking` switch with its counters. A part it can't read is `null`, with why in `notes`. Times out while a map loads | LE1 yes: `scenario.py` waits on it at every step. LE2, LE3: yes, once each on a Normandy save |
-| `live_keep_ticking` | Test switch (MeleBridge 3), off at every game start: while on, `BioWorldInfo.Tick` never takes its focus-loss pause, so the world and Kismet run with the game in the background. LE1 raises `m_fNoBrowserWheelTimer` (`CanPause()` is then false) for the length of each `Tick` only; LE2 and LE3 hold `m_bAllowBrowserWheel` off for each `Tick` instead. `bPlayersOnly` is cleared only with `m_bPausedByFocusLoss`, so menus, the squad screen, photo mode and F8 still pause. `on: true` also ends a focus pause already in place; `on: false` and a read (no `on`) answer while the game loads | LE1 yes: the world and Kismet ran with LE1 in the background through a suite of about 40 checks. LE2, LE3: yes, once each with the game in the background: on keeps it running, off pauses it, on again ends the pause |
-| `editor_import` | Merges the in-game editor's session file (F8 → Save: `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json`, beside `levels.json` (`MELE_LEVELS_JSON` moves both), version 1 to 3) into the level YAML by tag, keeping comments. A `props` entry gets the location, rotation (`yaw` while upright and the entry has no `rotation`, else `rotation` in place of `yaw`), `scale` and `scale3d` the editor changed; `npcs`/`usables` a location and a yaw (a pitch, roll or scale is noted, not written). Field by field against the session entry's `base` (what the YAML held when the editor first changed the actor): the YAML still has the base's value → the editor's is written; the editor still has it → the YAML's stays (and goes into the session entry); both changed → a `conflict`, which `onConflict` settles: `refuse` (default: the actor is left out and listed with base, YAML and editor values), `editor` or `yaml`. Locations are equal within 0.01 (2 decimals), rotations as orientations (each axis within 0.02°: (180, 0, 0) is (0, 180, 180), 200° is −160°), scales within 0.001. A version 1 entry, or a spawn never imported, has no base: the editor's values win, as in phase 1. A mesh spawned in the editor gets a `props` entry with `mesh` (and `propTemplate` if missing), with `rotation`, `scale` and `scale3d` when not upright or not 1; a deleted prop gets `removed: true` (the build hides it; `npcs`/`usables` are only noted, not removed), an undone delete `removed: false`, both merged against the base like the other fields (`removed` changed by hand since the last import is kept). A spawn an import already put in a YAML file is never added again to a file without its tag (removed by hand, or in another level file of the map); on the map's own file it leaves the session when unchanged since. Every entry an import drops is kept in `<session>.dropped.json` beside the session (when, the YAML file, why): a YAML reverted alone reads as removed by hand, and copied back into `actors` with `"base": null` and no `imported`, the entry is added again. To undo an import, restore the session file together with the YAML (or try options with `keepSession`). A vanilla actor of a file the YAML streams (an actor of a fork counts as its vanilla file's) gets `vanilla.<file>.<actor>`, merged the same way, a value the entry leaves out being the file's; a new one holds the fields the editor changed, with the mesh (an effect: `Emitter FX_ME1_dust_card_METR`) and their vanilla values in a comment on its key line (merged three-way against the file's values when the session's base is not the file's: an entry deleted by hand since), a deleted one `removed: true`; shown again, it loses `removed`, and the whole entry when that was all it had. Refused with the reason: what `level_build` refuses (a delete included), and a room shell (never an effect). A vanilla actor in another map's session is skipped (that map's YAML ships it). One imported before whose entry is gone was removed by hand: dropped (to the dropped file) when unchanged since, else skipped. A vanilla actor of a file the YAML doesn't stream is dev-only: skipped, MeleBridge re-applies it. A light of a light collection (an entry with a `vanilla` light block, found by its component path) gets `vanilla.<file>.<collection>.<light>`, merged three-way per field as a `lights` entry is (`location`, `radius`, `brightness`, `color`, `falloff`, `enabled`; deleted = `enabled: false`), a value the entry leaves out being the file's (through its archetypes); a light of the map's `characterLights` copy goes to the key of its source file (`BIOA_FRE31_00_DSG.StaticLightCollectionActor_68.PointLight_2_LC`). A new one's comment gives its light type and the vanilla values it changes (`U door light (lights the 8 doors); vanilla location (352.55, -11923.24, -222.2), brightness 0.6`). Sun and sky lights are refused. Each entry applied is marked in the session (`base` = what the YAML holds now, `imported: { before }` = what the installed level still shows), so MeleBridge re-applies it until the install shows it, then drops it; a spawn deleted before any import is dropped; `keepSession` leaves the file untouched; a session the editor saves during the import is merged again. Importing again changes nothing. A level the game loads into another map (sideloaded, the Normandy) uses the newest session with an actor of it, or with an entry whose tag the file has (a mesh imported into it before, an NPC light) or that is a light of one of its NPCs; with none, the error names the sessions with spawned meshes. Spawned meshes go into the map's own file, or the one given `takeSpawned: true`. Lights take their own path: a light spawned in the editor gets a `lights` entry named by its tag (`kind`, `location`, `radius`, `brightness`, `color`, `falloff`; `enabled: false` when switched off), taken as a spawned mesh is; a light of a `lights` entry is merged three-way per field (`location`, `kind`, `radius` within 0.01, `brightness` and `falloff` within 0.001, `color`, `enabled`); a deleted one gets `enabled: false` (a light is switched off, never removed), and one deleted before any import leaves nothing. NPC lights (an entry with an `npc` block: its NPC's tag and its offset `[forward, right, up]`; version 3) go to the file whose `npcs` has that NPC, whatever `takeSpawned` says (on the Normandy the editor spawns them in `BIOA_NOR00`), after the NPCs' own entries (whose new pose they follow): a light of an item of `npcs.<name>.lights` is merged three-way per field (`offset` each axis within 0.02, written to 2 decimals; `radius`, `brightness`, `color`, `falloff`, `enabled`; a key the item leaves out is the template's: white, 2, true), only the changed fields written; a light spawned in the editor gets a new item with every field (`enabled: false` when off), and the NPC's `lights:` with its comment when it has none. An entry whose NPC is not the item's owner is refused ("mymod_npc_02_light_ff9xa_1 belongs to npcs.officer in the YAML, not mymod_npc_01: not imported"); an item removed by hand is never added back (dropped when unchanged since); an entry of an NPC light without its `npc` block (an older MeleBridge) is skipped and dropped. The session stays version 3 when it holds NPC (or SLCA) lights; Mark never lowers its version. Then `level_build`. Offline | yes: freighter (phase 1): a spawned crate `added`, `mymod_prop_crate` `removed`; built, installed, both as placed in game. Phase 3 (three-way, rotation, scale, marking): on test copies only |
-| `live_save` | Writes a live actor's location and rotation into the level YAML entry with its tag (`npcs`, `usables`: a yaw; `props`: a yaw while upright, else `rotation` in place of `yaw`, never both; `lights`: the location only), keeping comments; with none, adds a `props` entry from its template (and `propTemplate` for a static mesh); then `level_build` | yes: the crate: YAML entry, built, installed, there and lit after a restart; an NPC's entry found by tag (no change) |
+| `pkg_info` | Sums up a package: counts, top export classes, embedded LE1 talk files. | All three |
+| `pkg_search` | Lists exports by exact class and path substring. | All three |
+| `pkg_find_name` | Finds loaded packages whose name table holds a substring. | All three |
+| `pkg_to_text` | Writes export properties as text LEC compiles back. `roundTrip` proves it. | All three |
+| `export_get` | Prints an export's properties as a tree, with references resolved. | All three |
+| `export_refs` | Lists exports of the same package that reference an export. | All three |
+| `export_diff` | Compares two exports property by property, such as a clone and its source. | All three |
+| `export_decompile` | Prints the UnrealScript of a Class, State, Function or ScriptStruct export. | All three |
 
-Requirements: `MeleBridge.asi` (`tools/mele-bridge/build.sh --install`, game closed). `game_plot` uses it when it is there.
+### Package writing
 
-### Prop catalog
+Each of these refuses the game install. The `export_*` tools back the file up first, and `level_new` refuses an existing
+file. Two loaded files with the same path share one object, so rename a copied forced export.
 
-The in-game editor's prop menu ([in-game editor design §3.5](../../docs/design/in-game-editor.md#35-prop-catalog)). These
-tools work offline: the game need not run.
-
-| Tool | What it does | Tested on LE1 |
+| Tool | Purpose | Games |
 |---|---|---|
-| `catalog_index` | Every StaticMesh of the files LE1 loads (LE1CP's copy wins; the catalog's own `DLC_MOD_MeleCatalog` and your mods' DLC folders left out: `MELE_OWN_DLC`, else the ones `levels.json` says `level_build` built into), one row per path: the smallest file that has it (the copy source), bounds size, triangles, how many StaticMeshComponents of the game's levels place it, and what the curation rules (`CatalogRules`) make of it: `apl`, `apl-large`, `levelprop` are the default list by category; `arch-*`, `excluded-*`, `unknown` are left out. Stats; with `search`, `category` or `curatedOnly`, the meshes. Reused while no game file changes | offline-tested: 5,588 files, 956 with meshes, 13,517 mesh exports, 5,226 unique, 354 curated (Crates 32, Furniture 53, Medical 9, Consoles 25, Lights 60, Industrial 67, Debris 46, Alien 19, Small items 10, Signs 15, Plants 13, Other 5) in 2.6 s, 0 errors; same set as the catalog study |
-| `catalog_build` | `MeleCatalog_Core.pcc`: each mesh copied from its source file (one `PackageCache`) under a group per category, not forced, so the bridge loads `MeleCatalog_Core.<Group>.<Name>` (a name taken twice gets `_2`); materials and textures keep their vanilla paths. Meshes whose material has no shader in the game (`GetBrokenMaterials`) are left out. Written to the dev mod `Mele Catalog` in M3's library (`moddesc.ini`, `AutoLoad.ini` mount 7420 when missing; the old package backed up). Then `catalog.json` (format 1) and 128×128 thumbnails (LOD0, diffuse texture with the material's tint, simple light; translucent and additive elements not drawn; masked ones cut where their opacity mask is under the clip value when it can be traced: the diffuse alpha of foliage and grates, the APL masters' `OpacityMask` texture, else drawn solid), both swapped in whole, in `%LOCALAPPDATA%\MeleBridge\LE1\catalog`. `meshes` adds paths; `thumbs=false` or `package=false` skip a part | offline-tested: 354 entries from 200 files in 11.8 s; package 24.7 MB, 2,828 exports, 73 imports (`BIOC_Materials`, `Engine`, `SFXGame`, `SFXVehicleResources`), 0 unresolved, 0 broken materials; 345 thumbnails (3.8 MB), 9 meshes without one (all see-through: glass, holograms, sign text); `catalog.json` 148 KB. Not yet loaded in game |
+| `export_set` | Sets one leaf property by path, then saves. | All three |
+| `export_set_batch` | Sets several leaf properties of one package, validated together, with one save. | All three |
+| `export_clone` | Duplicates an export and its children. A level actor joins the `Actors` list. | All three |
+| `export_rename` | Renames an export, with its children. | All three |
+| `export_import` | Copies an export from another package with everything it references. | All three |
+| `level_new` | Creates an empty level package from LEC's template for that game. | All three |
 
-### Saves (`save_*`)
+### Script
 
-Career saves of LE2 and LE3 in `Documents\BioWare\Mass Effect Legendary Edition\Save\ME<n>`. Trilogy Save Editor 2.2.1 has no command line (`trilogy-save-editor.exe [SAVE]` opens the file in its window), so these tools read and write the files themselves. LE1 saves have another layout and are refused. Layout: [formats §7](../../docs/formats.md#7-le2-and-le3-saves).
+`script_compile` saves only on success, and it refuses the game install even on `dryRun`. A core file such as `SFXGame`
+or `Startup*` compiles on the copy. A warning then says that shipping it needs a merge mod.
 
-| Tool | What it does |
-|---|---|
-| `save_list` | A game's careers (saves, default and morph heads, unreadable files), or one career's saves (player, class, hours, map, the save's own time, head). A damaged file is listed with its error |
-| `save_read` | One save: player, class, map, difficulty, face code, head, table sizes, DLC, every field `save_set` writes, and any plot value asked for (`bool:<id>`, `int:<id>`, `float:<id>`). LE3 holds no entry for an int or float never set: the value comes back null and the game reads 0 |
-| `save_head_default` | One save, or every `.pcsav` of a career, takes the game's default head for Shepard's sex: `bHasMorphHead` off, morph gone, checksum redone, every other byte kept. `dryRun` reports only. A file that fails is reported and left as it is. Same bytes as Trilogy Save Editor's head removal, checked on one LE3 save |
-| `save_set` | Writes values in one save, all or none: `level`, `xp`, `talentPoints`, `credits`, `medigel`, `eezo`, `iridium`, `palladium`, `platinum`, `probes`, `fuel` (LE3 also `health`, `grenades`), or a plot value. Only the value changes: no plot transition, consequence or journal update runs. An id past the save's table is refused, except LE3 ints and floats, which gain a pair. Read back through a separate parser, not tested in game |
+| Tool | Purpose | Games |
+|---|---|---|
+| `script_compile` | Compiles UnrealScript into a Function, State or Class export of a mod's package copy. | All three |
+| `xgame_decompile` | Decompiles one script object in several games and diffs them. | All three, through `games` |
 
-Each file is read field by field to its checksum, so a layout misread fails instead of writing: tested on all 263 `.pcsav` of 6 careers here, and damaged copies (a flipped byte, a cut file, a broken layout under a valid checksum) are refused. An edit parses its result again, copies the file to `%LOCALAPPDATA%\mele-mcp\backups\saves\<game>\<career>\<time>\` (`MELE_BACKUP_DIR`), checks that the file has not changed since it was read, moves the new bytes over it, keeps its file times and reads it back. `.bak` files, which Trilogy Save Editor leaves beside the saves, are not touched. Both write tools refuse while that game runs unless `allowRunning`: the game reads a save only when it loads it, but its next save writes what it holds in memory. In game: LE2 loaded a default-head save and the player pawn's `MorphHead` was `None`.
+### Text
 
-### Write rule
+A strref is the numeric id of a string. On LE2 and LE3, `tlk_set` takes a full path and creates a missing file.
 
-The write tools (`export_set*`, `export_clone`, `export_import`, `export_rename`, `tlk_set`, `conv_*` writers, `facefx_copy_lines`, `kismet_*`, `level_new`, `plot_map_new`, `plot_event_set`, `quest_set`, `plot_build`, `level_build`, `mod_build`, `catalog_build`, `script_compile`, `cnd_set`, `config_set`, `mergemod_build`) back the package up (and `AutoLoad.ini`, which `plot_build` edits) to `%LOCALAPPDATA%\mele-mcp\backups` (`MELE_BACKUP_DIR`) and refuse any file inside the game install. A file name can resolve to the base game or to another mod's installed copy (LE1CP overrides many level files). Edit the mod's source in the M3 library, then install it with `mod_install`, which runs M3. `dlc_new` writes only new files and `exe_dump` and `exe_dump_pe` only their own, so they keep no backup, and they refuse the game install too. `save_head_default` and `save_set` write saves in Documents, with the backups described under [Saves](#saves-save_), and refuse the game install as well.
+| Tool | Purpose | Games |
+|---|---|---|
+| `tlk_get` | Reads strings: LE1 from `BioTlkFile` exports, LE2 and LE3 from one loose `.tlk`. | All three |
+| `tlk_set` | Adds or replaces strings in the same two forms, with a backup. | All three |
+
+### Conversations
+
+LE2 and LE3 keep conversations only in `_LOC_<LANG>` packages. The `FXA_<strref>` line names of the FaceFX tools are
+LE1's naming.
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `conv_read` | Reads a conversation as a text graph: nodes, wheels, plot gates, VO tracks. | All three |
+| `conv_find` | Searches every loaded conversation by speaker, text, plot id or name. | All three |
+| `conv_audio` | Lists lines with no voice yet, following strref, FaceFX, cue and ISACT sound. | LE1 only |
+| `conv_add_node` | Adds a line copied from a template node, with node data and silent lip sync. | LE1 only |
+| `conv_link` | Adds or removes a start, wheel or reply link. | LE1 only |
+| `conv_set_ids` | Gives a copied conversation a new `m_nResRefID` and new node ids. | LE1 only |
+| `conv_build` | Builds a conversation from a YAML file. | LE1 only |
+| `facefx_get` | Lists the lip-sync lines of a `FaceFXAnimSet`. | Accepted |
+| `facefx_copy_lines` | Copies lip-sync lines under new names, silent by default, with a backup. | Accepted |
+
+### Plot and journal
+
+LE1 and LE2 conditionals are `F<id>` functions of `BioAutoConditionals`. Read them with `export_decompile` and edit them
+with `script_compile`.
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `plot_map_get` | Lists state events of a `BioStateEventMap` or `BioConsequenceMap`. | All three |
+| `plot_map_new` | Creates a DLC plot package with empty maps, and returns its `AutoLoad.ini` lines. | LE1 only |
+| `plot_event_set` | Adds, replaces or removes one state event. | LE1 only |
+| `plot_build` | Builds a DLC plot package from a YAML file, with journal text. | LE1 only |
+| `quest_map_get` | Reads a journal map. LE2 and LE3 also read the codex map, `DataCodexMap`. | All three |
+| `quest_set` | Adds, replaces or removes one journal quest and its evaluations. | LE1 only |
+| `id_alloc` | Finds free plot, quest or string ids, or checks given ones, and names each user. | LE1 only |
+| `cnd_get` | Reads a `.cnd` conditionals file: its ids, one entry, or all of them. | LE3 only |
+| `cnd_set` | Compiles one conditional into a mod's `.cnd`, with a backup when the file exists. | LE3 only |
+
+### Kismet
+
+Kismet is the engine's visual scripting system, stored in packages as sequences.
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `kismet_read` | Reads a sequence as text in flow order. With the Kismet Logger's log, it marks fired ops. | All three |
+| `kismet_add` | Creates a sequence object with class defaults, and returns its link names. | All three |
+| `kismet_link` | Links output to input, variable slot to variable, or event slot to event. | All three |
+
+### Builds and mods
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `level_build` | Builds a level from a YAML file: NPCs, usables, props, lights, vanilla actor edits. | LE1 only |
+| `mod_build` | Builds every YAML file at the top of a mod folder, in order. | LE1 only, through its builders |
+| `mod_check` | Checks a mod's built files in M3's library before an install. | LE1 only |
+| `mod_install` | Installs a mod through M3, then compares its `[CUSTOMDLC]` files with the installed copies. | All three |
+| `dlc_new` | Starts a mod in an empty folder: `moddesc.ini`, DLC folder, `Mount.dlc`, `.tlk` files, config. | LE2, LE3 |
+| `mergemod_build` | Builds an M3 merge mod (`.m3m`), the route to patch core files, and lists it in `moddesc.ini`. | All three |
+
+- On LE1, M3's DLC Mod Starter Kit starts a mod, and `mod_build` fills it. `dlc_new` starts an LE2 or LE3 mod and
+  refuses LE1.
+- `mod_install` takes a `moddesc.ini`, a mod folder or a name in M3's library, and refuses while the game runs.
+- A merge mod's install patches a core file in place, and merges stack on the file on disk. Only M3's Restore, on that
+  file's row, undoes them.
+
+### Config
+
+The native form is `ConfigDelta-*.m3cd` on LE1, the asset's loose ini on LE2, and `Default_<DLC>.bin` on LE3.
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `config_get` | Reads config file by file in load order, with the replayed effective value of a key. | All three |
+| `config_set` | Writes entries into a mod's DLC folder in native form, with a backup per file. | All three |
+
+### GFx and native
+
+The game exes keep their code encrypted on disk, which is why `exe_dump` reads the running process. Dumps are game code,
+so keep them out of any repo.
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `gfx_scan` | Reads a GFx movie in a package or a loose file: `movies`, `tags`, `images` or `as2`. | All three |
+| `exe_dump` | Copies the running game's mapped exe image to a cache per game. | Accepted |
+| `exe_dump_pe` | Writes a dump as a PE file that a disassembler can open. | Accepted |
+| `native_query` | Queries a dump: disassembly, callers, xrefs, strings, patterns, vtables, names. | Accepted |
+
+### Prop catalog and editor
+
+These tools serve the in-game editor, which exists only in the LE1 build of MeleBridge. See the
+[editor guide](../../docs/editor-guide.md) and the [editor design](../../docs/design/in-game-editor.md).
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `catalog_index` | Indexes every StaticMesh LE1 loads, with its curation category. | LE1 only |
+| `catalog_build` | Builds `MeleCatalog_Core.pcc`, `catalog.json` and thumbnails for the editor's prop menu. | LE1 only |
+| `editor_import` | Merges an editor session into a level YAML by tag, then builds the level. | LE1 only |
+
+### Saves
+
+These tools use `.pcsav` files under `Documents\BioWare\Mass Effect Legendary Edition\Save\ME<n>`, and all four refuse
+LE1, whose saves use another layout. The two write tools back up first, and they refuse while that game runs unless you
+pass `allowRunning`. The save file layout is described in [docs/formats.md](../../docs/formats.md).
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `save_list` | Lists a game's careers, or one career's saves. A damaged file shows its error. | LE2, LE3 |
+| `save_read` | Reads one save's fields, plus any plot value asked for. | LE2, LE3 |
+| `save_head_default` | Gives one save, or a whole career, the game's default head. | LE2, LE3 |
+| `save_set` | Writes fields or plot values in one save, all or none. No plot transition runs. | LE2, LE3 |
+
+### Live link (LEX Interop)
+
+Install the LEX Interop ASI from LEX (Live Level Editor, requirements), then restart the game. Keep LEX closed while you
+use these tools. Replies go to the first window titled `Legendary Explorer`, and the server owns a hidden one.
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `game_status` | Checks the game, the interop pipe and a reply round trip. | Accepted |
+| `game_console` | Sends a console command. No output comes back. | Accepted |
+| `game_get` | Reads a property of every live object of a class, with `getall`. Needs DebugLogger too. | Accepted |
+| `game_remote_event` | Fires every enabled Kismet remote event with that name. | Accepted |
+| `game_stream_level` | Streams a level package `in`, `out`, or `only` (loaded but not visible). | Accepted |
+| `game_player_location` | Gives Shepard's position and rotation, as of her last move. | Accepted |
+| `game_actors` | Lists the actors of every visible level, with filters. | Accepted |
+| `game_actor_get` | Reads one actor's live location, rotation, draw scale and hidden flag. | Accepted |
+| `game_actor_set` | Moves, turns or hides one actor live, then reads it back. No file changes. | Accepted |
+| `game_hot_reload` | Swaps a streamed level for a package file, as `<level>_LIVE<hhmmss>`. | Accepted |
+
+- The ASI serves precached bytes only for names not on disk, which explains the `_LIVE` name.
+- The hot-reload bytes must be uncompressed, or the load never finishes.
+- On LE1 a streaming refresh unloads that copy, and the LE1 Community Patch's (LE1CP) Sideloader restores its own levels.
+- On LE1, never fire LE1CP's NPC framework events by hand (`Live_NPC_*`, `Poll_NPC_*`), since they can hang the game.
+
+### Logs and capture
+
+The two log tools read files in `Binaries\Win64\Logs`, so they use no pipe, but they need their ASI on that game.
+The optional ASIs are covered in [getting started](../../docs/getting-started.md).
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `game_log` | Reads the DebugLogger ASI's log, with map, error and text filters. | All three |
+| `game_kismet_log` | Reads the Kismet Logger ASI's trace of activated sequence ops. | All three |
+| `game_screenshot` | Saves a PNG of the game window, under `%LOCALAPPDATA%\mele-mcp\screenshots` by default. | All three |
+
+### Running the game
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `game_plot` | Reads, or reads then sets, plot values in the running game. No transition runs. | LE1 only |
+| `game_cycle` | Runs the test loop: close, check, install, boot, load, commands, wait for the map, screenshot. | All three |
+| `game_close` | Closes the game without saving. With `force` it kills the game after 30 s. | All three |
+| `npc_place` | Puts a YAML NPC where Shepard stands, edits the YAML, builds the level, moves her live. | LE1 only |
+
+`game_cycle` also closes the running game without saving. It reads progress from the DebugLogger log on every game, and
+its other steps differ:
+
+| Step | LE1 | LE2, LE3 |
+|---|---|---|
+| Console route | LEX Interop | MeleBridge |
+| Load from the menu | `loadSlot` n, through `BioLoadGame <n>`: `BioSaveGame<n>.sav`, made once in game with the console's `BioSaveGame <n>` | `loadLatest`, the latest save only, through `QuickLoad` |
+| `mod_check` before the install | Yes, unless `check` is false | Skipped |
+
+On LE1 a career save is not a slot, so it goes through `commands`:
+`nextframedefer loadgame <Career>_QuickSave DevId=-1`, with `waitForMap`. `game_plot` uses MeleBridge when it is there,
+or else LEX Interop's cheat execs plus the DebugLogger log.
+
+### Live objects (MeleBridge)
+
+Requests run on the game thread, and replies come back on the same pipe, so LEX may stay open. Install each game's ASI
+with `tools/mele-bridge/build.sh --game LE<n> --install`, game closed.
+
+| Tool | Purpose | Games |
+|---|---|---|
+| `live_find` | Lists live objects by class, name and path. | All three |
+| `live_get` | Reads one object's properties, all of them or one by path. | All three |
+| `live_set` | Sets one property in game memory. No file changes. | All three |
+| `live_call` | Calls an UnrealScript function through `ProcessEvent`, with return and out values. | All three |
+| `live_console` | Runs a console command. Its output comes from the DebugLogger log, so it needs that ASI. | All three |
+| `live_describe` | Shows a class's chain, typed properties and function signatures. | All three |
+| `live_watch` | Records `ProcessEvent` calls of named functions for some seconds. | All three |
+| `live_status` | Takes one cheap look: map, world flags, player, streaming, loading movie, squad screen. | All three |
+| `live_keep_ticking` | Test switch: keeps the world and Kismet running with the game in the background. | All three |
+| `live_place` | Moves an actor, or spawns a copy, near Shepard or at coordinates, until the map reloads. | Accepted |
+| `live_remove` | Destroys a live actor, or hides one that cannot be destroyed, until the map reloads. | Accepted |
+| `live_editor` | Reports the in-game editor's state, without using the game thread. | LE1 only |
+| `live_save` | Writes a live actor's spot into a level YAML, then builds the level. | LE1 only |
+
+- `live_set` runs no setter, so attach-time state stays. Use `live_call` with a function such as `SetHidden` instead.
+  `SetHidden` does nothing when `bHidden` already holds the new value, so first set back a field you changed with
+  `live_set`.
+- `live_place` cannot copy pawns, since the engine crashes.
+- `live_status` times out while a map loads. Its `inLoad` is null on LE2 and LE3, and its squad screen is null on LE3.
 
 ## YAML builds
 
-`level_build`, `conv_build` and `plot_build` each build one YAML file; `mod_build` builds every YAML file of a folder in
-order (plot files, levels, conversations, then the levels that were missing a conversation). A level file holds the
-level (its streamed vanilla files, post-process, start points, squad), its NPCs, usables, props and lights, and changes
-to the vanilla actors and lights it streams. A conversation file holds a conversation copied from a template, with new
-text and lines. A plot file holds transitions, consequences and journal quests.
+`level_build`, `conv_build`, `plot_build` and `mod_build` turn YAML files into LE1 mod files. Every key, default and rule
+is in [docs/yaml-reference.md](../../docs/yaml-reference.md), and [examples/README.md](../../examples/README.md) has a
+small mod that builds.
 
-- A file can start with `requires: mele-mcp >= X.Y.Z`. An older server checks it first and builds nothing.
-- `package` is a full path, a path from the DLC folder on (`DLC_MOD_MyMod/CookedPCConsole/BIOA_MYM01.pcc`, found beside
-  the YAML or in a mod of M3's library), or a file name. A missing level or plot package is created, unless `package` is a bare file name.
-- `mod_build out=<folder>` builds into that folder instead and changes nothing outside it, backups aside. `levels.json`
-  is left alone.
-- Only the values that differ are written, so a second build changes nothing. Errors name the YAML line.
+## Write rule
 
-Every key, its default and what each build writes: [YAML reference](../../docs/yaml-reference.md). A mod that builds:
-[examples/hello-npc](../../examples/hello-npc/).
+Package writes go through `PackageWriter.Edit`, which guards, changes, backs up and saves. The guard refuses any file
+inside the Legendary Edition folder or the game path. It compares spellings, then what the path is on disk, so shares,
+junctions and volume names are caught too. It does not see a hard link to a game file.
+
+A file name can resolve to another mod's installed copy. Edit the mod's copy in M3's library, then run `mod_install`.
+Backups go to `%LOCALAPPDATA%\mele-mcp\backups` as `yyyyMMdd-HHmmss-fff_<file>`, and `MELE_BACKUP_DIR` moves them.
+
+These writes fall outside that rule, and [getting started](../../docs/getting-started.md) lists every other location:
+
+- `editor_import`, `npc_place` and `live_save` edit the level YAML in place, with no backup and no guard on the YAML.
+- `game_screenshot` writes to its `path` parameter with no guard.
+- `level_build` makes no backup of the forks it writes beside a level, because each is rebuilt from the vanilla file.
 
 ## Layout
 
-| Path | Content |
+All paths in this table are relative to `tools/mele-mcp`.
+
+| Path | Holds |
 |---|---|
-| `src/MeleMcp.Core/` | Facade over LEC (`LecHost` init, `GamePaths`, `PackageInspector`, `ExportInspector`, `NameFinder`, `ScriptDecompiler`, `LevelCreator`, `TalkFiles`, `ConversationReader`/`ConversationEditor`, `FaceFxSets`, `KismetEditor`; prop catalog: `CatalogIndex`, `CatalogRules`, `CatalogBuilder`, `ThumbnailRenderer`, `MaterialDiffuse`). Writes go through `PackageWriter.Edit` (guard, mutate, backup, save). Live link: `GameBridge` (pipe + reply window), `GameLink` (commands), `LiveBridge` (MeleBridge client). No MCP dependency. |
-| `src/MeleMcp/` | stdio MCP host (`Program.cs`) and tool classes (`Tools/`) |
-| `external/LegendaryExplorer/` | LEX submodule, pinned at tag `6.5.0.6522` (commit `43bf73a`) |
-| `scripts/deploy.sh` | From WSL: stop the servers that run `MELE_OUT`'s DLL → publish to `MELE_OUT` (default `%LOCALAPPDATA%\mele-mcp\server`) → smoke test |
-| `scripts/stop-server.ps1` | Stop the servers of one output folder (`-OutDir`; `-ListOnly` lists them) |
-| `scripts/mcp_smoke.py` | JSON-RPC client: initialize, tools/list, `le_status`, `pkg_info` on a package, and `pkg_info` on a missing file, which must fail |
-| `scripts/mcp_call.py` | Call one tool from the shell with a fresh server: `mcp_call.py export_get '{"package":"...","export":"35"}'`; passes every `MELE_*` setting on, e.g. `MELE_LEVELS_JSON` and `MELE_BACKUP_DIR` (tests on copies) |
-| `scripts/scenario.py` | Runs in-game test suites (YAML or JSON) unattended against a running LE1 through one server, with save and plot guards, and writes a report with screenshots and log slices: [docs/scenarios.md](../../docs/scenarios.md). Used in game on a suite of about 40 checks |
-| `build.env.example` | The settings `deploy.sh`, `mcp_call.py` and `mcp_smoke.py` read; copy it to `build.env` (not in git) |
+| `src/MeleMcp/Program.cs` | The stdio host. Logs go to stderr, because stdout is reserved for JSON-RPC. |
+| `src/MeleMcp/Tools/` | One `*Tools.cs` class per area, each tool a thin wrapper over Core. |
+| `src/MeleMcp.Core/` | The tool logic. `LecHost` starts LEC, `GameBridge` and `LiveBridge` hold the two pipes. |
+| `external/LegendaryExplorer/` | The LEC submodule. Fetch it with `git submodule update --init`. |
+| `global.json` | Pins the .NET SDK to 10.0.402, with later 10.0.x accepted. |
+| `build.env.example` | Template for the ignored `build.env`, which `deploy.sh` and the Python scripts read. |
 
-## Setup
+## Scripts
 
-1. Install the .NET SDK that `global.json` pins (10.0.402, or a later 10.0.x) to build, and the .NET 8 runtime (x64) to
-   run the server, which targets `net8.0-windows`.
-2. `git submodule update --init`
-3. From WSL: copy `build.env.example` to `build.env` and set what differs on your machine, then `./scripts/deploy.sh`.
-   On Windows: `dotnet publish src\MeleMcp\MeleMcp.csproj -c Release -o <folder>`.
-4. Register the server in your MCP client, e.g. `.mcp.json` from the repo's [`.mcp.json.example`](../../.mcp.json.example). Approve it when Claude
-   Code starts.
+Run these scripts from WSL, inside the `tools/mele-mcp` folder. A variable in the environment wins over `build.env`.
 
-[Getting started](../../docs/getting-started.md) has each step, every setting and what to do when `le_status` fails.
+| Script | What it does |
+|---|---|
+| `scripts/deploy.sh [package]` | Stops the servers of `MELE_OUT`, publishes there, then runs the smoke test on that package. |
+| `scripts/stop-server.ps1 -OutDir <folder> [-ListOnly]` | Stops the servers of one folder, and others keep running. `deploy.sh` runs it first. |
+| `scripts/mcp_call.py <tool> ['<json>']` | Calls one tool with a fresh server. It exits 1 on a tool error. |
+| `scripts/mcp_smoke.py [package]` | Runs `initialize`, `tools/list`, `le_status`, `pkg_info`, and `pkg_info` on a missing file, which must fail. |
+| `scripts/scenario.py` | Runs in-game test suites, LE1 only: see [docs/scenarios.md](../../docs/scenarios.md). |
+
+```sh
+./scripts/deploy.sh
+python3 -I scripts/mcp_call.py pkg_info '{"package":"BioP_Nor.pcc","game":"LE3"}'
+```
+
+`MELE_DOTNET` picks the Windows `dotnet.exe`, and `MELE_DLL` picks the server the Python scripts run. `MELE_OUT` is the
+publish folder, by default `%LOCALAPPDATA%\mele-mcp\server`. The full list of settings is in
+[getting started](../../docs/getting-started.md).
+
+The server has its own check with no MCP client: `MeleMcp.exe --selftest [package]`. It starts LEC and opens an LE1
+package, `BIOA_CRD00.pcc` by default.
 
 ## Dev loop
 
-1. Edit code.
-2. `./scripts/deploy.sh` (about 5 s; optional argument: a package for the `pkg_info` smoke call).
-3. In Claude Code: `/mcp` → `mele` → Reconnect (the deploy stopped the old process).
+1. Edit the code. A new tool is a `[McpServerTool]` method in a `[McpServerToolType]` class under `src/MeleMcp/Tools/`.
+2. Run `./scripts/deploy.sh`.
+3. In Claude Code, run `/mcp`, pick `mele` and reconnect, because the deploy stopped the old process.
 
-## Known LEC 6.5 traps for upcoming tools
+To test a second copy beside the one in use, set `MELE_OUT` to another Windows folder for `deploy.sh` and `mcp_call.py`.
 
-- `AutoloadIni` round-trips lose `PlotManagerConsequenceMap<n>`, `DotU<n>` and `GlobalPackages<n>`. An LE1 `dlc_new` needs our own `AutoLoad.ini` reader/writer first: today it refuses LE1.
-- LEC treats `DLC_MOD*` as a mod folder; the game's TOC comes from the AutoTOC ASI (installed: v2, `DLC_` folders) and the Autoload ASI reads only `DLC_MOD_` folders, both case-sensitive. `le_find_file` follows the game; the other tools still resolve names through LEC.
-- The write guard (`PackageWriter.EnsureWritable`, all write tools) compares canonical paths (`GamePaths.Canonical`: no `\\?\` prefix, `\\wsl$\<distro>\mnt\c\…` read as `C:\…`) and refuses the whole Legendary Edition folder, not only `Game\ME1-3`. `PhysicalPaths` then compares what the path is on disk, by final path and by volume and file id, so `\\localhost\D$\…`, a junction and `\\?\Volume{guid}\…` are refused too. A hard link to a game file is not seen.
-- `MELoadedFiles.GetFilesLoadedInGame` throws `DirectoryNotFoundException` when a `DLC_MOD_` folder with an `AutoLoad.ini` has no `CookedPCConsole` (an ini-only mod), so every tool given a file name (not a path) fails. `le_find_file` reports it as a folder warning.
-- File lookups are cached (`GamePaths.ResolvePackage`). Any tool that installs or copies files must call `MELoadedFiles.InvalidateCaches()`.
-- `CommonStructs.LinearColorProp(r, g, b, a)` writes `r` into all four channels. Build the `LinearColor` struct by hand (`level_build` does).
+## Known LEC traps
+
+- `AutoloadIni` loses data on a round trip. It reads `PlotManagerStateTransitionMap<n>` keys into the consequence maps and
+  never reads `DotU<n>`, so `plot_build` edits `AutoLoad.ini` line by line.
+- On LE1, LEC counts a `DLC_MOD*` folder with an `AutoLoad.ini` as a mod. The AutoTOC and Autoload ASIs follow the
+  rules under Status above. `le_find_file` follows the game, and the other tools resolve names through LEC.
+- `MELoadedFiles.GetFilesLoadedInGame` throws when a DLC folder it counts as mounted has no `CookedPCConsole`. Every tool
+  given a file name then fails, and `le_find_file` reports it as a folder warning.
+- File lookups are cached in `GamePaths.ResolvePackage`, so code that installs files must call
+  `GamePaths.RefreshLoadedFiles()` afterwards.
+- `CommonStructs.LinearColorProp(r, g, b, a)` writes `r` into all four channels, so `LevelBuilder` builds that struct by
+  hand.
+- `DecompileBulkProps` stops at the first export that fails, so `PackageText` builds each block itself.
+- LEC's `.cnd` parser loops forever on an unknown word, and its compiler drops what it cannot parse with no error.
+  `cnd_set` checks the tokens first, then decompiles the result and writes only on a match.
+- The publish holds LEC's plain `Release` build, although `MeleMcp.Core.csproj` asks for `WinRelease`. LEC's registry
+  lookup is compiled out of that build, so `LecHost` reads the same keys itself.
 
 ## Build and startup gotchas
 
-| Symptom | Cause | Fix in place |
+| Symptom | Cause | What to do |
 |---|---|---|
-| `CS0121` ambiguous `CopyTo` in `EntryImporter.cs` with SDK 8 | LEC 6.5 targets `net8.0` but needs the C# 14 compiler (first-class spans) that upstream CI gets from a newer SDK | `global.json` pins SDK 10.0.402; output still targets `net8.0` |
-| LEC built without registry lookup / native DLLs | LEC only defines `WINDOWS` in its `Win*` configurations | `ProjectReference ... SetConfiguration="Configuration=WinRelease"` |
-| Server hangs at startup, no output at all | Default host builder watches `appsettings.json` in the working directory; Claude Code starts us in a `\\wsl.localhost\` directory, where that watcher hangs | `Host.CreateEmptyApplicationBuilder` with `ContentRootPath = AppContext.BaseDirectory` |
-| `MELE_LE_DIR` ignored | WSL only passes env vars named in `WSLENV` to Windows processes | Name it in `WSLENV` in the server's `env` ([getting started](../../docs/getting-started.md#claude-code-in-wsl)) |
-| `Permission denied` running `MeleMcp.exe` from WSL | Windows build output on the WSL filesystem has no exec bit | Run via `dotnet.exe MeleMcp.dll` |
-| Publish fails: file locked by `.NET Host` | Running server (or a hung test) holds `MeleMcp.dll` | `scripts/stop-server.ps1` runs first in `deploy.sh` |
-| `dotnet-install.ps1` IOException when adding an SDK | MSBuild/compiler server processes keep files open in the SDK folder | `dotnet.exe build-server shutdown` before installing |
-| Generic "An error occurred invoking" errors | SDK hides non-`McpException` messages | `ToolErrors.Run` forwards type + message (local server, nothing to hide) |
+| `CS0121`, ambiguous `CopyTo` in LEC's `EntryImporter.cs` | An SDK older than 10 lacks the C# 14 compiler LEC needs | Use the SDK in `global.json`. |
+| Publish fails, file locked by `.NET Host` | A running server holds `MeleMcp.dll` | Run `stop-server.ps1` for that folder. `deploy.sh` does this itself. |
+| Server hangs at start, with no output | A default host watches `appsettings.json`, which hangs on a `\\wsl.localhost\` folder | `Program.cs` uses an empty builder, rooted at the DLL's folder. |
+| `le_status` shows no LE folder | The registry gave nothing, or a folder with no `Game\ME1`, the only kind it accepts | Set `MELE_LE_DIR` to the Legendary Edition folder. |
+| `MELE_LE_DIR` has no effect from WSL | WSL passes only variables named in `WSLENV` | Name it in `WSLENV` in the server's `env`. The Python scripts do this themselves. |
+| `Permission denied` starting `MeleMcp.exe` from WSL | Output on the WSL file system has no exec bit | Publish to a Windows drive, as `deploy.sh` does by default. |
+| Smoke test fails after a good publish | It needs an LE1 folder and an LE1 package, `BIOA_CRD00_LOC_FR.pcc` by default | Pass another LE1 package to `deploy.sh`. With no LE1 install, it cannot pass. |
+| A tool returns a generic "An error occurred" | The MCP SDK hides other exceptions' messages | Wrap the tool in `ToolErrors.Run`, which forwards type and message. |
+| `ME3TweaksModManager.exe not found` | M3 records its path in `HKCU\SOFTWARE\ME3Tweaks` when it runs | Start M3 once. |
+| Calls hang until M3 exits | A child process inherits the server's stdio pipes | `ModInstaller.StartM3` uses shell execute, which avoids this. |
+| A MeleBridge error says `--install covers LE1 only`, or names no `--game` | That text is out of date | `build.sh --game LE<n> --install` works on each game, game closed. |
