@@ -755,7 +755,7 @@ if (cmd == "2da") {
       else if (m is System.Reflection.PropertyInfo pi) Console.WriteLine("   P " + pi.PropertyType.Name + " " + pi.Name);
   }
 } else if (cmd == "buildsound") {
-  // buildsound <donorPcc> <donorCueName> <ogg> <samplesPerChannel> <channels> <rate> <outPcc> <newCueName> <wavTitle> [volume]
+  // buildsound <donorPcc> <donorCueName> <ogg> <samplesPerChannel> <channels> <rate> <outPcc> <newCueName> <wavTitle> [volume] [--loop] [--unique-wave]
   // Adds the cue to outPcc (created if missing); only the waves under the new cue get the Ogg.
   var (donorPath, donorCue, oggPath) = (args[1], args[2], args[3]);
   int samples = int.Parse(args[4]), channels = int.Parse(args[5]), rate = int.Parse(args[6]);
@@ -791,6 +791,15 @@ if (cmd == "2da") {
     foreach (var child in node.GetProperty<ArrayProperty<ObjectProperty>>("ChildNodes") ?? new ArrayProperty<ObjectProperty>("ChildNodes"))
       if (child.ResolveToEntry(pkg) is ExportEntry c) pending.Push(c);
   }
+  // An LE1 wave is named <bank>:<title>, and the game plays the sound of its ISACT content index whose title is the
+  // part after the colon: that part must stay the donor's. --unique-wave puts the new cue's name before the colon. Under
+  // the donor's name, the next cue built from the same donor would get this wave back from the porter (an export of
+  // that path is already in outPcc) instead of a copy of its own; so build the one cue that keeps the donor's name last.
+  if (args.Contains("--unique-wave"))
+    foreach (var w in cueWaves) {
+      var name = w.ObjectName.Instanced;
+      w.ObjectName = NameReference.FromInstancedString($"{newName}:{name[(name.IndexOf(':') + 1)..]}");
+    }
   foreach (var w in cueWaves) {
     var bin = ObjectBinary.From<SoundNodeWave>(w);
     var banks = LegendaryExplorerCore.Sound.ISACT.ISACTHelper.GetPairedBanks(bin.RawData);
