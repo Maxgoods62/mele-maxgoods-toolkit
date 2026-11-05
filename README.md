@@ -86,6 +86,8 @@ its `build.sh --install`, also with the game closed. lectool and a few other wri
 
 - [mele-pause-anytime](https://github.com/Maxgoods62/mele-pause-anytime): an ASI that pauses LE1, LE2 and LE3 during
   conversations, cutscenes and some movies.
+- [mele-photo-mode-revamp](https://github.com/Maxgoods62/mele-photo-mode-revamp): an ASI that replaces the photo mode
+  panel in LE1, LE2 and LE3, with a free camera, lens and colour controls, hi-res shots and presets.
 - [mele-galaxy-map-normandy](https://github.com/Maxgoods62/mele-galaxy-map-normandy): an LE1 galaxy map mod built with
   lectool and mele-mcp.
 
