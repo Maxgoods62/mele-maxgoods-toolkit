@@ -19,6 +19,10 @@ fi
 gh api -X PUT "repos/$REPO/immutable-releases" > /dev/null
 echo "immutable releases: on"
 
+# Anyone can then report a security problem privately, from the repo's Security tab.
+gh api -X PUT "repos/$REPO/private-vulnerability-reporting" > /dev/null
+echo "private vulnerability reporting: on"
+
 gh api -X PUT "repos/$REPO/actions/permissions" -F enabled=true -f allowed_actions=selected \
     -F sha_pinning_required=true > /dev/null
 gh api -X PUT "repos/$REPO/actions/permissions/selected-actions" -F github_owned_allowed=true \

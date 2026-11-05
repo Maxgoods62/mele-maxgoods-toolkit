@@ -2,6 +2,7 @@
 
 This folder holds one set of release files for the mods listed in `repos.conf`. `kit.sh` renders `templates/` into plain
 files in each mod repo and commits nothing. Nothing reads this folder at run time, and no repo needs another to build.
+[docs/releasing.md](../../docs/releasing.md) explains the result for players and modders.
 
 ## Commands
 

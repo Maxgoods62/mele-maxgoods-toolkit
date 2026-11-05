@@ -11,7 +11,7 @@ of it. There is no support and no roadmap, so issues may go unanswered and pull 
 | [mele-mcp](tools/mele-mcp/README.md) | An MCP server on Legendary Explorer Core (LEC), with 91 tools. They read and edit game files, build mods, install them through ME3Tweaks Mod Manager (M3) and work on the running game. |
 | [MeleBridge](tools/mele-bridge/README.md) | An ASI with one build per game. Through its pipe, the `live_*` tools read and write objects in the running game and call UnrealScript functions. The LE1 build adds an in-game level editor. |
 | [lectool](tools/lectool/README.md) | A command-line program on LEC with 26 commands, for build scripts and jobs mele-mcp has no tool for. |
-| [release-kit](tools/release-kit/README.md) | Shared release files for my mod repos. `kit.sh` writes them into each repo and scans it for game files. |
+| [release-kit](tools/release-kit/README.md) | Shared release files for my mod repos. [Releasing](docs/releasing.md) says how I release and protect them. |
 
 ## Games
 
