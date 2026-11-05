@@ -28,7 +28,7 @@ public static partial class LiveBridge
     private static readonly UTF8Encoding Utf8 = new(false);
 
     /// <summary>
-    /// The protocol check per game process: null when its bridge speaks ours, else the error. A process keeps the MeleBridge.asi it
+    /// The protocol check per game process: null when its bridge speaks ours, else the error. A process keeps the MeleBridge ASI it
     /// started with, so only its first checked connection pings; a restarted game is checked again. A ping that fails is not kept.
     /// </summary>
     private static readonly ConcurrentDictionary<(uint Id, DateTime Started), string?> Checked = new();
@@ -69,9 +69,10 @@ public static partial class LiveBridge
     }
 
     /// <summary>
-    /// Runs a console command and collects what it logged. LE1 hands no console output back (ConsoleCommand returns nothing, and
-    /// DebugLogger's Logf hooks keep every line for its log), so the lines come from the DebugLogger log: the command, then a
-    /// getall whose answer is logged as an error, which makes the logger write out everything before it.
+    /// Runs a console command and collects what it logged. The bridge hands no console output back on any game (on LE1
+    /// ConsoleCommand returns nothing, and DebugLogger's Logf hooks keep every line for its log), so the lines come from the
+    /// DebugLogger log: the command, then a getall whose answer is logged as an error, which makes the logger write out everything
+    /// before it.
     /// </summary>
     public static ConsoleOutput Console(MEGame game, string command, double timeoutSeconds)
     {
@@ -182,7 +183,7 @@ public static partial class LiveBridge
 
     private static string NotInstalled(MEGame game) => game == MEGame.LE1
         ? "MeleBridge.asi is not installed (tools/mele-bridge/build.sh --install, game closed), or the game is still starting."
-        : $"{game}MeleBridge.asi is not installed, or the game is still starting. tools/mele-bridge/build.sh --game {game} builds it; its --install covers LE1 only.";
+        : $"{game}MeleBridge.asi is not installed (tools/mele-bridge/build.sh --game {game} --install, game closed), or the game is still starting.";
 
     /// <param name="checkProtocol">Whether to check the bridge's protocol first (<see cref="CheckProtocol"/>).</param>
     private static NamedPipeClientStream Connect(MEGame game, double timeoutSeconds = 5, bool checkProtocol = true)
@@ -253,7 +254,7 @@ public static partial class LiveBridge
         var bridge = ping["bridge"] is JsonValue b && b.TryGetValue<string>(out var v) ? v : "?";
         var reported = protocol is null ? "reports no pipe protocol (bridges before 2 do not)" : $"speaks pipe protocol {protocol}";
         return $"MeleBridge {bridge} in the game {reported}; mele-mcp {Versions.Server} needs protocol {Versions.BridgeProtocol}. "
-               + "Build and install the MeleBridge.asi of the same toolkit release (tools/mele-bridge/build.sh --install, game closed), then start the game again.";
+               + "Build and install the MeleBridge ASI of the same toolkit release (tools/mele-bridge/build.sh --game LE<n> --install, game closed), then start the game again.";
     }
 
     /// <summary>The game process serving this pipe, by id and start time (ids are reused); null when Windows does not say.</summary>

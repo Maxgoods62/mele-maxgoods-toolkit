@@ -31,7 +31,7 @@ public static class SaveTools
 
     [McpServerTool(Name = "save_head_default", Destructive = true, Idempotent = true),
      Description("Gives one save, or every .pcsav of a career, the game's default head for Shepard's sex: clears bHasMorphHead, drops the morph, redoes the checksum. "
-                 + "Same bytes as Trilogy Save Editor's head removal. Every other byte stays, and the file keeps its times. Backs each changed file up to "
+                 + "On one LE3 save it gave the same bytes as Trilogy Save Editor's head removal. Every other byte stays, and the file keeps its times. Backs each changed file up to "
                  + "<backups>\\saves\\<game>\\<career>\\<time>. A file that fails is reported and left as it is; .bak files are not touched. Refuses while the game runs unless allowRunning.")]
     public static SaveHeadResult SaveHeadDefault(
         [Description(GameParam)] string game,

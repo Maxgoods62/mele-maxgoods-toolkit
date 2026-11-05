@@ -4,7 +4,9 @@ using ModelContextProtocol.Server;
 
 namespace MeleMcp.Tools;
 
-/// <summary>Live link to the running game through the LEX Interop ASI. Nothing here edits files.</summary>
+/// <summary>The running game, through the LEX Interop ASI, MeleBridge where a tool says so, and the logger ASIs' logs. npc_place
+/// edits a level YAML and builds it, game_cycle installs a mod, and game_cycle and game_screenshot save a PNG; the other tools
+/// write no files.</summary>
 [McpServerToolType]
 public static class GameTools
 {
@@ -35,8 +37,9 @@ public static class GameTools
         => ToolErrors.Run(() => LiveProperties.Get(PackageTools.ParseGame(game), className, property, nameContains, timeoutSeconds));
 
     [McpServerTool(Name = "game_plot", Destructive = true),
-     Description("Reads, or reads then sets, LE1 plot variables in the running game (a save must be loaded), through BioWare's cheat "
-                 + "execs DumpPlotManagerValueByIndex / InitPlotManagerValueByIndex; answers come from the DebugLogger ASI's log. By id or "
+     Description("Reads, or reads then sets, LE1 plot variables in the running game (a save must be loaded). With MeleBridge it calls the "
+                 + "plot table's own GetBool and SetBool (Int, Float); without it, BioWare's cheat execs DumpPlotManagerValueByIndex / "
+                 + "InitPlotManagerValueByIndex, with answers from the DebugLogger ASI's log. The result's Via names the route. By id or "
                  + "by name from LEX's plot databases (base game + ModPlotsLE1). Setting changes only the value: no transition, consequence "
                  + "or journal update runs, and the change is saved with the next save. Test a conversation branch or quest step without replaying.")]
     public static PlotValues GamePlot(
@@ -89,7 +92,7 @@ public static class GameTools
                  + "Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's BioSaveGame <n> writes where Shepard stands; career "
                  + "saves can't be loaded this way (load one with commands: [\"nextframedefer loadgame <Career>_QuickSave DevId=-1\"] and "
                  + "waitForMap)), and needs the LEX Interop ASI. LE2 and LE3 need MeleBridge and the DebugLogger ASI, and load only the latest "
-                 + "save (loadLatest). Run on all three.")]
+                 + "save (loadLatest). Run on all three, on LE3 only without a mod.")]
     public static GameCycleResult GameCycle(
         [Description("Mod to check and install first (as mod_install takes it, e.g. 'My Mod'); omit to only restart.")] string? mod = null,
         [Description("LE1: developer save slot to load from the menu: n for BioSaveGame<n>.sav, made once in game with game_console 'BioSaveGame <n>'.")] int? loadSlot = null,
@@ -187,6 +190,6 @@ public static class GameTools
         [Description("Degrees added to the yaw (180: face where Shepard came from).")] float turn = 0,
         [Description("Run level_build after editing the file.")] bool build = true,
         [Description("Move the actors in the running game too.")] bool live = true,
-        [Description(GameParam)] string game = "LE1")
+        [Description("Game: LE1.")] string game = "LE1")
         => ToolErrors.Run(() => NpcPlacer.Place(PackageTools.ParseGame(game), file, npc, x, y, z, yaw, turn, build, live));
 }

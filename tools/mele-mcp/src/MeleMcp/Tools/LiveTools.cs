@@ -6,7 +6,7 @@ using ModelContextProtocol.Server;
 
 namespace MeleMcp.Tools;
 
-/// <summary>Live objects in the running game through our own ASI, MeleBridge (tools/mele-bridge). Nothing here edits files.</summary>
+/// <summary>Live objects in the running game through our own ASI, MeleBridge (tools/mele-bridge). Only live_save edits files: the level YAML, then its build.</summary>
 [McpServerToolType]
 public static class LiveTools
 {
@@ -115,7 +115,7 @@ public static class LiveTools
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "editor" }, 5));
 
     [McpServerTool(Name = "live_status", ReadOnly = true),
-     Description("One cheap look at the running game (MeleBridge ASI 3+): map, its BioWorldInfo (begunPlay, bPlayersOnly, the "
+     Description("One cheap look at the running game (MeleBridge ASI 3 or later): map, its BioWorldInfo (begunPlay, bPlayersOnly, the "
                  + "focus-loss pause flag), player controller and pawn, streaming levels still loading or changing visibility, the "
                  + "loading movie (null when no SFXLoadMovieManager exists; inLoad null on LE2 and LE3), the squad screen (partySelectOpen, "
                  + "its handler, the movie's member count; null on LE3) and the keep_ticking switch with its counters. Times out while a "
@@ -126,7 +126,7 @@ public static class LiveTools
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "status" }, timeoutSeconds));
 
     [McpServerTool(Name = "live_keep_ticking", Destructive = true),
-     Description("Test switch (MeleBridge ASI 3+), off by default and again at every game start. While on, the game does not pause its "
+     Description("Test switch (MeleBridge ASI 3 or later), off by default and again at every game start. While on, the game does not pause its "
                  + "world and Kismet when its window loses focus (BioWorldInfo.Tick's focus pause); real pauses (menus, squad screen, "
                  + "photo mode, the F8 editor) are untouched. Turning it on also ends a focus pause already in place. Omit 'on' to read "
                  + "it. Returns the switch and its counters. LE2 and LE3 hold m_bAllowBrowserWheel off for each Tick "

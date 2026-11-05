@@ -3,8 +3,9 @@
 #include "Common/Objects.hpp"
 
 // Console commands through the player's console chain (player execs, cheat manager, then the engine), like typing them.
-// LE1 hands no output back: ConsoleCommand returns an empty string, and with the DebugLogger ASI installed its Logf hooks keep
-// every printed line for its log without passing it on. The client reads the output from that log (LiveBridge.Console).
+// The op hands no output back on any game. On LE1 ConsoleCommand returns an empty string, and with the DebugLogger ASI installed
+// its Logf hooks keep every printed line for its log without passing it on. On every game the client reads the output from
+// that log (LiveBridge.Console).
 namespace MeleBridge
 {
     namespace

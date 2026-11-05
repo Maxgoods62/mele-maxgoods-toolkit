@@ -5,8 +5,8 @@
   scenario.py --selftest
 
 PATH is a suite file (.yaml, .yml, .json) or a folder of them, run in name order (files starting with _ and README* are
-skipped). The game must run, with MeleBridge 3 and the DebugLogger and Kismet Logger ASIs. Server settings as in
-mcp_call.py: the environment, then tools/mele-mcp/build.env (MELE_DOTNET, MELE_DLL or MELE_OUT, MELE_SCENARIO_OUT).
+skipped). The game must run, with MeleBridge 3 or later and the DebugLogger and Kismet Logger ASIs. Server settings as
+in mcp_call.py: the environment, then tools/mele-mcp/build.env (MELE_DOTNET, MELE_DLL or MELE_OUT, MELE_SCENARIO_OUT).
 The report goes to <out>\\<suite>\\<yyyymmdd-hhmmss>\\. --dry-run validates the suite offline and prints the plan;
 --selftest checks the runner's own logic offline. Exit codes: 0 no FAIL, ERROR or ABORTED; 1 a FAIL or ERROR; 2 a usage,
 suite or prerequisite error; 3 ABORTED; 4 a save restore pending or failed. The format and the guards: docs/scenarios.md.
@@ -49,7 +49,7 @@ CALL_DENY = re.compile(r"^(ConsoleCommand|QuickLoad|BioLoadGame|LoadGame\w*|NewC
 # Read-only queries the pattern above would catch. BioWorldInfo.IsAbleToSave returns whether the game allows a save now,
 # and why not (sReason), without saving.
 CALL_ALLOW = {"isabletosave"}
-BRIDGE3 = "MeleBridge 3 is not installed: tools/mele-bridge/build.sh --install with the game closed"
+BRIDGE3 = "MeleBridge 3 or later is not installed: tools/mele-bridge/build.sh --install with the game closed"
 FLUSH = "getall BioWorldInfo bHasPathNodes"
 ENTRY = re.compile(r"^\[[\d:.]+ (\w+)\] ")
 GETALL = re.compile(r"^appLogErrorf: (?:\d+\) \S+ \S+\.\w+ =|\t\d+: )")

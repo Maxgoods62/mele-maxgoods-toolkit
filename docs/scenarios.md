@@ -8,7 +8,7 @@ LE1 only: `game` accepts only `LE1`, and the runner reads `MassEffect1.exe`, LE1
 
 - LE1 running on any map, the main menu included.
 - [MeleBridge](../tools/mele-bridge/README.md), with the DebugLogger and Kismet Logger ASIs. A bridge older than
-  version 3 lacks the `status` and `keep_ticking` ops, and the run stops with "MeleBridge 3 is not installed".
+  version 3 lacks the `status` and `keep_ticking` ops, and the run stops with "MeleBridge 3 or later is not installed".
 - For a `cold_start` file, M3 and the LEX Interop ASI.
 - mele-mcp deployed by `tools/mele-mcp/scripts/deploy.sh`. The runner starts its own server.
 - WSL with Python 3. `.yaml` suites need PyYAML (`python3-yaml`); `.json` suites do not.

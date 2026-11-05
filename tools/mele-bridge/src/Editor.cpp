@@ -5174,7 +5174,7 @@ namespace MeleBridge::Editor
         }
 
         /// The last fault for the log: "read of 0x10 at MeleBridge.asi+0x1a2b3 < MeleBridge.asi+0x4c5d6 < ...". Offsets into
-        /// MeleBridge.asi resolve against the staged PDB with llvm-symbolizer --relative-address (README, Diagnostics).
+        /// MeleBridge.asi resolve against the PDB build.sh stages beside it, with llvm-symbolizer --relative-address.
         std::string FaultText()
         {
             auto text = std::format("{} of 0x{:x} at ", LastFault.Write == 1 ? "write" : LastFault.Write == 8 ? "execute" : "read", LastFault.Target);

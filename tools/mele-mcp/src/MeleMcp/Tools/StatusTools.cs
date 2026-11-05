@@ -13,7 +13,7 @@ public static class StatusTools
     public static LecStatus LeStatus() => ToolErrors.Run(LecHost.EnsureInitialized);
 
     [McpServerTool(Name = "le_refresh_files", Idempotent = true),
-     Description("Forgets the cached list of game and DLC mod files. Call after installing a mod or copying files into the game.")]
+     Description("Forgets the cached list of game and DLC mod files. Call after an install mod_install did not run (it clears the list itself), or after copying files into the game.")]
     public static string LeRefreshFiles() => ToolErrors.Run(() =>
     {
         LecHost.EnsureInitialized();

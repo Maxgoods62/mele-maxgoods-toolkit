@@ -190,7 +190,7 @@ public static partial class GameCycle
         return null;
     }
 
-    /// <summary>LE1 has the LEX Interop ASI. LE2 and LE3 reach the console through MeleBridge.</summary>
+    /// <summary>LE1 reaches the console through the LEX Interop ASI, LE2 and LE3 through MeleBridge.</summary>
     private static bool ConsoleOpen(MEGame game) => game == MEGame.LE1 ? GameBridge.IsPipeOpen(game) : LiveBridge.IsAvailable(game);
 
     private static void Console(MEGame game, string command)

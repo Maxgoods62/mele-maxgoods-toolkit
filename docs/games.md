@@ -1,7 +1,7 @@
 # Games
 
-This page lists what the toolkit does on LE1, LE2 and LE3, then what has run in each game. Test status lives here only.
-If a tool's description in the server says otherwise, this page is the record.
+This page lists what the toolkit does on LE1, LE2 and LE3, then what has run in each game.
+It is the record of test status.
 
 ## What works
 

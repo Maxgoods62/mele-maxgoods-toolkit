@@ -19,7 +19,7 @@ public sealed record DlcNewResult(string Game, string ModRoot, string ModDesc, s
 /// <summary>
 /// A new LE2 or LE3 mod M3 accepts: moddesc.ini, a DLC_MOD_* folder at the mod root (M3's [CUSTOMDLC] sourcedirs, as its Starter Kit and real
 /// mods lay it out; BioGame\DLC is where M3 installs it), Mount.dlc, the config skeleton and one .tlk per language. The per-game forms follow
-/// M3's Starter Kit (ME3TweaksCore DLCModGenerator.cs). LE1 has no Mount.dlc: mod_build makes those mods.
+/// M3's Starter Kit (ME3TweaksCore DLCModGenerator.cs). LE1 has no Mount.dlc: the Starter Kit starts an LE1 mod, and mod_build fills it.
 /// </summary>
 public static partial class DlcScaffold
 {
@@ -43,7 +43,7 @@ public static partial class DlcScaffold
         string version, IReadOnlyList<string>? languages, string? description, int? nameStrRef)
     {
         LecHost.EnsureInitialized();
-        if (game == MEGame.LE1) throw new ArgumentException("dlc_new makes LE2 and LE3 mods. An LE1 mod has no Mount.dlc: build it from YAML with mod_build, which writes AutoLoad.ini and the GlobalTlk.");
+        if (game == MEGame.LE1) throw new ArgumentException("dlc_new makes LE2 and LE3 mods. An LE1 mod has no Mount.dlc: start it with M3's DLC Mod Starter Kit, then fill it from YAML with mod_build.");
         if (game is not (MEGame.LE2 or MEGame.LE3)) throw new ArgumentException("dlc_new makes LE2 and LE3 mods.");
 
         var folder = DlcFolder(game, name);

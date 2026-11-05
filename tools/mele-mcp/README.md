@@ -403,4 +403,3 @@ To test a second copy beside the one in use, set `MELE_OUT` to another Windows f
 | A tool returns a generic "An error occurred" | The MCP SDK hides other exceptions' messages | Wrap the tool in `ToolErrors.Run`, which forwards type and message. |
 | `ME3TweaksModManager.exe not found` | M3 records its path in `HKCU\SOFTWARE\ME3Tweaks` when it runs | Start M3 once. |
 | Calls hang until M3 exits | A child process inherits the server's stdio pipes | `ModInstaller.StartM3` uses shell execute, which avoids this. |
-| A MeleBridge error says `--install covers LE1 only`, or names no `--game` | That text is out of date | `build.sh --game LE<n> --install` works on each game, game closed. |

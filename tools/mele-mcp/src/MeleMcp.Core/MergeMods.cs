@@ -150,7 +150,7 @@ public static partial class MergeMods
     /// <summary>The mod's cmmver: the mod has to exist first, as M3 finds the merge format in this file.</summary>
     private static string ModDescVersion(MEGame game, string modDesc)
     {
-        if (!File.Exists(modDesc)) throw new FileNotFoundException($"No {modDesc}: start the mod with dlc_new (LE2, LE3) or mod_build (LE1).");
+        if (!File.Exists(modDesc)) throw new FileNotFoundException($"No {modDesc}: start the mod with dlc_new (LE2, LE3) or M3's DLC Mod Starter Kit (LE1).");
         var ini = ModInstaller.ReadIni(modDesc);
         var modGame = ini.GetValueOrDefault("ModInfo")?.GetValueOrDefault("game");
         if (!string.Equals(modGame, game.ToString(), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException($"{modDesc} is a {modGame ?? "?"} mod, not {game}.");

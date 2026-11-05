@@ -15,7 +15,8 @@ public static class ScriptTools
                  + "are F<id> functions of BioAutoConditionals, so this also edits those; LE3's are in .cnd files (cnd_set). "
                  + "Errors have 1-based Line and Column in the source given; the file is saved only when the compile succeeds, dryRun never saves. Native functions cannot be compiled. "
                  + "A core file (SFXGame, Engine, Startup*...) is compiled on the copy with a warning: shipping it needs a merge mod. "
-                 + "Tested on scratch copies by decompile, compile, decompile. Not tested in game: a successful compile does not show that the game accepts the result. "
+                 + "Recompiled on game files (decompile, compile, decompile): LE3 SFXGame 7429/7429, LE2 4353/4355, LE1 2854/2854. "
+                 + "In LE2 a function it compiled returned its string through live_call; no LE3 output has been loaded by the game. "
                  + "Backs the package up first. Refuses files inside the game install, for a dry run too.")]
     public static ScriptCompileResult Compile(
         [Description("Package: the mod's copy. Full Windows or /mnt/<drive> path, or a file name that does not resolve to the game install.")] string package,

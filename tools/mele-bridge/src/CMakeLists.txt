@@ -51,8 +51,8 @@ asi_target (MeleBridge
     "LESDK"
   )
 
-# The one file the game-install rule lets us copy into the ASI folder is MeleBridge.asi. LE2 and LE3 keep LExASIs' default
-# names, LE2MeleBridge.asi and LE3MeleBridge.asi. A game turned off with LEASI_BUILD_LE<n> has no target.
+# LE1's ASI keeps MeleBridge.asi, its name from before the LE2 and LE3 builds. LE2 and LE3 keep LExASIs' default names,
+# LE2MeleBridge.asi and LE3MeleBridge.asi. A game turned off with LEASI_BUILD_LE<n> has no target.
 if (TARGET MeleBridge-LE1)
   set_target_properties (MeleBridge-LE1 PROPERTIES OUTPUT_NAME "MeleBridge")
 endif ()

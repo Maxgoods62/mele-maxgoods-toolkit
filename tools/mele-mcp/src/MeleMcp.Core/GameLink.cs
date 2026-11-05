@@ -16,7 +16,7 @@ public sealed record ActorState(string Level, string Actor, float X, float Y, fl
 
 public sealed record HotReloadResult(string Level, string SourcePath, int Bytes, IReadOnlyList<string> Steps);
 
-/// <summary>Game operations built on <see cref="GameBridge"/>, using the LEX Interop commands the LE1 ASI handles.</summary>
+/// <summary>Game operations built on <see cref="GameBridge"/>, using the commands the LEX Interop ASI handles.</summary>
 public static class GameLink
 {
     private static readonly TimeSpan ReplyTimeout = TimeSpan.FromSeconds(3);

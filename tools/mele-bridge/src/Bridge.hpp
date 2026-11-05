@@ -81,7 +81,7 @@ namespace MeleBridge
     // ! Console.cpp
     // ========================================
 
-    /// Game thread. Runs the command; LE1 returns no output (see Console.cpp).
+    /// Game thread. Runs the command; it returns no output on any game (see Console.cpp).
     json RunConsoleCommand(std::wstring const& command);
 
     /// Game thread. The current map's live player controller; else the first one in memory; null when there is none.
