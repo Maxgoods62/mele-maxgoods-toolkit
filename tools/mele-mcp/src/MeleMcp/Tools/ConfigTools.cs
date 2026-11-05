@@ -17,14 +17,14 @@ public static class ConfigTools
                  + "loads); the replay follows the formats' rules and was not checked against the running game. Read on real files of all three games; "
                  + "nothing tested in game.")]
     public static ConfigGetResult ConfigGet(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Config asset, e.g. BioEngine, BioGame, BioWeapon (case does not matter).")] string? asset = null,
         [Description("Only files whose path under BioGame contains this, e.g. DLC_HEN_MT, BIOWeapon.ini or Coalesced. Rows of other files are left out, and with them Effective.")] string? file = null,
         [Description("Case-insensitive substring of the section, e.g. Core.System or sfxweapon_.")] string? section = null,
         [Description("Key name (no + - ! . > prefix), or a wildcard with * and ?. Case does not matter.")] string? key = null,
         [Description("Case-insensitive text in a value. A key with a match is listed with all its rows.")] string? textContains = null,
         [Description("LE2 base file: INT, FRA, DEU, ITA or POL (FR, DE, IT, PL too). LE1 and LE3 have one base file.")] string language = "INT",
-        [Description("Maximum rows returned (TotalKeys and TotalRows still count all).")] int limit = 100,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Maximum rows returned (TotalKeys and TotalRows still count all).")] int limit = 100)
         => ToolErrors.Run(() => ConfigFiles.Get(PackageTools.ParseGame(game), asset, file, section, key, textContains, language, limit));
 
     [McpServerTool(Name = "config_set", Destructive = true, Idempotent = true),
@@ -36,9 +36,9 @@ public static class ConfigTools
                  + "LE2 and LE3 output was read back with LEC, and a real DLC config round-tripped. In LE2 a value it wrote was read back "
                  + "in game; no LE3 output has been loaded by the game.")]
     public static ConfigSetResult ConfigSet(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("The mod's DLC_<name> folder or its CookedPCConsole, usually in the M3 library (Windows or /mnt/<drive> path).")] string folder,
         [Description("Entries: each has asset (BioEngine, BioGame...), section, key (no prefix), value (not for clear) and operation (default set).")] ConfigEntry[] entries,
-        [Description("LE1 only: write to ConfigDelta-<this>.m3cd instead of choosing the file.")] string? deltaName = null,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("LE1 only: write to ConfigDelta-<this>.m3cd instead of choosing the file.")] string? deltaName = null)
         => ToolErrors.Run(() => ConfigFiles.SetEntries(PackageTools.ParseGame(game), folder, entries, deltaName));
 }

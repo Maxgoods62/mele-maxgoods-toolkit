@@ -16,7 +16,7 @@ public static class NativeTools
                  + "Dumps are game code: keep them out of any repo. "
                  + "Run on LE2, not on LE1 or LE3.")]
     public static ExeDumpResult ExeDump(
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1",
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Read the game again even when the cached dump matches, e.g. to see hooks.")] bool force = false)
         => ToolErrors.Run(() => GameDump.Dump(PackageTools.ParseGame(game), force));
 
@@ -26,7 +26,7 @@ public static class NativeTools
                  + "(REA snapshots keep no analysis database); function assembly, callers, xrefs and strings then matched native_query's facts. REA's addresses are Base plus an RVA. "
                  + "The output holds game code: keep it out of any repo. Refuses a target inside the game install, and any existing file it did not write.")]
     public static FileLayoutResult ExeDumpPe(
-        [Description("Game whose cached dump to convert: LE1, LE2 or LE3.")] string game = "LE1",
+        [Description("Game whose cached dump to convert: LE1, LE2 or LE3.")] string game,
         [Description("An image.bin (Windows or /mnt/<drive> path) to convert instead of the cache.")] string? dump = null,
         [Description("Output file. Default: image-pe.exe next to the dump.")] string? outPath = null)
         => ToolErrors.Run(() => GameDump.WriteFileLayout(PackageTools.ParseGame(game), dump, outPath));
@@ -48,8 +48,8 @@ public static class NativeTools
                  + "Answers take under a second and need no analysis; REA's Ghidra takes about 10 minutes per session on a dump. "
                  + "Use REA for pseudocode, cross-function comparison and annotation: give it the file from exe_dump_pe, its addresses are the dump's base plus an RVA.")]
     public static object NativeQueryTool(
+        [Description("Game whose cached dump to read: LE1, LE2 or LE3.")] string game,
         [Description("info, disasm, callers, xrefs, strings, pattern, class, vtable, slot_of or name.")] string op,
-        [Description("Game whose cached dump to read: LE1, LE2 or LE3.")] string game = "LE1",
         [Description("An image.bin (Windows or /mnt/<drive> path) to read instead of the cache.")] string? dump = null,
         [Description("0x-prefixed RVA, or an address of the dump's run.")] string? rva = null,
         [Description("strings: substring. name: exact name.")] string? text = null,

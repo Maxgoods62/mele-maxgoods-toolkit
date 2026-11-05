@@ -22,7 +22,7 @@ it in a terminal:
 It prints what the le_status tool returns, then a summary of BIOA_CRD00.pcc. That file is LE1's,
 so this check reads LE1 whichever game you mod.
 
-Most tools take a game parameter that defaults to LE1. Pass LE2 or LE3 for the other games.
+Most tools take a game parameter, and every one of them requires it: LE1, LE2 or LE3.
 
 To register it with Claude Code for all your projects, run this in a Command Prompt:
 

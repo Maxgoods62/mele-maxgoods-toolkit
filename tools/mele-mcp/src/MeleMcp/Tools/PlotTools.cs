@@ -15,14 +15,14 @@ public static class PlotTools
                  + "float, consequence, function), with its InstanceVersion as [vN]. A conversation node's nStateTransition runs the StateTransitionMap event with that id. "
                  + "An LE2/LE3 BioOutcomeMap (OutcomeMap) is a plain int-to-int map: each pair prints as event <key> 'outcome <value>'; what the game does with it is unverified.")]
     public static PlotMapEvents PlotMapGet(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Package with the map, e.g. BIOC_Materials.pcc, Startup_INT.pcc (LE2), SFXGameInfoSP_SF.pcc (LE3). File name or full path.")] string package,
         [Description("Map export, e.g. StateTransitionMap or PlotManagerAuto.StateTransitionMap.")] string export = "StateTransitionMap",
         [Description("One event id.")] int? id = null,
         [Description("Lowest id to list.")] int? fromId = null,
         [Description("Highest id to list.")] int? toId = null,
         [Description("Only events that write this plot variable or consequence id.")] int? touches = null,
-        [Description("Maximum events returned (Matches still counts all).")] int limit = 50,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Maximum events returned (Matches still counts all).")] int limit = 50)
         => ToolErrors.Run(() => PlotMaps.Get(PackageTools.ParseGame(game), package, export, id, fromId, toId, touches, limit));
 
     [McpServerTool(Name = "plot_map_new", Destructive = true),
@@ -30,8 +30,8 @@ public static class PlotTools
                  + "StateTransitionMap and ConsequenceMap, as LE1CP's framework file. Returns the AutoLoad.ini [Packages] lines that make "
                  + "the game load them. Refuses an existing file and the game install.")]
     public static NewPlotMapsResult PlotMapNew(
-        [Description("Full path of the new .pcc (Windows or /mnt/<drive>).")] string path,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Game: LE1.")] string game,
+        [Description("Full path of the new .pcc (Windows or /mnt/<drive>).")] string path)
         => ToolErrors.Run(() => PlotMaps.NewPackage(PackageTools.ParseGame(game), path));
 
     [McpServerTool(Name = "plot_event_set", Destructive = true),
@@ -39,11 +39,11 @@ public static class PlotTools
                  + "\"bool 8421 = true\", \"int 47 += 2\" (Paragon points; 46 = Renegade), \"float 3 = 0.5\", \"consequence 927\". "
                  + "An empty list removes the event. Use ids from your mod's own block. Backs the package up first and refuses files inside the game install.")]
     public static PlotEventEdit PlotEventSet(
+        [Description("Game: LE1.")] string game,
         [Description("Package with the map: your mod's PlotManagerAutoDLC_<name>.pcc. File name or full path.")] string package,
         [Description("State event id (transition id used by conversation nStateTransition).")] int id,
         [Description("Elements, e.g. [\"bool 8421 = true\", \"int 47 += 2\"]. Empty = remove.")] string[] elements,
-        [Description("BioStateEventMap export.")] string export = "StateTransitionMap",
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("BioStateEventMap export.")] string export = "StateTransitionMap")
         => ToolErrors.Run(() => PlotMaps.SetEvent(PackageTools.ParseGame(game), package, export, id, elements));
 
     [McpServerTool(Name = "plot_build", Destructive = true),
@@ -54,8 +54,8 @@ public static class PlotTools
                  + "kept; running it twice reports 'unchanged'. The format is in mele-maxgoods-toolkit's docs/yaml-reference.md, Plot files. Backs every file up first and refuses "
                  + "files inside the game install.")]
     public static PlotBuildResult PlotBuild(
+        [Description("Game: LE1.")] string game,
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
-        [Description("Plot package, instead of the file's 'package'.")] string? package = null,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Plot package, instead of the file's 'package'.")] string? package = null)
         => ToolErrors.Run(() => PlotBuilder.Build(PackageTools.ParseGame(game), file, package));
 }

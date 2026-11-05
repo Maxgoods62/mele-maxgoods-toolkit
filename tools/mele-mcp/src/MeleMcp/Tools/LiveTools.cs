@@ -21,13 +21,13 @@ public static class LiveTools
      Description("Lists live objects in the running game (MeleBridge ASI): by class (subclasses too, any package), name and path filters. "
                  + "Returns paths for live_get, live_set, live_call and live_describe. Needs a class or a filter.")]
     public static JsonObject LiveFind(
+        [Description(GameParam)] string game,
         [Description("Class name, e.g. BioPawn, SeqAct_Interp, BioGlobalVariableTable.")] string? className = null,
         [Description("Keep objects whose name contains this, e.g. BioPawn_3.")] string? name = null,
         [Description("Keep objects whose path contains this, e.g. BIOA_MYM01 or BIONPC_MyGuard.")] string? path = null,
         [Description("Include class default objects.")] bool defaults = false,
         [Description("Maximum objects returned (total still counts all).")] int limit = 100,
-        [Description(TimeoutParam)] double timeoutSeconds = 5,
-        [Description(GameParam)] string game = "LE1")
+        [Description(TimeoutParam)] double timeoutSeconds = 5)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject
         {
             ["op"] = "find", ["class"] = className, ["name"] = name, ["path"] = path, ["defaults"] = defaults, ["limit"] = limit,
@@ -37,11 +37,11 @@ public static class LiveTools
      Description("Reads properties of one live object (MeleBridge ASI): all of them, or one by path: Location, Location.X, Array[2], "
                  + "Struct.Array[0].Member. Objects come back as paths, enums as names, arrays up to 64 items.")]
     public static JsonObject LiveGet(
+        [Description(GameParam)] string game,
         [Description(ObjectParam)] string objectPath,
         [Description("Property path; omit for every property.")] string? property = null,
         [Description("How deep structs and arrays expand (default 1 for all properties, 3 for one).")] int? depth = null,
-        [Description(TimeoutParam)] double timeoutSeconds = 5,
-        [Description(GameParam)] string game = "LE1")
+        [Description(TimeoutParam)] double timeoutSeconds = 5)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject
         {
             ["op"] = "get", ["object"] = objectPath, ["property"] = property, ["depth"] = depth,
@@ -54,11 +54,11 @@ public static class LiveTools
                  + "the renderer or physics took in at attach time does not change: for bHidden, meshes, scale or collision, live_call the "
                  + "actor's own function instead (SetHidden, SetDrawScale, SetCollision), which also refreshes its components.")]
     public static JsonObject LiveSet(
+        [Description(GameParam)] string game,
         [Description(ObjectParam)] string objectPath,
         [Description("Property path, e.g. bHidden, Location.Z, DrawScale.")] string property,
         [Description("New value as JSON.")] JsonElement value,
-        [Description(TimeoutParam)] double timeoutSeconds = 5,
-        [Description(GameParam)] string game = "LE1")
+        [Description(TimeoutParam)] double timeoutSeconds = 5)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject
         {
             ["op"] = "set", ["object"] = objectPath, ["property"] = property, ["value"] = JsonNode.Parse(value.GetRawText()),
@@ -70,11 +70,11 @@ public static class LiveTools
                  + "(script defaults do not apply). Returns the return value and out parameters. See live_describe for signatures. "
                  + "E.g. a BioGlobalVariableTable's GetBool [id].")]
     public static JsonObject LiveCall(
+        [Description(GameParam)] string game,
         [Description(ObjectParam)] string objectPath,
         [Description("Function name, e.g. SetHidden, GetBool, TriggerEventClass.")] string function,
         [Description("Arguments as a JSON list, e.g. [true] or [8421].")] JsonElement[]? args = null,
-        [Description(TimeoutParam)] double timeoutSeconds = 5,
-        [Description(GameParam)] string game = "LE1")
+        [Description(TimeoutParam)] double timeoutSeconds = 5)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject
         {
             ["op"] = "call", ["object"] = objectPath, ["function"] = function,
@@ -86,20 +86,20 @@ public static class LiveTools
                  + "logged, e.g. getall BioPawn bTickIsDisabled, or a cheat exec's LogInternal answer. The game hands no output back itself, so "
                  + "the lines come from the DebugLogger log (needs that ASI); unrelated lines logged meanwhile show too.")]
     public static ConsoleOutput LiveConsole(
+        [Description(GameParam)] string game,
         [Description("Console command text.")] string command,
-        [Description(TimeoutParam)] double timeoutSeconds = 10,
-        [Description(GameParam)] string game = "LE1")
+        [Description(TimeoutParam)] double timeoutSeconds = 10)
         => ToolErrors.Run(() => LiveBridge.Console(PackageTools.ParseGame(game), command, timeoutSeconds));
 
     [McpServerTool(Name = "live_describe", ReadOnly = true),
      Description("A loaded class's chain, properties with types and declaring class, and functions with signatures (MeleBridge ASI), from "
                  + "an object or a class name. What live_get, live_set and live_call can reach.")]
     public static JsonObject LiveDescribe(
+        [Description(GameParam)] string game,
         [Description("Object path (its class is described).")] string? objectPath = null,
         [Description("Or a class name, e.g. BioPawn.")] string? className = null,
         [Description("Include functions.")] bool functions = true,
-        [Description(TimeoutParam)] double timeoutSeconds = 5,
-        [Description(GameParam)] string game = "LE1")
+        [Description(TimeoutParam)] double timeoutSeconds = 5)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject
         {
             ["op"] = "describe", ["object"] = objectPath, ["class"] = className, ["functions"] = functions,
@@ -111,7 +111,7 @@ public static class LiveTools
                  + "Canvas.Project, in pixels), which hooks are in, thread ids and input counters. Answers without the game thread, so it "
                  + "works while paused or loading.")]
     public static JsonObject LiveEditor(
-        [Description(EditorGameParam)] string game = "LE1")
+        [Description(EditorGameParam)] string game)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "editor" }, 5));
 
     [McpServerTool(Name = "live_status", ReadOnly = true),
@@ -121,8 +121,8 @@ public static class LiveTools
                  + "its handler, the movie's member count; null on LE3) and the keep_ticking switch with its counters. Times out while a "
                  + "map loads: the game thread runs no script then.")]
     public static JsonObject LiveStatus(
-        [Description(TimeoutParam)] double timeoutSeconds = 3,
-        [Description(GameParam)] string game = "LE1")
+        [Description(GameParam)] string game,
+        [Description(TimeoutParam)] double timeoutSeconds = 3)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "status" }, timeoutSeconds));
 
     [McpServerTool(Name = "live_keep_ticking", Destructive = true),
@@ -132,9 +132,9 @@ public static class LiveTools
                  + "it. Returns the switch and its counters. LE2 and LE3 hold m_bAllowBrowserWheel off for each Tick "
                  + "instead of raising LE1's timer.")]
     public static JsonObject LiveKeepTicking(
+        [Description(GameParam)] string game,
         [Description("true: on; false: off; omit to read.")] bool? on = null,
-        [Description(TimeoutParam)] double timeoutSeconds = 5,
-        [Description(GameParam)] string game = "LE1")
+        [Description(TimeoutParam)] double timeoutSeconds = 5)
         => ToolErrors.Run(() => LiveBridge.Request(PackageTools.ParseGame(game), new JsonObject { ["op"] = "keep_ticking", ["on"] = on }, timeoutSeconds));
 
     [McpServerTool(Name = "live_place", Destructive = true),
@@ -145,6 +145,7 @@ public static class LiveTools
                  + "engine crashes). Lasts until the map reloads: live_save writes the spot into "
                  + "the level YAML. Find templates with live_find, e.g. className=BioInert or StaticMeshActor, path=<level>.")]
     public static LivePlacement LivePlace(
+        [Description(UnrunGameParam)] string game,
         [Description("Actor to move (object path as live_find returns it). Give this or template.")] string? objectPath = null,
         [Description("Actor to copy: a new one is spawned from it. Give this or objectPath.")] string? template = null,
         [Description("Tag for the actor (required to spawn): live_save finds its YAML entry by it, e.g. mymod_prop_crate.")] string? tag = null,
@@ -155,16 +156,15 @@ public static class LiveTools
         [Description("Z (the actor's own origin: a pawn's middle, a mesh's pivot).")] float? z = null,
         [Description("Yaw in degrees (default: faces Shepard for front, her way for shepard, unchanged with x, y, z).")] float? yaw = null,
         [Description("Degrees added to the yaw, e.g. -90 for meshes whose front is +Y like the VI terminals.")] float turn = 0,
-        [Description("Units above the floor (or above z), e.g. 80 for a table top.")] float raise = 0,
-        [Description(UnrunGameParam)] string game = "LE1")
+        [Description("Units above the floor (or above z), e.g. 80 for a table top.")] float raise = 0)
         => ToolErrors.Run(() => LivePlacer.Place(PackageTools.ParseGame(game), objectPath, template, tag, at, distance, x, y, z, yaw, turn, raise));
 
     [McpServerTool(Name = "live_remove", Destructive = true),
      Description("Destroys a live actor (MeleBridge ASI), e.g. a copy live_place spawned. A level actor that can't be destroyed "
                  + "(bNoDelete) is hidden without collision instead. Until the map reloads; no file changes.")]
     public static LivePlacement LiveRemove(
-        [Description(ObjectParam)] string objectPath,
-        [Description(UnrunGameParam)] string game = "LE1")
+        [Description(UnrunGameParam)] string game,
+        [Description(ObjectParam)] string objectPath)
         => ToolErrors.Run(() => LivePlacer.Remove(PackageTools.ParseGame(game), objectPath));
 
     [McpServerTool(Name = "live_save", Destructive = true),
@@ -174,12 +174,12 @@ public static class LiveTools
                  + "with none, a props entry is added that "
                  + "copies the template it was spawned from. Install the level (game closed) to keep it after a reload.")]
     public static LiveSave LiveSave(
+        [Description(SaveGameParam)] string game,
         [Description("Level YAML file (level_build format).")] string file,
         [Description("The live actor (object path, e.g. what live_place returned).")] string objectPath,
         [Description("For a new props entry: the template given to live_place (a level actor's object path).")] string? template = null,
         [Description("For a new props entry: its name (default: the tag).")] string? name = null,
-        [Description("Build the level after writing the file.")] bool build = true,
-        [Description(SaveGameParam)] string game = "LE1")
+        [Description("Build the level after writing the file.")] bool build = true)
         => ToolErrors.Run(() => LivePlacer.Save(PackageTools.ParseGame(game), file, objectPath, name, template, build));
 
     [McpServerTool(Name = "live_watch", ReadOnly = true),
@@ -187,11 +187,11 @@ public static class LiveTools
                  + "delegates and timers go through ProcessEvent; script-to-script calls and natives called from script do not. E.g. "
                  + "Engine.SequenceOp.Activated (script Kismet actions), Engine.Actor.Touch, Engine.Actor.Destroyed.")]
     public static LiveEvents LiveWatch(
+        [Description(GameParam)] string game,
         [Description("Function paths, e.g. [\"Engine.SequenceOp.Activated\"]; \"Class.Function\" matches any package.")] string[] functions,
         [Description("Keep calls on objects whose path contains this.")] string? objectContains = null,
         [Description("Seconds to record.")] double seconds = 10,
         [Description("Stop after this many events.")] int maxEvents = 200,
-        [Description("Include each call's parameters.")] bool withParams = true,
-        [Description(GameParam)] string game = "LE1")
+        [Description("Include each call's parameters.")] bool withParams = true)
         => ToolErrors.Run(() => LiveBridge.Watch(PackageTools.ParseGame(game), functions, objectContains, withParams, seconds, maxEvents));
 }

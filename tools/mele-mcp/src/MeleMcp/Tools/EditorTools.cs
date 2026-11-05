@@ -48,6 +48,7 @@ public static class EditorTools
                  + "try options with keepSession=true. Offline: the game need not run. Install the level (game closed: mod_install) to see "
                  + "it after a reload.")]
     public static EditorImportResult EditorImport(
+        [Description("Game: LE1.")] string game,
         [Description("Level YAML file (level_build format; Windows or /mnt/<drive> path).")] string file,
         [Description("Session file (Windows or /mnt/<drive> path); default %LOCALAPPDATA%\\MeleBridge\\LE1\\sessions\\<the YAML's package name>.json (the "
                      + "sessions folder beside MELE_LEVELS_JSON when set), or for a level the game loads into another map (sideloaded, e.g. on the "
@@ -59,7 +60,6 @@ public static class EditorTools
                      + "for a sideloaded level pass true on the one file that should have them.")] bool? takeSpawned = null,
         [Description("Leave the session file untouched (default: mark the entries this import applied as imported, with the YAML's values as their base).")] bool keepSession = false,
         [Description("When the editor and the YAML both changed a field since the base: refuse (default: the actor is not applied and is listed with "
-                     + "the base, YAML and editor values), editor (the editor's value) or yaml (the YAML's value stays, and goes into the session entry too).")] string onConflict = "refuse",
-        [Description("Game: LE1.")] string game = "LE1")
+                     + "the base, YAML and editor values), editor (the editor's value) or yaml (the YAML's value stays, and goes into the session entry too).")] string onConflict = "refuse")
         => ToolErrors.Run(() => Core.EditorImport.Run(PackageTools.ParseGame(game), file, session, build, takeSpawned, keepSession, onConflict));
 }

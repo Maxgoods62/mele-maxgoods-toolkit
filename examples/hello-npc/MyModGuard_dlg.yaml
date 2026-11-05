@@ -3,7 +3,7 @@
 # its plot; later builds find MyModGuard_dlg by name. E<n>/R<n> are nodes of that copy, kept with new text; any other
 # node name is a new line, found again by its strref.
 # Ids: strings 61230000+, resref 612301, node ids from 61230100. A mod of yours takes its own block (id_alloc).
-# Build: mod_build folder=<this folder> (see ../README.md). Format: ../../docs/yaml-reference.md.
+# Build: mod_build game=LE1 folder=<this folder> (see ../README.md). Format: ../../docs/yaml-reference.md.
 
 requires: mele-mcp >= 0.1.0
 package: DLC_MOD_MyMod/CookedPCConsole/BIOA_MYM01.pcc

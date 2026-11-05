@@ -6,7 +6,8 @@ It is the record of test status.
 ## What works
 
 "Accepted" means the tool takes that game with no guard, but it has never run there. "No" means the tool refuses that
-game, or the feature does not exist there.
+game, or the feature does not exist there. Every tool that takes `game` requires it, the LE1-only ones too: `LE1`, `LE2`
+or `LE3`.
 
 | Area | LE1 | LE2 | LE3 |
 |---|---|---|---|

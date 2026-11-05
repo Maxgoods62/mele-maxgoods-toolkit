@@ -41,6 +41,10 @@ TOOLS = {"live_status", "live_keep_ticking", "live_find", "live_get", "live_set"
          "le_status", "game_remote_event", "game_cycle"}
 REQUIRED = ["live_status", "live_keep_ticking", "live_console", "live_find", "live_get", "live_set", "live_call",
             "game_plot", "game_screenshot", "le_status"]
+# The game of every run: a suite's game may only be LE1. Every tool of TOOLS but those in NO_GAME requires game, so
+# Runner.call adds it to each call that lacks it.
+GAME = "LE1"
+NO_GAME = {"le_status"}
 CONSOLE_DENY = {"biosavegame", "quicksavegame", "quicksave", "quickload", "loadgame", "bioloadgame", "autosave",
                 "cleanduplicateplayersaves", "dumpsavegame", "exit", "quit", "disconnect", "exec"}
 # Any function with Save or Saving in its name (QuickSave, AutoSave, TryAutoSaving, BioSaveGame, SaveProfile,
@@ -862,8 +866,8 @@ def validate(f):
         err("suite: required, [a-z0-9_-]+")
     if not doc.get("title"):
         err("title: required")
-    if doc.get("game", "LE1") != "LE1":
-        err("game: only LE1")
+    if doc.get("game", GAME) != GAME:
+        err(f"game: only {GAME}")
     for kind, ids in (doc.get("restore") or {}).items():
         if kind not in ("bool", "int", "float") or not all(isinstance(i, int) for i in ids or []):
             err(f"restore: {kind} takes a list of plot ids (bool, int or float)")
@@ -1028,11 +1032,14 @@ class Runner:
         self.game_down_ok, self.game_closed, self.load_aborted, self.alive_t = False, False, False, time.time()
         self.stamp, self.bridge, self.saves = time.strftime("%Y%m%d-%H%M%S"), None, {}
         self.suite = self.suite_root = self.calls_file = None
+        self.game = GAME
 
     # -- tools, variables, objects --
 
     def call(self, tool, args=None, timeout=None):
         args = {k: v for k, v in (args or {}).items() if v is not None or k == "value"}
+        if tool not in NO_GAME and "game" not in args:  # the server has no default game; a given one stays
+            args["game"] = self.game
         if tool == "game_remote_event" and re.match(r"(Live|Poll)_NPC_", str(args.get("eventName", "")), re.I):
             raise GuardError("Live_NPC_* and Poll_NPC_* events hung LE1 once")
         if tool == "game_cycle" and (not (self.file and self.file["doc"].get("cold_start")) or args.get("mod")
@@ -2162,7 +2169,7 @@ class Runner:
         if not le1_running():
             raise SuiteError("LE1 is not running: start it and load anything (the main menu is fine)")
         first = selected[0][0]["doc"]
-        self.suite = first["suite"]
+        self.suite, self.game = first["suite"], first.get("game") or GAME
         saving = [f["doc"] for f, _ in selected if f["doc"].get("saves") and not f["doc"].get("skip")]
         if len({d.get("career") for d in saving}) > 1:
             raise SuiteError("every file with saves: true of one run must name the same career")
@@ -2474,6 +2481,13 @@ def selftest():
     ok(r.holds({"all": [{"count": "hench", "expect": 1}, {"status": "map", "expect": "bioa_ice00"}]})[0], "all")
     ok(not r.holds({"any": [{"count": "hench", "expect": 0}, {"status": "bPlayersOnly", "expect": True}]})[0], "any")
     ok(round(r.distance({"a": "${hench}", "b": {"X": 300, "Y": 400, "Z": 0}}), 3) == 500, "distance")
+    # every call names its game, but le_status, which takes none; a game the caller gave stays
+    ok(all(a.get("game") == "LE1" for t, a in fake.calls if t != "le_status"), "game on every earlier call")
+    del fake.calls[:]
+    r.call("live_status", {"timeoutSeconds": 3})
+    r.call("live_find", {"className": "BioPawn", "game": "LE2"})
+    r.call("le_status")
+    ok([a.get("game") for _, a in fake.calls] == ["LE1", "LE2", None], "game added, kept, or left out")
     # find_all: an object gone, or without the filtered property, does not match; a bridge that does not answer fails
     real_get = fake.replies["live_get"]
     fake.replies["live_get"] = lambda a: ToolError("IOException: MeleBridge did not answer 'get' within 7 s.")

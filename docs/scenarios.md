@@ -60,7 +60,7 @@ always FAIL, even on an `optional` step. Ctrl-C, SIGTERM and SIGHUP end as ABORT
 | `title` | Required. |
 | `checks` | Required list of `{id, title, row, skip, needs: [user], steps, cleanup}`. `id` is required, `[a-z0-9_-]+`. |
 | `id` | The file's id. Default: its name without extension. |
-| `game` | Only `LE1`. |
+| `game` | Only `LE1`, also when left out. The runner passes it to every tool that takes `game`, since the server requires it, so steps never name it. |
 | `out` | Report root. |
 | `include` | Files, relative to this one, whose `vars` and `macros` merge in. Later wins; the file's own come last. |
 | `career` | Career folder name. Required by `load: {save}`, `quickload`, `quicksave`, `backup_saves`, `restore_saves`. |

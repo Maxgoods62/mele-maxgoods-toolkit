@@ -17,12 +17,12 @@ public static class ModTools
                  + "that has it; a missing level or plot package is created from either. A file may have a top-level 'requires: mele-mcp >= X.Y.Z' "
                  + "(the oldest server that builds it): every file is checked first, and an older server builds nothing.")]
     public static ModBuildResult ModBuild(
+        [Description("Game: LE1.")] string game,
         [Description("Folder with the mod's YAML files, e.g. the repo's mods/<name>.")] string folder,
         [Description("Mod root to build into instead (Windows or /mnt/<drive> path), e.g. a temp folder: every package goes under it by "
                      + "its DLC folder, and a DLC folder it does not have yet is first copied from where the build would write without out. "
                      + "GlobalTlk files and the AutoLoad.ini are changed in that copy (a build that would change one outside it is refused), "
-                     + "and levels.json is left alone: the build changes nothing outside out (backups aside). Omitted: each package where its file puts it.")] string? @out = null,
-        [Description("Game: LE1.")] string game = "LE1")
+                     + "and levels.json is left alone: the build changes nothing outside out (backups aside). Omitted: each package where its file puts it.")] string? @out = null)
         => ToolErrors.Run(() => ModBuilder.Build(PackageTools.ParseGame(game), folder, @out));
 
     [McpServerTool(Name = "mod_check", ReadOnly = true),
@@ -31,11 +31,11 @@ public static class ModTools
                  + "(strref without text per language), facefx (spoken line without FXA_<strref> lip sync), ids (plot, quest or string ids "
                  + "another installed mod also defines). Run it after mod_build, before mod_install.")]
     public static ModCheckResult ModCheck(
+        [Description("Game: LE1.")] string game,
         [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'My Mod'.")] string mod,
         [Description("Comma-separated checks (default all): refs, streaming, startpoints, strings, facefx, ids.")] string? checks = null,
         [Description("Languages whose text must exist, comma-separated.")] string languages = "INT,FR",
-        [Description("Maximum findings returned (Errors and Warnings still count all).")] int limit = 100,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Maximum findings returned (Errors and Warnings still count all).")] int limit = 100)
         => ToolErrors.Run(() => ModChecker.Check(PackageTools.ParseGame(game), mod, Split(checks), Split(languages), limit));
 
     private static string[] Split(string? list) => (list ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -47,9 +47,9 @@ public static class ModTools
                  + "file in place: Differences names it when M3 logged no save, and the log holds M3's merge lines. A failed install stops the wait "
                  + "at once, with M3's dialog left open for a click.")]
     public static ModInstallResult ModInstall(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'My Mod'.")] string mod,
         [Description("Start the game after the install (M3 --bootgame).")] bool bootGame = false,
-        [Description("Seconds to wait for M3 (it may first have to start).")] int timeoutSeconds = 180,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Seconds to wait for M3 (it may first have to start).")] int timeoutSeconds = 180)
         => ToolErrors.Run(() => ModInstaller.Install(PackageTools.ParseGame(game), mod, bootGame, timeoutSeconds));
 }

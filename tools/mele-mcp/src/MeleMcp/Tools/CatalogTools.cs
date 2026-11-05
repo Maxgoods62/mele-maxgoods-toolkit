@@ -17,11 +17,11 @@ public static class CatalogTools
                  + "excluded-* and unknown are left out of it). Returns the stats; with search, category or curatedOnly, the matching meshes. "
                  + "About 3 s; reused while no game file changes. Offline: the game need not run.")]
     public static CatalogIndexResult CatalogIndex(
+        [Description("Game: LE1.")] string game,
         [Description("Only meshes whose path contains this (case-insensitive), e.g. crate, chair, BIOA_NOR10_S.")] string? search = null,
         [Description("Only meshes of this category: Crates, Furniture, Medical, Consoles, Lights, Industrial, Debris, Alien, Small items, Signs, Plants, Other.")] string? category = null,
         [Description("Only meshes in the default list (curated).")] bool curatedOnly = false,
-        [Description("Maximum meshes returned (Matches still counts all).")] int limit = 50,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Maximum meshes returned (Matches still counts all).")] int limit = 50)
         => ToolErrors.Run(() => Core.CatalogIndex.Query(PackageTools.ParseGame(game), search, category, curatedOnly, limit));
 
     [McpServerTool(Name = "catalog_build", Destructive = true),
@@ -32,13 +32,13 @@ public static class CatalogTools
                  + "under %LOCALAPPDATA%\\MeleBridge\\LE1\\catalog. Meshes whose material has no shader in the game are left out. Refuses to "
                  + "write inside the game install. Offline; install the mod (game closed: mod_install mod='Mele Catalog') for the game to load it.")]
     public static CatalogBuildResult CatalogBuild(
+        [Description("Game: LE1.")] string game,
         [Description("Start from the default list (catalog_index's curated meshes).")] bool curated = true,
         [Description("More meshes by path, as catalog_index lists them, e.g. [\"BIOA_FRE10_S.CARGO_NET\"]; whatever the rules made of them (category 'Other' when none).")] string[]? meshes = null,
         [Description("Render thumbnails; false keeps the ones already rendered for the same entries.")] bool thumbs = true,
         [Description("Build MeleCatalog_Core.pcc; false only writes catalog.json (and thumbnails).")] bool package = true,
         [Description("The dev mod's folder (Windows or /mnt/<drive> path); default M3's library, mods\\LE1\\Mele Catalog.")] string? modFolder = null,
-        [Description("Where catalog.json and thumbs\\ go (Windows or /mnt/<drive> path); default %LOCALAPPDATA%\\MeleBridge\\LE1\\catalog, where the bridge reads them.")] string? outDir = null,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Where catalog.json and thumbs\\ go (Windows or /mnt/<drive> path); default %LOCALAPPDATA%\\MeleBridge\\LE1\\catalog, where the bridge reads them.")] string? outDir = null)
         => ToolErrors.Run(() => CatalogBuilder.Build(PackageTools.ParseGame(game),
             new CatalogBuilder.Options(curated, meshes ?? [], thumbs, package, modFolder, outDir)));
 }

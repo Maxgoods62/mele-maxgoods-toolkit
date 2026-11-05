@@ -1,8 +1,9 @@
 # Examples
 
 This folder holds a small mod that mele-mcp's `mod_build` builds from YAML. It targets LE1, because the YAML builds are LE1
-only. The file format is in the [YAML reference](../docs/yaml-reference.md), and [games.md](../docs/games.md) records how
-far the example was tested.
+only. Every tool that takes `game` requires it, so each call on this page passes `game` set to `LE1`. The file format
+is in the [YAML reference](../docs/yaml-reference.md), and [games.md](../docs/games.md) records how far the example was
+tested.
 
 ## hello-npc
 
@@ -29,12 +30,12 @@ one gets silent lip sync.
 With `out`, the build writes nothing outside that folder except its backups. Both paths are Windows paths or
 `/mnt/<drive>/` paths. For a checkout on the WSL file system, `wslpath -w` prints the path to use.
 
-In an MCP client, call `mod_build` with `folder` set to this example's full path and `out` set to a test folder. From a WSL
-shell, `mcp_call.py` starts a server of its own:
+In an MCP client, call `mod_build` with `game` set to `LE1`, `folder` set to this example's full path and `out` set to a
+test folder. From a WSL shell, `mcp_call.py` starts a server of its own:
 
 ```bash
 cd <toolkit checkout>
-args=$(python3 -I -c 'import json, sys; print(json.dumps({"folder": sys.argv[1], "out": sys.argv[2]}))' \
+args=$(python3 -I -c 'import json, sys; print(json.dumps({"game": "LE1", "folder": sys.argv[1], "out": sys.argv[2]}))' \
     "$(wslpath -w examples/hello-npc)" 'C:\mymod-build')
 python3 -I tools/mele-mcp/scripts/mcp_call.py mod_build "$args"
 ```
@@ -62,14 +63,15 @@ A second build changes nothing, and `levelsAgain` stays empty. Delete the folder
        name: { type: MyModGuard, strref: 61230001, en: "Cargo Guard" }   # in npcs.guard
    ```
 
-3. Call `mod_build` with `folder` only. `package` now resolves to the library mod that has `DLC_MOD_MyMod`.
-4. Call `mod_check` with `mod` set to `My Mod` and `languages` set to `INT`.
-5. Close the game, then call `mod_install` with `mod` set to `My Mod`.
+3. Call `mod_build` with `game` and `folder`, without `out`. `package` now resolves to the library mod that has
+   `DLC_MOD_MyMod`.
+4. Call `mod_check` with `game` set to `LE1`, `mod` set to `My Mod` and `languages` set to `INT`.
+5. Close the game, then call `mod_install` with `game` set to `LE1` and `mod` set to `My Mod`.
 6. In game, open the console and enter `at BIOA_MYM01 start_mym01`.
 
 ### Make it yours
 
 - Rename what the mod owns: the DLC folder, the level file, the conversation, the actor type in `name.type`, and the tags.
 - Take your own ids. `id_alloc` finds free ones, or checks those you picked.
-- Stand where the guard should be and call `npc_place` with `file` set to your `level.yaml`. It writes `location` and `yaw`
-  and builds the level.
+- Stand where the guard should be and call `npc_place` with `game` set to `LE1` and `file` set to your `level.yaml`. It
+  writes `location` and `yaw` and builds the level.

@@ -18,12 +18,12 @@ public static class KismetTools
                  + "(EventName, Conv...), linked outputs (Out → Target.In) and variables with their values. With the Kismet Logger ASI "
                  + "installed, each op is marked ✓ (fired this game session, with input pins and counts) or ✗: play, then read where the chain stops.")]
     public static string KismetRead(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description(PackageDescription)] string package,
         [Description("Sequence export (UIndex, path or unique name), e.g. TheWorld.PersistentLevel.Main_Sequence.")] string sequence = "TheWorld.PersistentLevel.Main_Sequence",
         [Description("Mark ops fired or not from the Kismet Logger's log of the current or last session.")] bool trace = true,
         [Description("all, fired or unfired.")] string show = "all",
-        [Description("Also print every nested sequence (prefabs can hold hundreds of ops).")] bool recurse = false,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Also print every nested sequence (prefabs can hold hundreds of ops).")] bool recurse = false)
         => ToolErrors.Run(() => KismetReader.Read(PackageTools.ParseGame(game), package, sequence, trace, show, recurse));
 
     [McpServerTool(Name = "kismet_add", Destructive = true),
@@ -31,23 +31,23 @@ public static class KismetTools
                  + "BioSeqEvt_OnPlayerActivate, BioSeqAct_StartConversation, SeqVar_Object. Returns its link slot names for kismet_link; "
                  + "set its properties (Originator, ObjValue, Conv...) with export_set_batch." + WriteRule)]
     public static KismetAddResult KismetAdd(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description(PackageDescription)] string package,
         [Description("Sequence export (UIndex or path), e.g. TheWorld.PersistentLevel.Main_Sequence.")] string sequence,
-        [Description("Class name of the new object.")] string className,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Class name of the new object.")] string className)
         => ToolErrors.Run(() => KismetEditor.Add(PackageTools.ParseGame(game), package, sequence, className));
 
     [McpServerTool(Name = "kismet_link", Destructive = true),
      Description("Links two Kismet objects: output (source output link → target action input), variable (source variable slot → "
                  + "SeqVar_*), event (source event slot → event). The link name must exist on the source (kismet_add lists them)." + WriteRule)]
     public static KismetLinkResult KismetLink(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description(PackageDescription)] string package,
         [Description("Source object (UIndex or path).")] string source,
         [Description("output, variable or event.")] string kind,
         [Description("Link name on the source, e.g. Out, Owner, Instigator.")] string link,
         [Description("Target object (UIndex or path).")] string target,
-        [Description("Input link index on the target action (output links only).")] int inputIndex = 0,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Input link index on the target action (output links only).")] int inputIndex = 0)
         => ToolErrors.Run(() => KismetEditor.Link(PackageTools.ParseGame(game), package, source, kind, link, target, inputIndex));
 
     [McpServerTool(Name = "level_build", Destructive = true),
@@ -95,8 +95,8 @@ public static class KismetTools
                  + "values are written; running it twice changes nothing. The format is in mele-maxgoods-toolkit's docs/yaml-reference.md, Level files. Backs every file up "
                  + "first (not forks: each is built again from the vanilla file) and refuses files inside the game install.")]
     public static LevelBuildResult LevelBuild(
+        [Description("Game: LE1.")] string game,
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
-        [Description("Level package, instead of the file's 'package'.")] string? package = null,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Level package, instead of the file's 'package'.")] string? package = null)
         => ToolErrors.Run(() => LevelBuilder.Build(PackageTools.ParseGame(game), file, package));
 }

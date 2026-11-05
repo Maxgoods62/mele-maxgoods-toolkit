@@ -1,7 +1,8 @@
-"""Minimal MCP stdio client: initialize, list tools, call le_status and pkg_info. mcp_smoke.py [package]
+"""Minimal MCP stdio client: initialize, list tools, call le_status and pkg_info. mcp_smoke.py [LE1 package]
 
 Settings as in mcp_call.py: the environment, then tools/mele-mcp/build.env. deploy.sh sets MELE_DLL to the DLL it
-just published. Exits 1 when the server finds no LE1 folder or pkg_info fails.
+just published. pkg_info passes game LE1, which the server requires. Exits 1 when the server finds no LE1 folder,
+pkg_info fails, or a call without game is not refused with 'requires game'.
 """
 import json
 import os
@@ -86,12 +87,18 @@ init = recv(1)["result"]
 print("server:", init["serverInfo"], "protocol:", init["protocolVersion"])
 send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-for t in recv(2)["result"]["tools"]:
-    print("tool:", t["name"], "| params:", list(t["inputSchema"].get("properties", {}).keys()),
-          "| readOnly:", t.get("annotations", {}).get("readOnlyHint"))
-
 failed = []
+
+send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+optional_game = []
+for t in recv(2)["result"]["tools"]:
+    schema = t["inputSchema"]
+    print("tool:", t["name"], "| params:", list(schema.get("properties", {}).keys()),
+          "| readOnly:", t.get("annotations", {}).get("readOnlyHint"))
+    if "game" in schema.get("properties", {}) and "game" not in schema.get("required", []):
+        optional_game.append(t["name"])
+if optional_game:
+    failed.append(f"game is optional in {', '.join(optional_game)}: every tool that takes game must require it")
 
 send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "le_status", "arguments": {}}})
 text = recv(3)["result"]["content"][0]["text"]
@@ -104,18 +111,25 @@ if not le1:
     failed.append("le_status has no LE1 folder (set MELE_LE_DIR to the Legendary Edition folder, as a Windows path)")
 
 send({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-      "params": {"name": "pkg_info", "arguments": {"package": PACKAGE, "topClasses": 3}}})
+      "params": {"name": "pkg_info", "arguments": {"game": "LE1", "package": PACKAGE, "topClasses": 3}}})
 r = recv(4)["result"]
 print("pkg_info isError:", r.get("isError"), "->", r["content"][0]["text"][:600])
 if r.get("isError"):
     failed.append(f"pkg_info {PACKAGE} failed")
 
 send({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-      "params": {"name": "pkg_info", "arguments": {"package": "DOES_NOT_EXIST.pcc"}}})
+      "params": {"name": "pkg_info", "arguments": {"game": "LE1", "package": "DOES_NOT_EXIST.pcc"}}})
 r = recv(5)["result"]
 print("missing file isError:", r.get("isError"), "->", r["content"][0]["text"][:300])
 if not r.get("isError"):
     failed.append("pkg_info of a missing file did not fail")
+
+send({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+      "params": {"name": "pkg_info", "arguments": {"package": PACKAGE}}})
+r = recv(6)["result"]
+print("no game isError:", r.get("isError"), "->", r["content"][0]["text"][:300])
+if not r.get("isError") or "requires game" not in r["content"][0]["text"]:
+    failed.append("pkg_info without game did not fail with 'requires game'")
 
 proc.stdin.close()
 proc.wait(timeout=20)

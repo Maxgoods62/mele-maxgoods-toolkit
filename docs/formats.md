@@ -66,7 +66,8 @@ Saves are in the game's own folder (§7). Backups and other files mele-mcp write
 
 ### 3.1 Transport
 
-- Name: `\\.\pipe\MeleBridge_LE1`, `MeleBridge_LE2` or `MeleBridge_LE3`. Each game's ASI serves its own.
+- Name: `\\.\pipe\MeleBridge_LE1`, `MeleBridge_LE2` or `MeleBridge_LE3`. Each game's ASI serves its own. A `live_*`
+  tool opens the pipe of the game its required `game` names.
 - Pipe: byte mode, local clients only (`PIPE_REJECT_REMOTE_CLIENTS`), any number of connections, one thread each.
 - Lines: UTF-8 JSON, one request per line, each ending in `\n`. One reply line per request, in order. A line of only
   spaces, tabs or `\r` is skipped. More than 1 MB of unread input closes the connection.

@@ -12,12 +12,12 @@ public static class ConditionalTools
      Description("Reads an LE3 conditionals file (.cnd): the ids, and the text of one conditional or of all of them. An entry with Hex has an operator LEC cannot decompile (it prints ()). "
                  + "roundTrip=true decompiles and recompiles every entry and counts how many give the same bytes. LE1 and LE2 have no .cnd files.")]
     public static CndListing CndGet(
+        [Description("Game: LE3.")] string game,
         [Description("File name of a loaded .cnd (default the base game's; a DLC's is Conditionals<DLC folder name>.cnd), or a full Windows or /mnt/<drive> path.")] string file = "Conditionals.cnd",
         [Description("Conditional id to decompile. Omit to list ids.")] int? id = null,
         [Description("Decompile every entry, up to limit.")] bool all = false,
         [Description("Maximum entries with text when all is true.")] int limit = 200,
-        [Description("Decompile and recompile every entry, then report the counts. Writes nothing.")] bool roundTrip = false,
-        [Description("Game: LE3.")] string game = "LE3")
+        [Description("Decompile and recompile every entry, then report the counts. Writes nothing.")] bool roundTrip = false)
         => ToolErrors.Run(() => ConditionalFiles.Get(PackageTools.ParseGame(game), file, id, all, limit, roundTrip));
 
     [McpServerTool(Name = "cnd_set", Destructive = true),
@@ -30,9 +30,9 @@ public static class ConditionalTools
                  + "Tested on scratch copies, not in game: that the game reads a file written here is not shown. A new file must be in the DLC's TOC (AutoTOC at install). "
                  + "Backs an existing file up first and refuses files inside the game install.")]
     public static CndEdit CndSet(
+        [Description("Game: LE3.")] string game,
         [Description("The mod's .cnd file: full Windows or /mnt/<drive> path.")] string file,
         [Description("Conditional id.")] int id,
-        [Description("Conditional text, as cnd_get prints it.")] string text,
-        [Description("Game: LE3.")] string game = "LE3")
+        [Description("Conditional text, as cnd_get prints it.")] string text)
         => ToolErrors.Run(() => ConditionalFiles.Set(PackageTools.ParseGame(game), file, id, text));
 }

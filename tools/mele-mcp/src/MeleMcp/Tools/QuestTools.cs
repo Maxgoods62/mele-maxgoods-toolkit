@@ -15,13 +15,13 @@ public static class QuestTools
                  + "LE1 base game: BIOC_Materials.pcc PlotManagerAuto.QuestMap; a DLC: PlotManagerAutoDLC_<name>.pcc QuestMap. "
                  + "LE2 base game: Startup_INT.pcc; LE3: SFXGameInfoSP_SF.pcc; a DLC: its Startup_<name>_INT.pcc, PlotManagerAutoDLC_<name>.QuestMap.")]
     public static object QuestMapGet(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Package with the map, e.g. BIOC_Materials.pcc, Startup_INT.pcc (LE2), SFXGameInfoSP_SF.pcc (LE3). File name or full path.")] string package,
         [Description("BioQuestMap export, e.g. QuestMap or PlotManagerAuto.QuestMap; LE2/LE3 also DataCodexMap.")] string export = "QuestMap",
         [Description("One quest id; for a codex map, one section or page id.")] int? questId = null,
         [Description("Only task evaluations run by this plot variable id, and their quests. Not used for a codex map.")] int? touches = null,
         [Description("Language for the text: INT, FR, DE... LE2/LE3 also take FRA, DEU, ESN, ITA, JPN, POL, RUS.")] string language = "FR",
-        [Description("Maximum quests returned; for a codex map, maximum sections and maximum pages.")] int limit = 20,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Maximum quests returned; for a codex map, maximum sections and maximum pages.")] int limit = 20)
         => ToolErrors.Run(() => QuestMaps.Get(PackageTools.ParseGame(game), package, export, questId, touches, language, limit));
 
     [McpServerTool(Name = "quest_set", Destructive = true),
@@ -31,6 +31,7 @@ public static class QuestTools
                  + "changes, the first of its evaluations whose state bool is true (-1: always) shows its task. Strings must be in the GlobalTlk. "
                  + "A package without the map gets one (add the returned AutoLoad.ini line). Backs the package up first and refuses files inside the game install.")]
     public static QuestEdit QuestSet(
+        [Description("Game: LE1.")] string game,
         [Description("Package for the map: your mod's PlotManagerAutoDLC_<name>.pcc. File name or full path.")] string package,
         [Description("Quest id, unique among all quest maps (check with id_alloc kind quest).")] int questId,
         [Description("Goals: name (title strref), description (strref), state (bool shown while true, -1), conditional (-1).")] QuestGoalSpec[]? goals = null,
@@ -39,8 +40,7 @@ public static class QuestTools
         [Description("Plot items: name, iconIndex, state, conditional, targetItems.")] QuestPlotItemSpec[]? plotItems = null,
         [Description("Missions tab instead of Assignments.")] bool isMission = false,
         [Description("Remove the quest and its evaluations instead.")] bool remove = false,
-        [Description("BioQuestMap export (created with this name if missing).")] string export = "QuestMap",
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("BioQuestMap export (created with this name if missing).")] string export = "QuestMap")
         => ToolErrors.Run(() => QuestMaps.Set(PackageTools.ParseGame(game), package, export, questId, isMission,
             goals ?? [], tasks ?? [], plotItems ?? [], evals ?? [], remove));
 }

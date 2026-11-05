@@ -19,9 +19,9 @@ Ids on this page are placeholders, so take your own with `id_alloc`.
 
 ## Builds
 
-`mod_build` takes `folder`, an optional `out` (see [Building into out](#building-into-out)) and `game`, default `LE1`. It
-reads the `*.yaml` and `*.yml` files at the top of `folder`, in name order. A file's top-level keys decide its kind, and the
-first row that matches wins:
+`mod_build` takes `game` (required, `LE1`), `folder` and an optional `out` (see [Building into out](#building-into-out)).
+It reads the `*.yaml` and `*.yml` files at the top of `folder`, in name order. A file's top-level keys decide its kind,
+and the first row that matches wins:
 
 | A file with | Is | Built by |
 |---|---|---|
@@ -40,8 +40,9 @@ A file with nothing but `vanilla` or `lights` is skipped by `mod_build`, though 
 
 The build stops at the first error and names the file. Files built before the error stay saved.
 
-`level_build`, `conv_build` and `plot_build` each build one file. They take `file`, an optional `package` that replaces the
-file's own, and `game`. `level_build` with `package` does not write `levels.json`. Paths are Windows or `/mnt/<drive>/` paths.
+`level_build`, `conv_build` and `plot_build` each build one file. They take `game` (required, `LE1`), `file` and an
+optional `package` that replaces the file's own. `level_build` with `package` does not write `levels.json`. Paths are
+Windows or `/mnt/<drive>/` paths.
 
 These tools write into a level file, keep its comments, then run `level_build`. They take no backup of the YAML and do not
 check where it lies, so keep your YAML in a source folder under version control.

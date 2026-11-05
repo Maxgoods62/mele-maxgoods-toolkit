@@ -1,7 +1,8 @@
 # In-game editor guide
 
 This page shows how to use the level editor that MeleBridge draws over the game, from opening it to shipping your
-edits in a mod. The editor is LE1 only: the LE2 and LE3 builds of MeleBridge leave it out.
+edits in a mod. The editor is LE1 only: the LE2 and LE3 builds of MeleBridge leave it out. Every tool that takes `game`
+requires it, so each tool this page names is called with `game` set to `LE1`.
 
 The reasons behind its behaviour are in the [design note](design/in-game-editor.md). The file fields are in
 [formats.md](formats.md). What has been tested in game is in [games.md](games.md).
@@ -123,7 +124,7 @@ on the floor below a point just short of it. It faces the camera and is selected
 The Catalog tab shows thumbnails of a curated prop list. It needs a one-time setup:
 
 1. Call `catalog_build`. Its default list is `catalog_index`'s curated meshes, and its `meshes` parameter adds more.
-2. With the game closed, call `mod_install` with `mod` set to `Mele Catalog`.
+2. With the game closed, call `mod_install` with `game` set to `LE1` and `mod` set to `Mele Catalog`.
 3. Start the game, tick Props, and open the tab.
 
 `catalog_build` writes `catalog.json` and `thumbs\` to `%LOCALAPPDATA%\MeleBridge\LE1\catalog`, and
@@ -359,11 +360,12 @@ entries, and `live_editor` lists every waiting entry.
 run. See [getting started](getting-started.md) for how to call tools.
 
 ```bash
-python3 -I tools/mele-mcp/scripts/mcp_call.py editor_import '{"file": "<level YAML>"}'
+python3 -I tools/mele-mcp/scripts/mcp_call.py editor_import '{"game": "LE1", "file": "<level YAML>"}'
 ```
 
 | Parameter | Default | What it does |
 |---|---|---|
+| `game` | required | `LE1` |
 | `file` | required | The level YAML, as a Windows or `/mnt/<drive>` path |
 | `session` | Found for you | The session file. The default is `<package name>.json`. For a sideloaded level, it is the newest session with an actor of that level. |
 | `build` | `true` | Runs `level_build` after writing the file |

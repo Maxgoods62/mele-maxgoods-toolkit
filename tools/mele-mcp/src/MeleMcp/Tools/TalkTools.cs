@@ -19,12 +19,12 @@ public static class TalkTools
                  + "LE2/LE3: from one loose .tlk file; female shows the file's female table text for an id (lines that differ for a female Shepard: "
                  + "almost none in INT, hundreds to thousands in other languages). Tested offline on shipped files, not in game.")]
     public static object TlkGet(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description(PackageDescription)] string package,
         [Description("String id to look up. Omit to list.")] int? id = null,
         [Description("Case-insensitive text filter.")] string? textContains = null,
         [Description("LE1: one BioTlkFile export (UIndex or path). Default: all of them.")] string? export = null,
-        [Description("Maximum strings per file.")] int limit = 50,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Maximum strings per file.")] int limit = 50)
         => ToolErrors.Run<object>(() =>
         {
             var parsed = PackageTools.ParseGame(game);
@@ -40,10 +40,10 @@ public static class TalkTools
                  + "and DLC, highest mount winning, with female: \"...\" after a line that differs for a female Shepard (LE2/LE3). "
                  + "LE2/LE3 keep conversations in _LOC_<LANG> packages only.")]
     public static string ConvRead(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Package holding the conversation, usually <area>_LOC_<LANG>.pcc. File name or full path.")] string package,
         [Description("BioConversation export (UIndex, path or unique name).")] string export,
-        [Description("TLK language. LE1: INT, FR, DE, IT, PLPC, RA... LE2/LE3: INT, FRA, DEU, ESN, ITA, JPN, POL, RUS (the LE1 names work too).")] string language = "FR",
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("TLK language. LE1: INT, FR, DE, IT, PLPC, RA... LE2/LE3: INT, FRA, DEU, ESN, ITA, JPN, POL, RUS (the LE1 names work too).")] string language = "FR")
         => ToolErrors.Run(() => ConversationReader.Read(PackageTools.ParseGame(game), package, export, language));
 
     [McpServerTool(Name = "conv_find", ReadOnly = true),
@@ -52,14 +52,14 @@ public static class TalkTools
                  + "copy. Returns file, conversation, node (E<n>/R<n> as conv_read names them), speaker, strref, text and plot gate. "
                  + "Filters combine; a search reads every package (a few seconds, LE3 the slowest).")]
     public static ConvFindResult ConvFind(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Substring of the speaker tag (e.g. hench_asari, hench_krogan, nor_chakwas), or owner / player.")] string? speaker = null,
         [Description("Case-insensitive substring of the line or its wheel paraphrase.")] string? text = null,
         [Description("A conditional, plot bool or transition id the line uses, e.g. 415.")] int? plotId = null,
         [Description("Substring of the conversation name, e.g. _dlg or nor10.")] string? conversation = null,
         [Description("Wildcard on package file names, e.g. BIOA_NOR*.")] string fileFilter = "*",
         [Description("Language of the text and of the _LOC_ packages read: INT, FR, DE, IT... LE2/LE3 also take FRA, DEU, ESN, ITA, JPN, POL, RUS.")] string language = "FR",
-        [Description("Maximum lines returned (Matches still counts all).")] int limit = 100,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Maximum lines returned (Matches still counts all).")] int limit = 100)
         => ToolErrors.Run(() => ConversationFinder.Find(PackageTools.ParseGame(game), speaker, text, plotId, conversation, fileFilter, language, limit));
 
     [McpServerTool(Name = "conv_audio", ReadOnly = true),
@@ -68,14 +68,14 @@ public static class TalkTools
                  + "Status, worst first: broken, other-voice (plays a wave named for another line: wrong words), no-vo-track, no-set, "
                  + "no-facefx (no lips, no voice), silent (lips move, no sound: our new lines), unchecked, voiced. Give a mod (all its packages) or one package.")]
     public static ConvAudioResult ConvAudio(
+        [Description("Game: LE1.")] string game,
         [Description("moddesc.ini, a mod folder, or a mod's folder name in M3's library, e.g. 'My Mod'.")] string? mod = null,
         [Description("One package instead of a mod, e.g. BIOA_NOR10_11_DSG_LOC_FR.pcc. File name or full path.")] string? package = null,
         [Description("Substring of the conversation name, e.g. req_officer.")] string? conversation = null,
         [Description("Language of the text and of the _LOC_ packages read (each has its own audio): INT, FR, DE, IT...")] string language = "FR",
         [Description("Also list voiced lines.")] bool includeVoiced = false,
         [Description("Also list lines no link leads to (template leftovers).")] bool includeUnreachable = false,
-        [Description("Maximum lines returned (Statuses still counts all).")] int limit = 200,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Maximum lines returned (Statuses still counts all).")] int limit = 200)
         => ToolErrors.Run(() => ConversationAudio.Check(PackageTools.ParseGame(game), mod, package, conversation, language, includeVoiced, includeUnreachable, limit));
 
     [McpServerTool(Name = "conv_add_node", Destructive = true),
@@ -84,13 +84,13 @@ public static class TalkTools
                  + "EndCurrentConvNode) with the VO track set to the strref, and its FaceFX lines to FXA_<strref>[_M] without sound, "
                  + "so lips move. Write the text with tlk_set and link the node with conv_link. Backs the package up first and refuses files inside the game install.")]
     public static ConvNodeAdded ConvAddNode(
+        [Description("Game: LE1.")] string game,
         [Description("Package holding the conversation. File name or full path.")] string package,
         [Description("BioConversation export (UIndex, path or unique name).")] string export,
         [Description("Node to copy, E<n> or R<n> as conv_read prints them. Pick one whose length and gestures fit the new line.")] string template,
         [Description("String id of the new line's text (subtitle, VO track and FaceFX name).")] int strRef,
         [Description("Line duration in seconds (InterpData length). Default: the template's.")] float? length = null,
-        [Description("Keep the template's plot condition and transition.")] bool keepPlot = false,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Keep the template's plot condition and transition.")] bool keepPlot = false)
         => ToolErrors.Run(() => ConversationEditor.AddNode(PackageTools.ParseGame(game), package, export, template, strRef, length, keepPlot));
 
     [McpServerTool(Name = "conv_link", Destructive = true),
@@ -98,14 +98,14 @@ public static class TalkTools
                  + "paraphrase strref and category), R<n> to E<n> (what the NPC answers). Re-adding an E → R link updates it. "
                  + "Backs the package up first and refuses files inside the game install.")]
     public static ConvLinkResult ConvLink(
+        [Description("Game: LE1.")] string game,
         [Description("Package holding the conversation. File name or full path.")] string package,
         [Description("BioConversation export (UIndex, path or unique name).")] string export,
         [Description("start, E<n> or R<n>.")] string from,
         [Description("E<n> or R<n>.")] string to,
         [Description("E → R only: wheel text strref.")] int? paraphrase = null,
         [Description("E → R only: wheel slot category: DEFAULT, AGREE, DISAGREE, FRIENDLY, HOSTILE, INVESTIGATE...")] string? category = null,
-        [Description("Remove the link instead.")] bool remove = false,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Remove the link instead.")] bool remove = false)
         => ToolErrors.Run(() => ConversationEditor.Link(PackageTools.ParseGame(game), package, export, from, to, paraphrase, category, remove));
 
     [McpServerTool(Name = "conv_build", Destructive = true),
@@ -116,17 +116,17 @@ public static class TalkTools
                  + "the file twice changes nothing new; every list in the file replaces the conversation's. The format is in mele-maxgoods-toolkit's docs/yaml-reference.md, Conversation files. "
                  + "Backs the packages up first and refuses files inside the game install.")]
     public static ConvBuildResult ConvBuild(
+        [Description("Game: LE1.")] string game,
         [Description("YAML file (Windows or /mnt/<drive> path).")] string file,
-        [Description("Package holding the conversation, instead of the file's 'package'.")] string? package = null,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Package holding the conversation, instead of the file's 'package'.")] string? package = null)
         => ToolErrors.Run(() => ConversationBuilder.Build(PackageTools.ParseGame(game), file, package));
 
     [McpServerTool(Name = "facefx_get", ReadOnly = true),
      Description("Lists the lip-sync lines inside a FaceFXAnimSet (e.g. a conversation's FXA_<conv>_Owner_F): name, id, path, curve and key counts, length.")]
     public static FaceFxSetLines FaceFxGet(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Package holding the FaceFXAnimSet. File name or full path.")] string package,
-        [Description("FaceFXAnimSet export (UIndex, path or unique name).")] string export,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("FaceFXAnimSet export (UIndex, path or unique name).")] string export)
         => ToolErrors.Run(() => FaceFxSets.Get(PackageTools.ParseGame(game), package, export));
 
     [McpServerTool(Name = "facefx_copy_lines", Destructive = true),
@@ -135,11 +135,11 @@ public static class TalkTools
                  + "the template's lip movement. By default the copy drops its sound cue, so the template voice does not play. "
                  + "Backs the package up first and refuses files inside the game install.")]
     public static FaceFxCopyResult FaceFxCopyLines(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Package holding the FaceFXAnimSet. File name or full path.")] string package,
         [Description("FaceFXAnimSet export (UIndex, path or unique name).")] string export,
         [Description("Copies: each has source (existing line name) and name (new line name).")] FaceFxLineCopy[] lines,
-        [Description("Keep the source line's sound cue (plays the template voice).")] bool withSound = false,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Keep the source line's sound cue (plays the template voice).")] bool withSound = false)
         => ToolErrors.Run(() => FaceFxSets.CopyLines(PackageTools.ParseGame(game), package, export, lines, withSound));
 
     [McpServerTool(Name = "conv_set_ids", Destructive = true),
@@ -147,11 +147,11 @@ public static class TalkTools
                  + "BioSeqEvt_ConvNode m_nNodeID/m_nConvResRefID), as LEX's ChangeConvoIDandConvNodeIDs. Run it on a conversation copied "
                  + "with export_import so its node data does not fire for the original. Backs the package up first and refuses files inside the game install.")]
     public static ConvIdsResult ConvSetIds(
+        [Description("Game: LE1.")] string game,
         [Description("Package holding the conversation. File name or full path.")] string package,
         [Description("BioConversation export (UIndex, path or unique name).")] string export,
         [Description("New m_nResRefID, unique among loaded conversations.")] int resRefId,
-        [Description("First new node id; nodes get nodeIdBase, nodeIdBase+1...")] int nodeIdBase,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("First new node id; nodes get nodeIdBase, nodeIdBase+1...")] int nodeIdBase)
         => ToolErrors.Run(() => ConversationEditor.SetIds(PackageTools.ParseGame(game), package, export, resRefId, nodeIdBase));
 
     [McpServerTool(Name = "tlk_set", Destructive = true),
@@ -161,11 +161,11 @@ public static class TalkTools
                  + "LE2/LE3 output reads back through LEC, non-ASCII text included. In LE2 the game loaded a .tlk it wrote; no LE3 one has been loaded. "
                  + "Backs an existing file up first and refuses files inside the game install. Use one id block per mod (mount x 10000).")]
     public static object TlkSet(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("LE1: package with BioTlkFile exports, e.g. the mod's DLC_MOD_<Name>_GlobalTlk_FR.pcc or a conversation's _LOC_ file. File name or full path. "
                      + "LE2/LE3: full path of the mod's <module>_<LANG>.tlk: <folder>_FRA.tlk for LE3, DLC_<n>_FRA.tlk for LE2, n from its BIOEngine.ini [Engine.DLCModules].")] string package,
         [Description("Strings to write: each has id and text; LE2/LE3 also take female, the text for a female Shepard.")] TlkString[] strings,
-        [Description("LE1: one BioTlkFile export (UIndex or path). Default: all of them.")] string? export = null,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("LE1: one BioTlkFile export (UIndex or path). Default: all of them.")] string? export = null)
         => ToolErrors.Run<object>(() =>
         {
             var parsed = PackageTools.ParseGame(game);

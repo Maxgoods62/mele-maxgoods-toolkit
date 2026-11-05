@@ -28,8 +28,8 @@ of it. There is no support and no roadmap, so issues may go unanswered and pull 
 | Restart the game on a save, close it | yes | yes | yes |
 | In-game editor, scenario runner | yes | no | no |
 
-[games.md](docs/games.md) has the full table, its limits and what has run in each game. Most tools default `game` to
-`LE1`, so pass `game` on each LE2 or LE3 call.
+[games.md](docs/games.md) has the full table, its limits and what has run in each game. Every tool that takes `game`
+requires it: `LE1`, `LE2` or `LE3`.
 
 ## What you need
 

@@ -1,5 +1,11 @@
 """Calls one mele-mcp tool from the shell: mcp_call.py <tool> ['<json arguments>'].
 
+  mcp_call.py le_status '{}'
+  mcp_call.py pkg_info '{"game": "LE1", "package": "BIOA_CRD00.pcc"}'
+  mcp_call.py live_status '{"game": "LE3"}'
+
+Every tool that takes game requires it (LE1, LE2 or LE3), and this script adds none. le_status takes no arguments.
+
 Starts a fresh server process, so it works while the Claude Code session's own server is stopped or stale.
 Settings come from the environment, then from tools/mele-mcp/build.env (not in git, see build.env.example):
 MELE_DOTNET (default: dotnet.exe on PATH), MELE_DLL (default: <MELE_OUT>\\MeleMcp.dll, where deploy.sh publishes).

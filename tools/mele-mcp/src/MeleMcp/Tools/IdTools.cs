@@ -14,12 +14,12 @@ public static class IdTools
                  + "in Autoload.ini (StateTransitionMap/ConsequenceMap events and the variables they write, QuestMap quest ids, BioAutoConditionals F<id> functions, "
                  + "GlobalTalkTable strings). Each used id lists who uses it.")]
     public static IdReport IdAlloc(
+        [Description("Game: LE1.")] string game,
         [Description("bool, int, float, conditional, transition, consequence, quest (BioQuestMap quest id) or strref.")] string kind,
         [Description("Ids to check. Omit to search from 'from'.")] int[]? ids = null,
         [Description("First id to try, e.g. the start of your mod's block (8421 for plot, 74210000 for strings).")] int? from = null,
         [Description("How many free ids to return when searching.")] int count = 1,
         [Description("DLC folders to scan besides the installed ones, e.g. your mod's M3 library copy (Windows or /mnt/<drive> path).")] string[]? extraDlcFolders = null,
-        [Description("Extra packages whose plot maps or BioTlkFile exports count, e.g. a conversation's level or _LOC_ file. File name or full path.")] string[]? packages = null,
-        [Description("Game: LE1.")] string game = "LE1")
+        [Description("Extra packages whose plot maps or BioTlkFile exports count, e.g. a conversation's level or _LOC_ file. File name or full path.")] string[]? packages = null)
         => ToolErrors.Run(() => IdAllocator.Find(PackageTools.ParseGame(game), kind, ids, from, count, extraDlcFolders, packages));
 }

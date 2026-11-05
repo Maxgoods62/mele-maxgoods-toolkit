@@ -31,9 +31,9 @@ public static class StatusTools
                  + "the game at boot, shared mounts, folders the Autoload ASI ignores. Notes: stale TOC, and LecPath when the other tools "
                  + "(LEC's cached list) open a different copy.")]
     public static FindFileResult LeFindFile(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("File name, e.g. BIOA_NOR10_07_DSG (no extension = .pcc) or Textures_DLC_MOD_X.tfc, or a wildcard (* and ?), e.g. BIONPC_*. "
                      + "A path keeps only its file name.")] string name,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1",
         [Description("Maximum files returned (TotalMatches still counts all).")] int limit = 50)
         => ToolErrors.Run(() => FileFinder.Find(PackageTools.ParseGame(game), name, limit));
 }

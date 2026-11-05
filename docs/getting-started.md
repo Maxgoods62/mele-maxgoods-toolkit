@@ -64,8 +64,8 @@ python3 -I scripts/mcp_call.py pkg_info '{"package":"BioP_Nor.pcc","game":"LE2"}
 ```
 
 `deploy.sh` stops the servers of `MELE_OUT`, because Windows locks a loaded DLL. Its smoke test uses an LE1 package
-and fails when the server finds no LE1 folder. Reconnect your client afterwards (`/mcp` in Claude Code). `mcp_call.py`
-calls one tool on a fresh server.
+and fails when the server finds no LE1 folder, or when a tool that takes `game` does not require it. Reconnect your
+client afterwards (`/mcp` in Claude Code). `mcp_call.py` calls one tool on a fresh server.
 
 `./package.sh` at the repo root (WSL) builds a zip in `dist/`. [THIRD_PARTY.md](../THIRD_PARTY.md) says what it holds.
 
@@ -135,9 +135,9 @@ Ask your client to call `le_status`. It reports all three games.
 }
 ```
 
-Then try a read-only call: `pkg_info` with `package` set to `BIOA_CRD00.pcc` for LE1, or to `BioP_Nor.pcc` with `game` set
-to `LE2` or `LE3`. Most tools default `game` to `LE1`, so pass it on every call for the other games. `cnd_get` and
-`cnd_set` default to `LE3`. `save_*`, `dlc_new` and `mergemod_build` require it.
+Then try a read-only call: `pkg_info` with `game` set to `LE1` and `package` to `BIOA_CRD00.pcc`, or with `game` set to
+`LE2` or `LE3` and `package` to `BioP_Nor.pcc`. Every tool that takes `game` requires it, so each call names its game:
+`LE1`, `LE2` or `LE3`. A tool made for one game needs it too.
 
 | Symptom | Cause | Fix |
 |---|---|---|

@@ -27,5 +27,7 @@ builder.Logging.SetMinimumLevel(LogLevel.Information);
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
+    .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, ct) =>
+        MeleMcp.Tools.RequiredGame.Missing(context.Params) ?? await next(context, ct)))
     .WithToolsFromAssembly();
 await builder.Build().RunAsync();

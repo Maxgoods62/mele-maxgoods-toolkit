@@ -1,6 +1,6 @@
 # Level of the example mod "My Mod": a map of its own, BIOA_MYM01, that shows the freighter of the uncharted-world
 # assignments (BIOA_FRE31: walls, cargo, lights, doors) without its scripts or enemies, and a guard who talks.
-# Build: mod_build folder=<this folder> (see ../README.md). Format: ../../docs/yaml-reference.md.
+# Build: mod_build game=LE1 folder=<this folder> (see ../README.md). Format: ../../docs/yaml-reference.md.
 # In game: at BIOA_MYM01 start_mym01 (console).
 
 requires: mele-mcp >= 0.1.0

@@ -38,7 +38,7 @@ MeleMcp.Core ... tool logic, no MCP dependency
 
 | Parameter | What it takes |
 |---|---|
-| `game` | `LE1`, `LE2` or `LE3`. Most tools default to `LE1`, so pass it for other games. `cnd_get` and `cnd_set` default to `LE3`. `dlc_new`, `mergemod_build` and `save_*` require it. |
+| `game` | `LE1`, `LE2` or `LE3`. Every tool that takes it requires it, the one-game tools too, and a call without it gets an error that names the games the tool takes. `le_status` and `le_refresh_files` take no `game`, and `xgame_decompile` takes `games`. |
 | `package` | A file name, resolved to the highest mounted copy, or a full path. |
 | `export` | A UIndex (the export's number in the package), an instanced full path, or a unique name. |
 | Any path | A Windows path or `/mnt/<drive>/...`. |
@@ -348,7 +348,7 @@ Run these scripts from WSL, inside the `tools/mele-mcp` folder. A variable in th
 | `scripts/deploy.sh [package]` | Stops the servers of `MELE_OUT`, publishes there, then runs the smoke test on that package. |
 | `scripts/stop-server.ps1 -OutDir <folder> [-ListOnly]` | Stops the servers of one folder, and others keep running. `deploy.sh` runs it first. |
 | `scripts/mcp_call.py <tool> ['<json>']` | Calls one tool with a fresh server. It exits 1 on a tool error. |
-| `scripts/mcp_smoke.py [package]` | Runs `initialize`, `tools/list`, `le_status`, `pkg_info`, and `pkg_info` on a missing file, which must fail. |
+| `scripts/mcp_smoke.py [package]` | Runs `initialize`, `tools/list`, `le_status`, `pkg_info` on an LE1 package, `pkg_info` on a missing file and `pkg_info` without `game`, which must both fail. It also fails when a tool that takes `game` does not require it. |
 | `scripts/scenario.py` | Runs in-game test suites, LE1 only: see [docs/scenarios.md](../../docs/scenarios.md). |
 
 ```sh
@@ -366,6 +366,7 @@ package, `BIOA_CRD00.pcc` by default.
 ## Dev loop
 
 1. Edit the code. A new tool is a `[McpServerTool]` method in a `[McpServerToolType]` class under `src/MeleMcp/Tools/`.
+   A tool that works on a game takes `game` as its first parameter, with no default.
 2. Run `./scripts/deploy.sh`.
 3. In Claude Code, run `/mcp`, pick `mele` and reconnect, because the deploy stopped the old process.
 

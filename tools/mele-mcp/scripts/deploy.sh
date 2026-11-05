@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build mele-mcp with the Windows .NET SDK, publish it to MELE_OUT, then smoke-test the stdio server.
-#   scripts/deploy.sh [package]    the package for the smoke test's pkg_info call (default BIOA_CRD00_LOC_FR.pcc)
+#   scripts/deploy.sh [package]    an LE1 package for the smoke test's pkg_info call, which passes game LE1
+#                                  (default BIOA_CRD00_LOC_FR.pcc). The smoke test also fails when a tool's game is optional.
 # Runs in WSL. Settings come from the environment, then from tools/mele-mcp/build.env (not in git, see
 # build.env.example); a variable the caller exported wins over build.env.
 #   MELE_DOTNET   the Windows dotnet.exe, as a WSL path (default: dotnet.exe on PATH; global.json pins the SDK)

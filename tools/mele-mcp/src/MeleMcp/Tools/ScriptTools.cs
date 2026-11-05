@@ -19,11 +19,11 @@ public static class ScriptTools
                  + "In LE2 a function it compiled returned its string through live_call; no LE3 output has been loaded by the game. "
                  + "Backs the package up first. Refuses files inside the game install, for a dry run too.")]
     public static ScriptCompileResult Compile(
+        [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("Package: the mod's copy. Full Windows or /mnt/<drive> path, or a file name that does not resolve to the game install.")] string package,
         [Description("Function, State or Class export: UIndex, instanced full path, or a name unique in the package.")] string export,
         [Description("UnrealScript text.")] string? source = null,
         [Description("Text file holding the source, instead of source (Windows or /mnt/<drive> path).")] string? sourceFile = null,
-        [Description("Compile and report, save nothing.")] bool dryRun = false,
-        [Description("Game: LE1, LE2 or LE3.")] string game = "LE1")
+        [Description("Compile and report, save nothing.")] bool dryRun = false)
         => ToolErrors.Run(() => ScriptCompile.Compile(PackageTools.ParseGame(game), package, export, source, sourceFile, dryRun));
 }
