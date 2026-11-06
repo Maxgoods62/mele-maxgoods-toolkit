@@ -62,6 +62,7 @@ which keeps an AutoLoad package's classes loaded.
 | Command | Games | What it does |
 |---|---|---|
 | `portmesh <srcPcc> <srcUIndex> <pcc> <newName>` | Any | Ports a `StaticMesh` with its materials, textures and local shaders to the top level of an existing package. It exits 0 even after printing `BROKEN material`. |
+| `portfx <srcPcc> <srcUIndex> <pcc> <newName>` | Any; source of any game | Ports any export, such as a `ParticleSystem`, with what it uses to the top level of an existing package. An object the target game can't load, such as an LE3 material that only LE3's `SFXGame.pcc` holds, is first copied from the source game's file that holds it. Exits 1 on a broken material or an import the target game can't load. Shaders port between LE1 and LE3 only. |
 | `addtexture <pcc> <name> <png> [--argb]` | Any | Adds a new top-level UI `Texture2D` from a PNG, as DXT5 with one mip. `--argb` stores it uncompressed, since DXT5 bands dark colours. |
 | `morphface <donor.pcc> <donorFace> <pcc> <face> [--mic <path>] [--sha1 <hex>]` | Any; donor of any game | Gives a `BioMorphFace` the donor's look, in place: LOD0 and LOD1 vertices, bones, and material values. It prints the look's SHA-1. |
 | `gfxpackage <src.pcc> <movie> <out.pcc> [--raw-data <file>] [--copy-textures] [--add-texture <name> <like>]... [--texture <name> <png\|#RRGGBB>]...` | `LECGAME` | Replaces `<out.pcc>` with a package holding a top-level copy of a `GFxMovieInfo` (a Scaleform UI movie), so `PanelResource="<out file name>.<movie name>"` opens it. |

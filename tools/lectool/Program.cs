@@ -17,8 +17,8 @@ LE1Directory.ReloadDefaultGamePath();
 var gameArg = Environment.GetEnvironmentVariable("LECGAME") ?? "LE1";
 var game = Enum.Parse<MEGame>(gameArg);
 if (game == MEGame.LE2) LE2Directory.ReloadDefaultGamePath(); if (game == MEGame.LE3) LE3Directory.ReloadDefaultGamePath();
-// morphface reads a donor of another game, so it needs that game's object database too.
-LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default, s => Console.Error.WriteLine(s), objectDBsToLoad: args[0] == "morphface" ? new[]{MEGame.LE1, MEGame.LE2, MEGame.LE3} : new[]{game});
+// morphface and portfx read a file of another game, so they need that game's object database too.
+LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default, s => Console.Error.WriteLine(s), objectDBsToLoad: args[0] is "morphface" or "portfx" ? new[]{MEGame.LE1, MEGame.LE2, MEGame.LE3} : new[]{game});
 var cmd = args[0];
 // Every file lectool writes, deletes or saves in place goes through here: never one inside the game install (mele-mcp's
 // guard, which also sees junctions, shares and \\?\ spellings of that folder).
@@ -858,6 +858,54 @@ if (cmd == "2da") {
   foreach (var b in LegendaryExplorerCore.Shaders.ShaderCacheManipulator.GetBrokenMaterials(pkg, null)) Console.WriteLine("BROKEN material " + b);
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
+} else if (cmd == "portfx") {
+  // portfx <srcPcc> <srcUIndex> <pcc> <newName>: like portmesh, for any export (a particle system) and from another
+  // game. An object it needs that the target game can't load, such as an LE3 material that only LE3's SFXGame.pcc holds,
+  // is first copied from the source game's file that holds it, at the same path, so the export links to the copy.
+  // LEC copies shaders between LE1 and LE3 only: from LE2 the materials come out broken.
+  if (args.Length != 5) { Console.WriteLine("ERROR usage: portfx <srcPcc> <srcUIndex> <pcc> <newName>"); Environment.Exit(1); }
+  using var src = MEPackageHandler.OpenMEPackage(args[1]);
+  if (src.Game == MEGame.LE2) LE2Directory.ReloadDefaultGamePath(); else if (src.Game == MEGame.LE3) LE3Directory.ReloadDefaultGamePath();
+  var root = src.GetUExport(int.Parse(args[2]));
+  var cache = new PackageCache();
+  bool Loadable(ImportEntry i) => i.ClassName is "Class" or "Package" || EntryImporter.CanResolveImport(i, cache);
+  // Pass 1, never saved: the imports the port adds that the target game can't load.
+  List<string> missing;
+  using (var dry = MEPackageHandler.OpenMEPackage(Writable(args[3]), forceLoadFromDisk: true)) {
+    var before = dry.Imports.Select(i => i.InstancedFullPath).ToHashSet();
+    EntryExporter.ExportExportToPackage(root, dry, out _, cache, null);
+    missing = dry.Imports.Where(i => !before.Contains(i.InstancedFullPath) && !Loadable(i)).Select(i => i.InstancedFullPath).ToList();
+  }
+  using var pkg = MEPackageHandler.OpenMEPackage(Writable(args[3]), forceLoadFromDisk: true);
+  var importsBefore = pkg.Imports.Select(i => i.InstancedFullPath).ToHashSet();
+  foreach (var path in missing) {
+    var imp = src.Imports.FirstOrDefault(i => i.InstancedFullPath == path);
+    var dep = imp == null ? null : EntryImporter.ResolveImport(imp, cache);
+    if (dep == null) { Console.WriteLine($"ERROR {path}: {pkg.Game} can't load it, and no {src.Game} file holds it"); Environment.Exit(1); }
+    foreach (var r in EntryExporter.ExportExportToPackage(dep, pkg, out _, cache, null)) Console.WriteLine("relink: " + r);
+    Console.WriteLine($"copied {path} from {Path.GetFileName(dep.FileRef.FilePath)}");
+  }
+  var fxReport = EntryExporter.ExportExportToPackage(root, pkg, out var portedFx, cache, null);
+  foreach (var r in fxReport) Console.WriteLine("relink: " + r);
+  var newFx = (ExportEntry)portedFx;
+  newFx.ObjectName = NameReference.FromInstancedString(args[4]);
+  newFx.Parent = null;
+  foreach (var x in pkg.Exports) x.ExportFlags &= ~LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+  if (src.Game == pkg.Game) {
+    var portedPaths = pkg.Exports.Where(x => x.ClassName == "Material").Select(x => x.InstancedFullPath).ToHashSet();
+    var srcMats = src.Exports.Where(x => x.ClassName == "Material" && portedPaths.Contains(x.InstancedFullPath)).ToList();
+    var shaders = LegendaryExplorerCore.Shaders.ShaderCacheManipulator.GetLocalShadersForMaterials(srcMats, null);
+    if (shaders != null) LegendaryExplorerCore.Shaders.ShaderCacheManipulator.AddShadersToFile(pkg, shaders);
+  }
+  var unloadable = pkg.Imports.Where(i => !importsBefore.Contains(i.InstancedFullPath) && !Loadable(i)).ToList();
+  foreach (var i in unloadable) Console.WriteLine($"ERROR import {i.InstancedFullPath}: {pkg.Game} can't load it");
+  if (unloadable.Count > 0) Environment.Exit(1);
+  pkg.Save();
+  var broken = LegendaryExplorerCore.Shaders.ShaderCacheManipulator.GetBrokenMaterials(pkg, null).ToList();
+  foreach (var b in broken) Console.WriteLine("ERROR broken material " + b);
+  foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
+  foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
+  if (broken.Count > 0) Environment.Exit(1);
 } else if (cmd == "addtexture") {
   // addtexture <pcc> <name> <png> [--argb]: a new top-level texture in an existing package, made from a PNG: DXT5 (with
   // --argb uncompressed, as the vanilla UI gradients are: DXT5 bands dark colours), one mip, not sRGB, TEXTUREGROUP_UI,
