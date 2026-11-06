@@ -173,11 +173,19 @@ public static class ModChecker
         }
     }
 
+    /// <summary>
+    /// Whether a source of <see cref="IdAllocator.Collect"/> is one of this mod's folders. Its owner comes first, as
+    /// "&lt;folder&gt;: &lt;file&gt; ..." or "&lt;folder&gt; (&lt;path&gt;): ...", so DLC_MOD_XB's sources are not DLC_MOD_X's.
+    /// </summary>
+    internal static bool IsOwnSource(string source, IReadOnlyList<string> ownFolders) =>
+        ownFolders.Any(o => source.StartsWith(o, StringComparison.OrdinalIgnoreCase)
+                            && (source.AsSpan(o.Length).StartsWith(":") || source.AsSpan(o.Length).StartsWith(" (")));
+
     /// <summary>Ids this mod defines that another installed mod or the base game also defines.</summary>
     private static void Ids(MEGame game, IReadOnlyList<string> folders, List<ModFinding> findings, List<string> notes)
     {
         var own = folders.Select(f => Path.GetFileName(f.TrimEnd('\\', '/'))).ToList();
-        bool IsOwn(string source) => own.Any(o => source.StartsWith(o, StringComparison.OrdinalIgnoreCase));
+        bool IsOwn(string source) => IsOwnSource(source, own);
         foreach (var kind in IdKinds)
         {
             var sources = IdAllocator.Collect(game, kind, folders, [], notes);

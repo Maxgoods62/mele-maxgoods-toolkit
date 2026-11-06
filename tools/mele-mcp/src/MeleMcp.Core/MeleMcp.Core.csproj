@@ -9,6 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="MeleMcp.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Iced" Version="1.21.0" />
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
   </ItemGroup>

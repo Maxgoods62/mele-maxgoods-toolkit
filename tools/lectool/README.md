@@ -9,8 +9,9 @@ Start with [mele-mcp](../mele-mcp/README.md): its package tools make backups and
 when a build script needs a package with no server running, as `mele-galaxy-map-normandy` does. Use it also for quick dumps,
 and for jobs mele-mcp has no tool for.
 
-lectool has no install guard and makes no backups. It writes where its arguments point, so never give it an output path
-in the game folder. Build into your mod's folder and install with ME3Tweaks Mod Manager (M3).
+lectool makes no backups. It refuses to write, delete or save a file inside the game install (the same check as
+mele-mcp's), and refuses an output that is also one of its inputs. Build into your mod's folder and install with
+ME3Tweaks Mod Manager (M3).
 
 ## Build
 
@@ -39,8 +40,8 @@ MELE_LE_DIR='<LE folder>' WSLENV="$WSLENV:MELE_LE_DIR" /mnt/c/tools/lectool/lect
 
 From WSL, name each variable you set in `WSLENV`, and pass paths as Windows paths (`wslpath -w`).
 
-There is no usage text. An unknown command prints nothing and exits 0, so check the output. Commands with
-checks print `ERROR` lines and exit 1. A `uIndex` is an export's number, the first column of `pkglist`.
+There is no usage text. An unknown command, or a `--flag` that `buildsound` does not know, prints `ERROR` and exits 1,
+so a build script that is newer than your lectool fails. Commands with checks print `ERROR` lines and exit 1. A `uIndex` is an export's number, the first column of `pkglist`.
 
 `LE1` below means the command writes an LE1 package or reads LE1 data, whatever `LECGAME` says. `Any` means the code has
 no game check and follows your package. Per-game status is in [games.md](../../docs/games.md).
@@ -85,7 +86,7 @@ GlobalTlk. The strings file is UTF-8, each line an id, one tab and the text; emp
 | Command | Games | What it does |
 |---|---|---|
 | `2da <pcc> <uIndex>` | Any | Prints a table, tab-separated. |
-| `2dapart <src.pcc> <recipe.yaml> <out.pcc>` | LE1 | Writes a package for M3's Bio2DA merge: per table, a `<Table>_part_1` export with the recipe's rows. It first deletes `<out.pcc>`, even when that is `<src.pcc>`. |
+| `2dapart <src.pcc> <recipe.yaml> <out.pcc>` | LE1 | Writes a package for M3's Bio2DA merge: per table, a `<Table>_part_1` export with the recipe's rows. It first deletes `<out.pcc>`, and refuses an `<out.pcc>` that is `<src.pcc>` or the recipe. |
 | `2damerge [--add-only] <m3da> <modDir> <base.pcc> <out.pcc>` | LE1 file list | Runs M3's merge of one `.m3da` manifest on `<base.pcc>`, saves `<out.pcc>`, reads it back and checks each table. |
 
 ```yaml

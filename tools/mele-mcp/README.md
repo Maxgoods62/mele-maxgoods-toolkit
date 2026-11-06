@@ -337,7 +337,8 @@ All paths in this table are relative to `tools/mele-mcp`.
 | `src/MeleMcp.Core/` | The tool logic. `LecHost` starts LEC, `GameBridge` and `LiveBridge` hold the two pipes. |
 | `external/LegendaryExplorer/` | The LEC submodule. Fetch it with `git submodule update --init`. |
 | `global.json` | Pins the .NET SDK to 10.0.402, with later 10.0.x accepted. |
-| `build.env.example` | Template for the ignored `build.env`, which `deploy.sh` and the Python scripts read. |
+| `build.env.example` | Template for the ignored `build.env`, which `deploy.sh`, `test.sh` and the Python scripts read. |
+| `tests/MeleMcp.Core.Tests/` | The tests `scripts/test.sh` runs. Its README says what they cover and why. |
 
 ## Scripts
 
@@ -350,6 +351,7 @@ Run these scripts from WSL, inside the `tools/mele-mcp` folder. A variable in th
 | `scripts/mcp_call.py <tool> ['<json>']` | Calls one tool with a fresh server. It exits 1 on a tool error. |
 | `scripts/mcp_smoke.py [package]` | Runs `initialize`, `tools/list`, `le_status`, `pkg_info` on an LE1 package, `pkg_info` on a missing file and `pkg_info` without `game`, which must both fail. It also fails when a tool that takes `game` does not require it. |
 | `scripts/scenario.py` | Runs in-game test suites, LE1 only: see [docs/scenarios.md](../../docs/scenarios.md). |
+| `scripts/test.sh [dotnet test args]` | Builds lectool, then runs `tests/MeleMcp.Core.Tests` and `scenario.py --selftest`. Tests that need the game skip without it, and none writes into it. |
 
 ```sh
 ./scripts/deploy.sh

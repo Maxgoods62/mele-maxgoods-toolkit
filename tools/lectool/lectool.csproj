@@ -11,6 +11,10 @@
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
   </ItemGroup>
   <ItemGroup>
+    <!-- mele-mcp's write guard (PackageWriter.EnsureWritable), so lectool never writes into the game install. -->
+    <ProjectReference Include="..\mele-mcp\src\MeleMcp.Core\MeleMcp.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <!-- The same LEC as mele-mcp. LEC only defines WINDOWS (registry lookup, native DLL copy) in its Win* configurations. -->
     <ProjectReference Include="..\mele-mcp\external\LegendaryExplorer\LegendaryExplorer\LegendaryExplorerCore\LegendaryExplorerCore.csproj"
                       SetConfiguration="Configuration=WinRelease"

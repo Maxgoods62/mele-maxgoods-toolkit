@@ -9,6 +9,7 @@ using LegendaryExplorerCore.Unreal.ObjectInfo;
 using BmfBinary = LegendaryExplorerCore.Unreal.BinaryConverters.BioMorphFace;
 using MeshBinary = LegendaryExplorerCore.Unreal.BinaryConverters.SkeletalMesh;
 
+if (args.Length == 0) { Console.WriteLine("ERROR usage: lectool <command> <args>; the commands are listed in tools/lectool/README.md"); Environment.Exit(1); }
 // The Legendary Edition folder: MELE_LE_DIR as for mele-mcp (from WSL also set WSLENV=MELE_LE_DIR), else LEC's registry lookup.
 var leDir = Environment.GetEnvironmentVariable("MELE_LE_DIR");
 if (!string.IsNullOrWhiteSpace(leDir)) LegendaryExplorerCoreLibSettings.Instance.LEDirectory = leDir;
@@ -19,6 +20,20 @@ if (game == MEGame.LE2) LE2Directory.ReloadDefaultGamePath(); if (game == MEGame
 // morphface reads a donor of another game, so it needs that game's object database too.
 LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default, s => Console.Error.WriteLine(s), objectDBsToLoad: args[0] == "morphface" ? new[]{MEGame.LE1, MEGame.LE2, MEGame.LE3} : new[]{game});
 var cmd = args[0];
+// Every file lectool writes, deletes or saves in place goes through here: never one inside the game install (mele-mcp's
+// guard, which also sees junctions, shares and \\?\ spellings of that folder).
+string Writable(string path) {
+  try { MeleMcp.Core.PackageWriter.EnsureWritable(game, path); }
+  catch (InvalidOperationException ex) { Console.WriteLine("ERROR " + ex.Message); Environment.Exit(1); }
+  return path;
+}
+// An output that is also an input: deleting or overwriting it first would destroy the input.
+void NotAnInput(string outPath, params string[] inputs) {
+  foreach (var p in inputs)
+    if (MeleMcp.Core.GamePaths.Canonical(p).Equals(MeleMcp.Core.GamePaths.Canonical(outPath), StringComparison.OrdinalIgnoreCase)) {
+      Console.WriteLine($"ERROR {outPath}: the output is also an input"); Environment.Exit(1);
+    }
+}
 if (cmd == "ogg") {
   var dllDir = Environment.GetEnvironmentVariable("EXTRADLLDIR"); if (dllDir != null) SetDllDirectoryW(dllDir);
   var h = System.Runtime.InteropServices.NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, "ISACTTools.dll"));
@@ -27,7 +42,7 @@ if (cmd == "ogg") {
   var wav = File.ReadAllBytes(args[1]); var outb = new byte[wav.Length];
   int r = fn(wav, (uint)wav.Length, outb, (uint)outb.Length, 0.8f);
   Console.WriteLine($"CreateIPSOgg -> {r} bytes from {wav.Length} wav bytes");
-  if (r > 0) File.WriteAllBytes(args[2], outb.Take(r).ToArray());
+  if (r > 0) File.WriteAllBytes(Writable(args[2]), outb.Take(r).ToArray());
   return;
 }
 if (cmd == "2da") {
@@ -47,7 +62,8 @@ if (cmd == "2da") {
   // cells by column name, typed like the copied cell, else like most of the column's cells; `~` empties a cell. A table
   // stored without cell indexes has every cell filled, so an empty cell in its rows is an error: written that way, the
   // cells after it would shift left. Prints the tables as read back from out.pcc.
-  var outPath = args[3];
+  var outPath = Writable(args[3]);
+  NotAnInput(outPath, args[1], args[2]);
   if (File.Exists(outPath)) File.Delete(outPath);
   TwoDaRecipe recipe;
   try { recipe = new YamlDotNet.Serialization.DeserializerBuilder().WithDuplicateKeyChecking().Build().Deserialize<TwoDaRecipe>(File.ReadAllText(args[2])); }
@@ -143,7 +159,8 @@ if (cmd == "2da") {
   bool addOnly = args.Contains("--add-only");
   var a = args.Where(x => x != "--add-only").ToArray();
   var manifest = Newtonsoft.Json.JsonConvert.DeserializeObject<List<M3DAEntry>>(File.ReadAllText(a[1])) ?? new();
-  var (modDir, basePath, outPath) = (a[2], a[3], a[4]);
+  var (modDir, basePath, outPath) = (a[2], a[3], Writable(a[4]));
+  NotAnInput(outPath, a[1], basePath);
   var errors = new List<string>();
   void Fail(string e) { Console.WriteLine("ERROR " + e); errors.Add(e); }
   using var basePkg = MEPackageHandler.OpenMEPackage(basePath, forceLoadFromDisk: true);
@@ -229,7 +246,7 @@ if (cmd == "2da") {
   // so they share no path with the look package's own copies; an import under them is an error, as it could no longer
   // be found. `set` gives plain values, typed by the class. An ObjectReferencer lists the actor type, as in LE1CP's
   // rebuilt henchman packages. No shader cache is copied: pkgcheck tells whether the game's RefShaderCache covers it.
-  var (templatePath, lookPath, outPath) = (args[2], args[3], args[4]);
+  var (templatePath, lookPath, outPath) = (args[2], args[3], Writable(args[4]));
   if (new[] { args[1], templatePath, lookPath }.Any(p => Path.GetFullPath(p).Equals(Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase))) {
     Console.WriteLine($"ERROR {outPath}: the output is also an input"); Environment.Exit(1);
   }
@@ -449,7 +466,7 @@ if (cmd == "2da") {
   string Opt(string name) { int i = a.IndexOf(name); if (i < 0) return null; var v = i + 1 < a.Count ? a[i + 1] : null; a.RemoveRange(i, Math.Min(2, a.Count - i)); return v ?? ""; }
   var (micPath, wantSha) = (Opt("--mic"), Opt("--sha1"));
   if (a.Count != 4 || micPath == "" || wantSha == "") { Console.WriteLine("usage: morphface <donor.pcc> <donorFace> <pcc> <face> [--mic <path>] [--sha1 <hex>]"); Environment.Exit(1); return; }
-  var (donorPath, donorName, path, faceName) = (a[0], a[1], a[2], a[3]);
+  var (donorPath, donorName, path, faceName) = (a[0], a[1], Writable(a[2]), a[3]);
   using var donorPkg = MEPackageHandler.OpenMEPackage(donorPath, forceLoadFromDisk: true);
   var errors = new List<string>();
   void Stop() { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
@@ -526,7 +543,7 @@ if (cmd == "2da") {
   var errors = new List<string>();
   const string usage = "gfxpackage <src.pcc> <movie> <out.pcc> [--raw-data <file>] [--copy-textures] [--add-texture <name> <like>]... [--texture <name> <png|#RRGGBB>]...";
   if (args.Length < 4) { Console.WriteLine("ERROR usage: " + usage); Environment.Exit(1); }
-  var (srcPath, moviePath, outPath) = (args[1], args[2], args[3]);
+  var (srcPath, moviePath, outPath) = (args[1], args[2], Writable(args[3]));
   var copyAll = false;
   string rawPath = null;
   var replace = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -543,8 +560,7 @@ if (cmd == "2da") {
       _ => $"unknown option {args[i]}",
     });
   }
-  foreach (var p in new[] { srcPath, rawPath }.Where(p => p != null))
-    if (Path.GetFullPath(p).Equals(Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase)) errors.Add($"{outPath}: the output is also an input");
+  NotAnInput(outPath, new[] { srcPath, rawPath }.Concat(replace.Values.Where(v => !v.StartsWith('#'))).Where(p => p != null).ToArray());
   if (rawPath != null && !File.Exists(rawPath)) errors.Add($"--raw-data {rawPath}: no such file");
   foreach (var (name, v) in replace)
     if (v.StartsWith('#') ? v.Length != 7 || !int.TryParse(v[1..], System.Globalization.NumberStyles.HexNumber, null, out _) : !File.Exists(v))
@@ -699,7 +715,7 @@ if (cmd == "2da") {
   var exp = pcc.GetUExport(int.Parse(args[2]));
   var bank = ObjectBinary.From<WwiseBankParsed>(exp);
   Console.WriteLine($"bank {exp.InstancedFullPath} id={bank.ID} embedded={bank.EmbeddedFiles.Count} hirc={bank.HIRCObjects.Count}");
-  var dumpDir = Environment.GetEnvironmentVariable("WEMDIR");
+  var dumpDir = Environment.GetEnvironmentVariable("WEMDIR") is { } wemDir ? Writable(wemDir) : null;
   var dumpIds = (Environment.GetEnvironmentVariable("WEMIDS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(uint.Parse).ToHashSet();
   foreach (var kv in bank.EmbeddedFiles) { if (dumpDir != null && dumpIds.Contains(kv.Key)) File.WriteAllBytes(Path.Combine(dumpDir, kv.Key + ".wem"), kv.Value); }
   foreach (var g in bank.HIRCObjects.Values.GroupBy(h => h.Type)) Console.WriteLine($"  hirc {g.Key} x{g.Count()}");
@@ -740,7 +756,7 @@ if (cmd == "2da") {
     var bytes = rd?.Bytes;
     if (bytes == null) { var ap = e.GetProperty<ArrayProperty<ByteProperty>>("RawData"); if (ap != null) bytes = ap.Select(b => b.Value).ToArray(); }
     if (bytes == null) continue;
-    var outp = Path.Combine(args[2], e.ObjectName.Instanced + ".gfx");
+    var outp = Writable(Path.Combine(args[2], e.ObjectName.Instanced + ".gfx"));
     File.WriteAllBytes(outp, bytes);
     Console.WriteLine($"{e.UIndex}\t{e.InstancedFullPath}\t{bytes.Length}");
   }
@@ -759,7 +775,10 @@ if (cmd == "2da") {
   // Adds the cue to outPcc (created if missing); only the waves under the new cue get the Ogg.
   var (donorPath, donorCue, oggPath) = (args[1], args[2], args[3]);
   int samples = int.Parse(args[4]), channels = int.Parse(args[5]), rate = int.Parse(args[6]);
-  var (outPath, newName, title) = (args[7], args[8], args[9]);
+  var (outPath, newName, title) = (Writable(args[7]), args[8], args[9]);
+  // A flag this lectool does not know (a build script newer than the toolkit) must stop the build, not be skipped.
+  foreach (var f in args.Skip(10).Where(f => f.StartsWith("--") && f is not ("--loop" or "--unique-wave"))) { Console.WriteLine($"ERROR unknown option {f}"); Environment.Exit(1); }
+  NotAnInput(outPath, donorPath);
   using var donor = MEPackageHandler.OpenMEPackage(donorPath);
   var cue = donor.Exports.Single(x => x.ClassName == "SoundCue" && x.ObjectName.Instanced == donorCue);
   if (!File.Exists(outPath)) MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
@@ -823,7 +842,7 @@ if (cmd == "2da") {
   // materials' local shaders to the top level of an existing package
   using var src = MEPackageHandler.OpenMEPackage(args[1]);
   var mesh = src.GetUExport(int.Parse(args[2]));
-  using var pkg = MEPackageHandler.OpenMEPackage(args[3], forceLoadFromDisk: true);
+  using var pkg = MEPackageHandler.OpenMEPackage(Writable(args[3]), forceLoadFromDisk: true);
   var report = LegendaryExplorerCore.Packages.CloningImportingAndRelinking.EntryExporter.ExportExportToPackage(mesh, pkg, out var ported, null, null);
   foreach (var r in report) Console.WriteLine("relink: " + r);
   var newMesh = (ExportEntry)ported;
@@ -849,7 +868,7 @@ if (cmd == "2da") {
   var (w, h) = (png.Width, png.Height);
   var px = new byte[w * h * 4];
   png.CopyPixelDataTo(px);
-  using var pkg = MEPackageHandler.OpenMEPackage(args[1], forceLoadFromDisk: true);
+  using var pkg = MEPackageHandler.OpenMEPackage(Writable(args[1]), forceLoadFromDisk: true);
   if (pkg.FindExport(args[2]) != null) { Console.WriteLine($"ERROR {args[2]}: already in {Path.GetFileName(args[1])}"); Environment.Exit(1); }
   var tex = Texture2D.CreateTexture(pkg, new NameReference(args[2]), w, h, argb ? LegendaryExplorerCore.Textures.PixelFormat.ARGB : LegendaryExplorerCore.Textures.PixelFormat.DXT5, false, null, new NameReference("TEXTUREGROUP_UI"));
   tex.ObjectFlags |= LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.Public | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForClient
@@ -884,7 +903,8 @@ if (cmd == "2da") {
       Environment.Exit(1);
     }
   }
-  var outPath = args[1];
+  var outPath = Writable(args[1]);
+  NotAnInput(outPath, idsFrom ? new[] { args[2], args[4] } : new[] { args[2] });
   if (File.Exists(outPath)) File.Delete(outPath);
   MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
   string[] tlkNames = { "GlobalTlk_tlk", "GlobalTlk_tlk_M" };
@@ -928,7 +948,7 @@ if (cmd == "2da") {
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
   var tex = int.TryParse(args[2], out var ui) ? pcc.GetUExport(ui) : pcc.FindExport(args[2]);
   if (tex is not { ClassName: "Texture2D" }) { Console.WriteLine($"ERROR {args[2]}: not a Texture2D export of {Path.GetFileName(args[1])}"); Environment.Exit(1); }
-  Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(tex).ExportToPNG(args[3]));
+  Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(tex).ExportToPNG(Writable(args[3])));
 } else if (cmd == "coalesced") {
   // coalesced <bin> <outDir> [filter]: writes every ini of a Coalesced file (LE1, LE2, or LE3's Coalesced.bin and DLC
   // Default_<DLC>.bin) to outDir and prints the lines that contain filter, with tabs shown as \t (ConfigDelta removals
@@ -958,7 +978,7 @@ if (cmd == "2da") {
     foreach (var kv in LegendaryExplorerCore.Coalesced.CoalescedConverter.DecompileLE1LE2ToMemory(fs, Path.GetFileName(args[1])))
       files.Add((kv.Key.Replace('\\', '/').Split('/').Last(), kv.Value.ToString()));
   }
-  Directory.CreateDirectory(args[2]);
+  Directory.CreateDirectory(Writable(args[2]));
   foreach (var (name, text) in files) {
     File.WriteAllText(Path.Combine(args[2], name), text);
     if (args.Length < 4) continue;
@@ -973,7 +993,8 @@ if (cmd == "2da") {
   // --unforce=<name> clears that, so its classes load from this file as <file>.<name>.<class> (LE1CP Mod Settings Menu
   // pages, which the menu loads by path when it opens them). --no-referencer leaves out the referencer (a file that is
   // not a GlobalPackage).
-  var outPath = args[1];
+  var outPath = Writable(args[1]);
+  NotAnInput(outPath, args.Skip(3).Where(a => !a.StartsWith("--")).ToArray());
   if (File.Exists(outPath)) File.Delete(outPath);
   MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
   using var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
@@ -1011,7 +1032,7 @@ if (cmd == "2da") {
 } else if (cmd == "addactor") {
   // addactor <levelPcc> <package> <class>: places one actor of a script class at the origin of the level, with its class
   // defaults. The class is imported from <package>, which must already be in memory (an AutoLoad GlobalPackage).
-  using var pcc = MEPackageHandler.OpenMEPackage(args[1], forceLoadFromDisk: true);
+  using var pcc = MEPackageHandler.OpenMEPackage(Writable(args[1]), forceLoadFromDisk: true);
   var (pkgName, clsName) = (args[2], args[3]);
   ImportEntry Imp(IEntry parent, string name, string className, string packageFile) {
     var found = pcc.Imports.FirstOrDefault(i => i.ObjectName.Instanced == name && i.Parent == parent);
@@ -1084,14 +1105,18 @@ if (cmd == "2da") {
   foreach (var e in pcc.Exports.Where(x => x.ClassName == "SoundNodeWave" && args.Skip(3).Any(f => x.ObjectName.Instanced.Contains(f, StringComparison.OrdinalIgnoreCase)))) {
     var bin = ObjectBinary.From<SoundNodeWave>(e);
     var name = e.ObjectName.Instanced.Replace(":", "_");
-    File.WriteAllBytes(Path.Combine(args[2], name + ".raw"), bin.RawData);
+    File.WriteAllBytes(Writable(Path.Combine(args[2], name + ".raw")), bin.RawData);
     var bp = LegendaryExplorerCore.Sound.ISACT.ISACTHelper.GetPairedBanks(bin.RawData);
     int i = 0;
     foreach (var c in bp.ISBBank.GetAllBankChunks().Where(c => c.ChunkName == "data")) {
-      File.WriteAllBytes(Path.Combine(args[2], $"{name}.data{i++}.bin"), c.RawData);
+      File.WriteAllBytes(Writable(Path.Combine(args[2], $"{name}.data{i++}.bin")), c.RawData);
     }
     Console.WriteLine($"{e.UIndex}\t{e.InstancedFullPath}\traw={bin.RawData.Length}\tdatachunks={i}");
   }
+} else {
+  // A build script that calls a command this lectool does not have (an older toolkit) must fail, not pass.
+  Console.WriteLine($"ERROR unknown command {cmd}; the commands are listed in tools/lectool/README.md");
+  Environment.Exit(1);
 }
 
 // A strings file: UTF-8 lines of an id, one tab and the text. Empty lines and lines starting with # are skipped.

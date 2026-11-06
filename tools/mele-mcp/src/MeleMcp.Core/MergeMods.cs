@@ -527,8 +527,7 @@ public static partial class MergeMods
             var text = value ?? (update["propertyasset"] is { } asset ? Encoding.UTF8.GetString(plan.Sources[asset.GetValue<string>()]) : throw new ArgumentException("no array literal given."));
             if (plan.FromChanges)
             {
-                var file = $"{plan.Stem}_{UnsafeChars().Replace(name, "_")}.uc";
-                plan.Sources[file] = new UTF8Encoding(false).GetBytes(text);
+                var file = ArrayAssetFile(plan.Sources, plan.Stem, target.ObjectName.Instanced, name, new UTF8Encoding(false).GetBytes(text));
                 update.Remove("propertyvalue");
                 update["propertyasset"] = file;
             }
@@ -540,6 +539,20 @@ public static partial class MergeMods
             CheckValue(target, type, value);
         }
         return $"{name} ({type}): {Show(current)} -> {value ?? "array"}";
+    }
+
+    /// <summary>
+    /// Stores an array literal in sources and returns its file name: &lt;stem&gt;_&lt;export&gt;_&lt;property&gt;.uc, with _2, _3... when
+    /// another literal already has that name. Two exports that set an array of the same name each keep their own literal;
+    /// the same literal twice (a check run again) reuses its file.
+    /// </summary>
+    internal static string ArrayAssetFile(Dictionary<string, byte[]> sources, string stem, string exportName, string property, byte[] bytes)
+    {
+        var stub = $"{stem}_{UnsafeChars().Replace($"{exportName}_{property}", "_")}";
+        var file = stub + ".uc";
+        for (var n = 2; sources.TryGetValue(file, out var had) && !had.AsSpan().SequenceEqual(bytes); n++) file = $"{stub}_{n}.uc";
+        sources[file] = bytes;
+        return file;
     }
 
     private static void CheckValue(ExportEntry target, string type, string value)

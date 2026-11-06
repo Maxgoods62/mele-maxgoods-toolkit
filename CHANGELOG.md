@@ -85,6 +85,14 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 91 tools:
 - lectool: `coalesced` reads LE3's `Coalesced.bin` and `Default_<DLC>.bin`.
 - lectool: `morphface` gives a `BioMorphFace` the look of another, in place: LOD0 and LOD1 vertices, bones and material
   parameters. The donor may be a face of another game. `--sha1` stops the run on any other donor look.
+- lectool refuses to write, delete or save a file inside the Legendary Edition folder (mele-mcp's guard), refuses an
+  output that is also an input, and exits 1 on an unknown command or an unknown `buildsound` flag.
+- Tests: `tools/mele-mcp/scripts/test.sh` runs `tests/MeleMcp.Core.Tests` (MSTest) and `scenario.py --selftest`. They
+  cover the write guard, lectool's exit codes and guard, and the bugs below. Tests that read game files skip without
+  the game. No CI: run it before a push.
+- Fixed before release: `mod_check` took a sibling folder whose name starts with the mod's (`DLC_MOD_XB` for
+  `DLC_MOD_X`) for the mod itself, and missed its id clashes. `conv_build`'s lip-sync copy replaced an existing line of
+  the new strref, voiced or not. `mergemod_build` gave two exports' arrays of the same name one shared `.uc` file.
 - release-kit: `kit.sh` renders one set of release files into each mod, checks them for drift, and scans a repo for game files
   and private strings.
 

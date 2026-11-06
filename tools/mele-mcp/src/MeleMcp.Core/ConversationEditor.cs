@@ -480,7 +480,7 @@ public static partial class ConversationEditor
     }
 
     /// <summary>Speaker id + 2 indexes m_aMaleFaceSets / m_aFemaleFaceSets (player -2 → 0, owner -1 → 1).</summary>
-    private static IEnumerable<string> CopyFaceFx(IMEPackage pcc, PropertyCollection props, int speaker, int oldStrRef, int strRef, List<string> notes)
+    internal static IEnumerable<string> CopyFaceFx(IMEPackage pcc, PropertyCollection props, int speaker, int oldStrRef, int strRef, List<string> notes)
     {
         var copied = new List<string>();
         foreach (var (setList, suffix) in new[] { ("m_aMaleFaceSets", "_M"), ("m_aFemaleFaceSets", "") })
@@ -491,9 +491,10 @@ public static partial class ConversationEditor
                 notes.Add($"No {setList} entry for speaker {speaker}: no lip sync for that Shepard gender.");
                 continue;
             }
-            var (created, _, missing) = FaceFxSets.CopyIn(set, [new FaceFxLineCopy($"FXA_{oldStrRef}{suffix}", $"FXA_{strRef}{suffix}")], withSound: false, skipMissing: true);
+            var (created, _, missing, kept) = FaceFxSets.CopyIn(set, [new FaceFxLineCopy($"FXA_{oldStrRef}{suffix}", $"FXA_{strRef}{suffix}")], withSound: false, skipMissing: true, keepExisting: true);
             copied.AddRange(created.Select(l => $"{set.ObjectName.Instanced}.{l.Name}"));
             notes.AddRange(missing.Select(m => $"{set.ObjectName.Instanced} has no line {m}: no lip sync for that Shepard gender."));
+            notes.AddRange(kept.Select(k => $"{set.ObjectName.Instanced} already has line {k}: kept as it is, with its own lip sync and sound."));
         }
         return copied;
     }
