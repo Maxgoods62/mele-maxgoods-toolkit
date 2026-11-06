@@ -4,7 +4,7 @@ This is my personal toolkit for modding Mass Effect Legendary Edition: LE1, LE2 
 need, and I change or remove things when I like. I share it as-is under GPL-3.0. You may use it, fork it or copy parts
 of it. There is no support and no roadmap, so issues may go unanswered and pull requests may stay unmerged.
 
-I rely heavily on LLMs to do the work. All of the code here were written by Claude Opus 5.5, through Claude
+I rely heavily on LLMs to do the work. All of the code here was written by Claude Opus 5.5, through Claude
 Code, from my instructions. I decide what to build and I test the results in the game.
 
 ## What is in it
