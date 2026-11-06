@@ -1,6 +1,7 @@
 # Releasing my mods
 
-My public mods share one way to release. Each mod's own `docs/releasing.md` has its exact steps and commands.
+My public mods share one way to release. A mod built on GitHub has its exact steps and commands in its own
+`docs/releasing.md`. A mod built on my PC has them at the top of its `scripts/release.sh`.
 
 ## Two ways to build
 

@@ -29,8 +29,8 @@ those commits keep what they hold.
 | `hosted` | Mods GitHub's Windows runner can build | `.github/workflows/build.yml`, `docs/releasing.md`, `scripts/protect-repo.sh`, `scripts/release-notes.sh` |
 | `local` | Mods whose build needs game files | `scripts/protect-repo.sh` |
 
-A `local` repo needs its own release script and `docs/releasing.md`. It has no build provenance: a hash and an immutable
-release show only that a file stayed the same after publishing.
+A `local` repo needs its own release script, with its steps at the top of the script. It has no build provenance: a
+hash and an immutable release show only that a file stayed the same after publishing.
 
 ## What a hosted repo must provide
 
@@ -60,4 +60,4 @@ them in the template.
 
 Add a tab-separated line to `repos.conf`: folder, owner/repo, file stem, title, profile. A title starts with a letter or
 digit and holds letters, digits, spaces and `. _ -`. Meet the list above and run `kit.sh apply <folder>`. Commit and push
-there, then follow that repo's `docs/releasing.md`, First setup.
+there. When the repo goes public, run its `scripts/protect-repo.sh` once, before its first release tag.

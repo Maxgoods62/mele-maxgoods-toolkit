@@ -4,7 +4,7 @@
 # GitHub refuses rulesets and Pages on a free account's private repo, and immutability covers only the releases published
 # after it is on. Safe to run again. Needs gh, logged in as the repo's admin.
 #   scripts/protect-repo.sh [owner/repo]
-# docs/releasing.md says what each setting stops.
+# Repo settings in mele-maxgoods-toolkit's docs/releasing.md says what each setting stops.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
