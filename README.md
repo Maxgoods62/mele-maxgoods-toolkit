@@ -91,6 +91,24 @@ its `build.sh --install`, also with the game closed. lectool and a few other wri
 - [mele-galaxy-map-normandy](https://github.com/Maxgoods62/mele-galaxy-map-normandy): an LE1 galaxy map mod built with
   lectool and mele-mcp.
 
+## Thanks
+
+This toolkit is built on other people's work, most of it given away for free.
+
+- The [Legendary Explorer](https://github.com/ME3Tweaks/LegendaryExplorer) team at ME3Tweaks and
+  [all its contributors](https://github.com/ME3Tweaks/LegendaryExplorer/graphs/contributors). mele-mcp and lectool
+  run on Legendary Explorer Core. Years of their work on the game's formats are what every tool here reads and writes
+  with.
+- ME3Tweaks, for [ME3Tweaks Mod Manager](https://github.com/ME3Tweaks/ME3TweaksModManager), its Starter Kit and the
+  ASI loader it installs, and for [LExASIs](https://github.com/ME3Tweaks/LExASIs), the tree MeleBridge builds in.
+- [LExSDKv2](https://github.com/llamathings/LExSDKv2), the game's classes in C++, which MeleBridge is compiled with.
+- The Mass Effect modding community in general: the people on the ME3Tweaks Discord, the authors of the Legendary
+  Explorer wiki tutorials, and everyone who shares what they find and what they build.
+- BioWare (RIP...), for the games.
+
+The open-source libraries the tools build with are listed with their licenses in [THIRD_PARTY.md](THIRD_PARTY.md) and
+[MeleBridge's list](tools/mele-bridge/THIRD_PARTY.md).
+
 ## License
 
 GPL-3.0, in `LICENSE`. Third-party licenses are in [THIRD_PARTY.md](THIRD_PARTY.md) and
