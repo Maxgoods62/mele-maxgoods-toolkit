@@ -2,7 +2,8 @@
 
 This folder holds one set of release files for the mods listed in `repos.conf`. `kit.sh` renders `templates/` into plain
 files in each mod repo and commits nothing. Nothing reads this folder at run time, and no repo needs another to build.
-[docs/releasing.md](../../docs/releasing.md) explains the result for players and modders.
+[docs/releasing.md](../../docs/releasing.md) explains the result for players and modders, and holds the release steps
+of a hosted repo. Each mod's README links to it; no mod has a releasing page of its own.
 
 ## Commands
 
@@ -26,7 +27,7 @@ those commits keep what they hold.
 
 | Profile | For | Rendered files |
 |---|---|---|
-| `hosted` | Mods GitHub's Windows runner can build | `.github/workflows/build.yml`, `docs/releasing.md`, `scripts/protect-repo.sh`, `scripts/release-notes.sh` |
+| `hosted` | Mods GitHub's Windows runner can build | `.github/workflows/build.yml`, `scripts/protect-repo.sh`, `scripts/release-notes.sh` |
 | `local` | Mods whose build needs game files | `scripts/protect-repo.sh` |
 
 A `local` repo needs its own release script, with its steps at the top of the script. It has no build provenance: a

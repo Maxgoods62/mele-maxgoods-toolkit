@@ -1,7 +1,7 @@
 # Releasing my mods
 
-My public mods share one way to release. A mod built on GitHub has its exact steps and commands in its own
-`docs/releasing.md`. A mod built on my PC has them at the top of its `scripts/release.sh`.
+My public mods share one way to release, and their READMEs link to this page. A mod built on GitHub follows the steps
+in [Publish a version](#publish-a-version). A mod built on my PC has its steps at the top of its `scripts/release.sh`.
 
 ## Two ways to build
 
@@ -20,8 +20,8 @@ the mod commit and the toolkit commit it was built with. That toolkit commit mus
 repo.
 
 A mod built on GitHub also has a latest build. Each push to `main` builds a zip and puts it on the repo's GitHub Pages
-site, under `latest/`. The page names the commit it was built from. A latest build has less testing than a release,
-and the next push replaces it.
+site: `https://<owner>.github.io/<repo>/latest/`, all in lower case. The page names the commit it was built from. A
+latest build has less testing than a release, and the next push replaces it.
 
 ## What every release has
 
@@ -44,6 +44,36 @@ Each repo runs `scripts/protect-repo.sh` once, when it goes public and before it
 | Ruleset `only admins create release tags` | Only the repo's admin can create a `v*` tag. |
 | Ruleset `main` | No one can force-push to `main` or delete it. I still push to it directly. |
 | Actions policy | Workflows can use only GitHub's actions and my own. Actions from other repos must be pinned to a full commit. A pull request from a fork runs no workflow until I approve it. |
+
+While a repo is still private, I push a tag only to test the workflow. That tag publishes a private release with no
+signed record, and a push to `main` publishes no latest page. I delete each test release before the repo goes public:
+`gh release delete v<N> --cleanup-tag`.
+
+## Publish a version
+
+These are my steps for a mod built on GitHub. `<N>` is the mod's version number, the value of `ASI_VERSION` in its
+`src/SharedVersion.h`. If a mod needs more for a release, its `BUILDING.md` says so.
+
+1. In the toolkit, run `tools/release-kit/kit.sh check`. It checks that each mod's release files on `main` match the
+   release kit.
+2. Set `ASI_VERSION`, `VERSION_STRING_A` and `VERSION_STRING_W` in `src/SharedVersion.h` to the new number, and date
+   the version's entry in `CHANGELOG.md`: `## v<N> (YYYY-MM-DD)`.
+3. Push `main`. Download the zip from the latest page and test it in the game. While the repo is private, take the zip
+   from the run's `dist` artifact instead.
+4. Check the `CHANGELOG.md` entry, then tag that commit and push the tag:
+
+   ```bash
+   scripts/release-notes.sh --check v<N>
+   git tag -a v<N> -m "<mod name> v<N>"
+   git push origin v<N>
+   ```
+
+The workflow then builds the zip from the tag and publishes the release. Each run's summary shows the hashes. The run
+also keeps the `.pdb` files for 90 days, as its `pdb` artifact. A `.pdb` matches only the ASI built in the same run.
+
+The workflow refuses the tag, and publishes nothing, when the tag differs from `ASI_VERSION`, its commit is not on
+`main`, `CHANGELOG.md` has no dated entry for it, or it already has a release. Once `protect-repo.sh` has run, a pushed
+tag can't be moved or deleted, even one the workflow refused. To fix a bad tag, I release the next version number.
 
 ## How the GitHub build is protected
 
