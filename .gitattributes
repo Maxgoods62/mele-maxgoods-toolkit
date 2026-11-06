@@ -1,0 +1,10 @@
+# Text files are stored with LF; a Windows checkout may turn them into CRLF.
+* text=auto
+
+# Read by bash (scripts, build.env copied from the example, repos.conf) or rendered
+# into the mod repos by kit.sh: LF on every checkout, Windows included.
+*.sh text eol=lf
+*.py text eol=lf
+*.example text eol=lf
+*.conf text eol=lf
+tools/release-kit/templates/** text eol=lf
