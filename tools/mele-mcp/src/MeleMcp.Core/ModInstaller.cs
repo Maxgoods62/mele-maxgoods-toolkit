@@ -38,16 +38,13 @@ public static class ModInstaller
         var targets = Split(customDlc?.GetValueOrDefault("destdirs"));
         if (sources.Count != targets.Count) throw new ArgumentException($"{moddesc}: [CUSTOMDLC] sourcedirs and destdirs differ in length.");
 
+        // Held from the check below to the compare: no other mele-mcp call (game_cycle's boot, another session's install) can start
+        // or touch this game between the check and M3's copy. game_cycle already holds it, and takes it again here.
+        using var held = GameLock.ForGame(game);
         // M3 overwrites the installed DLC folders; the game holds them open while it runs.
         var process = game switch { MEGame.LE1 => "MassEffect1", MEGame.LE2 => "MassEffect2", _ => "MassEffect3" };
         if (Process.GetProcessesByName(process).Length > 0) throw new InvalidOperationException($"{process}.exe is running. Close the game first (the launcher can stay open).");
         var dlcRoot = Path.Combine(MEDirectories.GetDefaultGamePath(game) ?? throw new InvalidOperationException($"No {game} install found."), "BioGame", "DLC");
-
-        var offsets = LogOffsets();
-        var started = DateTime.UtcNow;
-        var arguments = new List<string> { "--installmod", moddesc, "--game", game.ToString() };
-        if (bootGame) arguments.Add("--bootgame");
-        StartM3(m3, arguments);
 
         // "Initializing mod installer panel for mod: <name> ..." starts it. After the main stage, which holds the merge mods, M3 still
         // merges Coalesced on LE1, syncs PlotManager and shaders on LE2 and LE3, and on every game ends with its AutoTOC panel. A failed
@@ -57,18 +54,29 @@ public static class ModInstaller
         const string failed = "<<<<<<< Exiting modinstaller";
         var log = new StringBuilder();
         var completed = false;
-        while (DateTime.UtcNow - started < TimeSpan.FromSeconds(timeoutSeconds))
+        DateTime started;
+        // M3 is one app for all three games: a second install's lines would land in the log this one reads.
+        using (GameLock.ForM3())
         {
-            Thread.Sleep(1000);
-            log.Append(ReadNew(offsets));
-            var text = log.ToString();
-            var at = text.IndexOf(begin, StringComparison.Ordinal);
-            if (at >= 0 && text.IndexOf(end, at, StringComparison.Ordinal) >= 0)
+            var offsets = LogOffsets();
+            started = DateTime.UtcNow;
+            var arguments = new List<string> { "--installmod", moddesc, "--game", game.ToString() };
+            if (bootGame) arguments.Add("--bootgame");
+            StartM3(m3, arguments);
+
+            while (DateTime.UtcNow - started < TimeSpan.FromSeconds(timeoutSeconds))
             {
-                completed = true;
-                break;
+                Thread.Sleep(1000);
+                log.Append(ReadNew(offsets));
+                var text = log.ToString();
+                var at = text.IndexOf(begin, StringComparison.Ordinal);
+                if (at >= 0 && text.IndexOf(end, at, StringComparison.Ordinal) >= 0)
+                {
+                    completed = true;
+                    break;
+                }
+                if (at >= 0 && text.IndexOf(failed, at, StringComparison.Ordinal) >= 0) break;
             }
-            if (at >= 0 && text.IndexOf(failed, at, StringComparison.Ordinal) >= 0) break;
         }
 
         var differences = new List<string>();
@@ -102,11 +110,14 @@ public static class ModInstaller
             targets, checkedCount, differences, bootGame, lines);
     }
 
-    /// <summary>Starts the game the way M3's Start game button does (M3 --bootgame), without installing anything.</summary>
+    /// <summary>
+    /// Starts the game the way M3's Start game button does (M3 --bootgame), without installing anything. Refused while another
+    /// mele-mcp call installs through M3. game_cycle, its one caller, holds the game's lock.
+    /// </summary>
     public static void Boot(MEGame game)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("M3 runs on Windows.");
-        StartM3(M3Path(), ["--game", game.ToString(), "--bootgame"]);
+        using (GameLock.ForM3()) StartM3(M3Path(), ["--game", game.ToString(), "--bootgame"]);
     }
 
     internal static string M3Path()

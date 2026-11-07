@@ -33,7 +33,8 @@ internal static partial class YamlFiles
     /// folder when it has that DLC folder, else the mod of M3's library that has it. A bare file name is looked up as before (the
     /// YAML's folder, then a file the game loads) and never missing: a builder must not create it, it could resolve into the game
     /// install. With <paramref name="outRoot"/> (mod_build out=) that folder is the mod root, a full path goes under it by its DLC
-    /// folder, and a DLC folder it does not have yet is first copied from where the build would write without out=.
+    /// folder, and a DLC folder it does not have yet is first copied from where the build would write without out=. That copy is
+    /// a snapshot: later builds into out= build on it as it is, and a note names the source files newer than their copy or missing from it.
     /// </summary>
     internal static (string Path, bool Missing) Target(MEGame game, string package, string yamlDir, string? outRoot, List<string> notes)
     {
@@ -55,11 +56,19 @@ internal static partial class YamlFiles
             : ModRoot(game, given, yamlDir) is { } from ? Path.GetFullPath(Path.Combine(from, given)) : null;
         var target = Path.GetFullPath(Path.Combine(into, part));
         var to = DlcFolder(target)!;
-        if (!Directory.Exists(to) && source is not null && DlcFolder(source) is { } copied && Directory.Exists(copied))
+        if (source is not null && DlcFolder(source) is { } copied && Directory.Exists(copied))
         {
-            PackageWriter.EnsureWritable(game, target);
-            CopyFolder(copied, to);
-            notes.Add($"out=: copied {copied} to {to}; the build changes the copy.");
+            if (!Directory.Exists(to))
+            {
+                PackageWriter.EnsureWritable(game, target);
+                CopyFolder(copied, to);
+                notes.Add($"out=: copied {copied} to {to}; the build changes the copy. Later builds into out= keep this copy: delete {to} to copy the source again.");
+            }
+            else if (Stale(copied, to) is { Count: > 0 } stale)
+            {
+                notes.Add($"out=: {to} is the copy of {copied} an earlier build made, and this build changes it as it is: {stale.Count} source file(s) "
+                          + $"are newer than their copy, or were added to the source since and are missing from it ({string.Join(", ", stale.Take(3))}{(stale.Count > 3 ? ", ..." : "")}). Delete {to} to copy the source again.");
+            }
         }
         return Found(target);
     }
@@ -90,8 +99,8 @@ internal static partial class YamlFiles
     /// <summary>
     /// A file other than the package that a build changes (a GlobalTlk, the AutoLoad.ini), found at <paramref name="path"/>. With
     /// <paramref name="outRoot"/> (mod_build out=) its copy there instead, by its DLC folder as <see cref="Target"/> maps the
-    /// package; refused when out= has no such copy (a file outside a DLC folder, or of a DLC folder the build did not copy): an
-    /// out= build never writes the source.
+    /// package; refused when out= has no such copy (a file outside a DLC folder, of a DLC folder the build did not copy, or added
+    /// to the source after the copy): an out= build never writes the source.
     /// </summary>
     internal static string InOut(string path, string? outRoot, string what)
     {
@@ -101,7 +110,11 @@ internal static partial class YamlFiles
         if (full.StartsWith(into.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return full;
         var copy = DlcPart(full) is { } part ? Path.GetFullPath(Path.Combine(into, part)) : null;
         if (copy is not null && File.Exists(copy)) return copy;
-        throw new ArgumentException($"{what} {full} has no copy under out= ({into}){(copy is null ? ": it is in no DLC folder" : $": no {copy}")}. An out= build changes "
+        // The DLC folder was copied before this file was in it: the copy is a snapshot (Target).
+        var snapshot = copy is not null && File.Exists(full) && DlcFolder(copy) is { } folder && Directory.Exists(folder)
+            ? $" {folder} is the copy an earlier build made, and it lacks any file added to the source since: delete it to copy the source again."
+            : "";
+        throw new ArgumentException($"{what} {full} has no copy under out= ({into}){(copy is null ? ": it is in no DLC folder" : $": no {copy}")}.{snapshot} An out= build changes "
                                     + "nothing outside out=, so the file was not built. Keep it in the package's DLC folder (a file name finds it beside the package), or build without out=.");
     }
 
@@ -152,11 +165,58 @@ internal static partial class YamlFiles
         return DlcPart(full) is { } part ? full[..^(part.Length - part.Split('\\')[0].Length)] : null;
     }
 
-    private static void CopyFolder(string from, string to)
+    /// <summary>
+    /// Copies a DLC folder whole. <see cref="Target"/> reads "the folder exists" as "the copy is done", so the files go to a
+    /// sibling folder first, renamed to <paramref name="to"/> once every one is in: a copy that stops half way (a full disk, a
+    /// file LEX holds) leaves no partial DLC folder for the next build to take as done and create missing packages in. A leftover
+    /// of such a copy is removed and the copy redone.
+    /// </summary>
+    internal static void CopyFolder(string from, string to)
     {
-        Directory.CreateDirectory(to);
-        foreach (var dir in Directory.EnumerateDirectories(from, "*", SearchOption.AllDirectories)) Directory.CreateDirectory(Path.Combine(to, Path.GetRelativePath(from, dir)));
-        foreach (var file in Directory.EnumerateFiles(from, "*", SearchOption.AllDirectories)) File.Copy(file, Path.Combine(to, Path.GetRelativePath(from, file)));
+        var partial = PartialCopy(to);
+        if (Directory.Exists(partial)) Directory.Delete(partial, recursive: true);
+        try
+        {
+            Directory.CreateDirectory(partial);
+            foreach (var dir in Directory.EnumerateDirectories(from, "*", SearchOption.AllDirectories)) Directory.CreateDirectory(Path.Combine(partial, Path.GetRelativePath(from, dir)));
+            foreach (var file in Directory.EnumerateFiles(from, "*", SearchOption.AllDirectories)) File.Copy(file, Path.Combine(partial, Path.GetRelativePath(from, file)));
+            Directory.Move(partial, to);
+        }
+        catch (Exception)
+        {
+            try
+            {
+                if (Directory.Exists(partial)) Directory.Delete(partial, recursive: true);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Left for the next copy, which removes it first.
+            }
+            throw;
+        }
+    }
+
+    /// <summary>Where <see cref="CopyFolder"/> copies before the rename: beside the DLC folder, a name that is no DLC folder.</summary>
+    internal static string PartialCopy(string to) => Path.Combine(Path.GetDirectoryName(to)!, $".{Path.GetFileName(to)}.copying");
+
+    /// <summary>
+    /// The source files (relative paths) changed or added since an out= copy was made. File.Copy keeps a file's write time, and a
+    /// build only makes the copy's files newer, so a source file newer than its copy changed after the copy was made. A source file
+    /// missing from the copy counts only when it was created after the copy (the copy folder's creation time, which the rename at
+    /// the end of <see cref="CopyFolder"/> keeps): a build into out= deletes files from its own copy too (a fork with no entries
+    /// left, a stale localized copy), and those are no change of the source.
+    /// </summary>
+    internal static List<string> Stale(string from, string to)
+    {
+        var copied = Directory.GetCreationTimeUtc(to);
+        return Directory.EnumerateFiles(from, "*", SearchOption.AllDirectories)
+            .Select(file => (Relative: Path.GetRelativePath(from, file), Source: file))
+            .Where(f => Path.Combine(to, f.Relative) is var copy && (File.Exists(copy)
+                ? File.GetLastWriteTimeUtc(f.Source) > File.GetLastWriteTimeUtc(copy)
+                : File.GetCreationTimeUtc(f.Source) > copied))
+            .Select(f => f.Relative)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     /// <summary>DLC_MOD_X_GlobalTlk_FR → FR; DLC_MOD_X_GlobalTlk → INT.</summary>

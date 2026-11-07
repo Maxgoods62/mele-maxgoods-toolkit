@@ -8,7 +8,9 @@
 #include <dinput.h>
 
 // While the editor is open the game gets no input: its window messages are queued for ImGui instead, DirectInput8 hands it
-// empty mouse and keyboard states, and its cursor calls (re-centring, clipping to a point) are held back.
+// empty mouse and keyboard states, and its cursor calls (re-centring, clipping to a point) are held back. Once the overlay
+// has failed, nothing draws the editor any more: the game gets all of it back at once, without waiting for the game thread
+// to close the editor at its next tick.
 // The DirectInput8 trap follows SuperAdjustmentStudio's (Reyuu, GPL-3.0, src/render/mouse.cpp): hook the device methods
 // through a mouse device of our own, since every device of the process shares one implementation.
 namespace MeleBridge::Editor
@@ -27,8 +29,10 @@ namespace MeleBridge::Editor
         std::atomic<t_SetCursorPos*> SetCursorPos_orig{ nullptr };
         std::atomic<t_ClipCursor*> ClipCursor_orig{ nullptr };
 
-        /// The clip before the editor opened, and the last one the game asked for while it was open: given back when it closes.
+        /// The clip before the editor opened, and the last one the game asked for while it was open: given back when it closes,
+        /// then forgotten. Held: HoldCursor(true) ran and HoldCursor(false) has not yet.
         std::mutex ClipLock;
+        bool Held = false;
         RECT ClipBefore{};
         bool HaveClipBefore = false;
         bool GameClipSet = false;
@@ -55,6 +59,12 @@ namespace MeleBridge::Editor
             return f;
         }
 
+        /// Input is kept from the game: the editor is open and the overlay that draws it has not failed.
+        bool Capturing()
+        {
+            return Open.load(std::memory_order_acquire) && Diag.Overlay.load(std::memory_order_acquire) != OverlayState::Failed;
+        }
+
         bool IsInput(UINT message)
         {
             switch (message)
@@ -74,7 +84,7 @@ namespace MeleBridge::Editor
         LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM w, LPARAM l)
         {
             Diag.WindowThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
-            if (Open.load(std::memory_order_acquire))
+            if (Capturing())
             {
                 if (IsInput(message))
                 {
@@ -107,7 +117,7 @@ namespace MeleBridge::Editor
 
         BOOL WINAPI SetCursorPos_hook(int x, int y)
         {
-            if (Open.load(std::memory_order_acquire))
+            if (Capturing())
             {
                 Diag.BlockedCursorCalls.fetch_add(1, std::memory_order_relaxed);
                 return TRUE;
@@ -115,16 +125,23 @@ namespace MeleBridge::Editor
             return Wait(SetCursorPos_orig)(x, y);
         }
 
+        /// The game's clip is noted all the time the editor is open, also once the overlay failed and the call goes through:
+        /// the close gives back the game's last one, not an older one.
         BOOL WINAPI ClipCursor_hook(RECT const* rect)
         {
             if (Open.load(std::memory_order_acquire))
             {
-                std::scoped_lock lock{ ClipLock };
-                GameClipSet = true;
-                GameClipNull = rect == nullptr;
-                if (rect != nullptr) GameClip = *rect;
-                Diag.BlockedCursorCalls.fetch_add(1, std::memory_order_relaxed);
-                return TRUE;
+                {
+                    std::scoped_lock lock{ ClipLock };
+                    GameClipSet = true;
+                    GameClipNull = rect == nullptr;
+                    if (rect != nullptr) GameClip = *rect;
+                }
+                if (Capturing())
+                {
+                    Diag.BlockedCursorCalls.fetch_add(1, std::memory_order_relaxed);
+                    return TRUE;
+                }
             }
             return Wait(ClipCursor_orig)(rect);
         }
@@ -133,7 +150,7 @@ namespace MeleBridge::Editor
         /// joystick's zero is an axis at its end) are left alone.
         HRESULT Zeroed(HRESULT hr, DWORD size, void* data)
         {
-            if (Open.load(std::memory_order_acquire) && SUCCEEDED(hr) && data != nullptr
+            if (Capturing() && SUCCEEDED(hr) && data != nullptr
                 && (size == sizeof(DIMOUSESTATE) || size == sizeof(DIMOUSESTATE2) || size == 256))
             {
                 std::memset(data, 0, size);
@@ -145,7 +162,7 @@ namespace MeleBridge::Editor
         /// Buffered events are read (so none pile up for later), then dropped.
         HRESULT Dropped(HRESULT hr, DWORD* count, DWORD flags)
         {
-            if (Open.load(std::memory_order_acquire) && SUCCEEDED(hr) && count != nullptr && *count != 0 && !(flags & DIGDD_PEEK))
+            if (Capturing() && SUCCEEDED(hr) && count != nullptr && *count != 0 && !(flags & DIGDD_PEEK))
             {
                 *count = 0;
                 Diag.ZeroedDeviceData.fetch_add(1, std::memory_order_relaxed);
@@ -277,8 +294,13 @@ namespace MeleBridge::Editor
         {
             {
                 std::scoped_lock lock{ ClipLock };
-                HaveClipBefore = GetClipCursor(&ClipBefore) != FALSE;
-                GameClipSet = false;
+                // Held already, the clip now is ours: the game's from before stays the one to give back.
+                if (!Held)
+                {
+                    HaveClipBefore = GetClipCursor(&ClipBefore) != FALSE;
+                    GameClipSet = false;
+                }
+                Held = true;
             }
             // Inside the window's client area, wherever the game had it.
             RECT client;
@@ -293,8 +315,12 @@ namespace MeleBridge::Editor
             return;
         }
         std::scoped_lock lock{ ClipLock };
+        // Not held, the clip is the game's own: an older session's clip, or none, would replace it.
+        if (!Held) return;
         if (GameClipSet) clip(GameClipNull ? nullptr : &GameClip);
         else clip(HaveClipBefore ? &ClipBefore : nullptr);
+        Held = false;
+        HaveClipBefore = false;
         GameClipSet = false;
     }
 }

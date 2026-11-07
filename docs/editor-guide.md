@@ -158,11 +158,13 @@ The tools refuse these cases, and the status line says why:
 
 - Move, Turn and Scale refuse a hidden actor.
 - Turn and Scale refuse a mirrored actor, one with a zero or negative `DrawScale` or `DrawScale3D` component.
-- All three refuse an actor whose session entry is still waiting. Try again in a moment.
+- All three refuse an actor whose session entry is still waiting. Try again in a moment. If the re-apply pass failed,
+  the status line says when it runs again.
 - All three refuse a vanilla actor outside the rules in [vanilla actors](#vanilla-actors).
 
 The editor lets the paused world tick once after a spawn, a drag, an undo or a redo. A prop's light environment only
-updates during a tick, and a new prop would render black without it.
+updates during a tick, and a new prop would render black without it. It skips this when the game had its own pause as
+F8 opened, and the status line says so.
 
 ## Delete, undo and redo
 
@@ -394,11 +396,14 @@ actor. A value changed only in the YAML stays. A value changed on both sides is 
 is left out and listed with the base, YAML and editor values. Import again with `editor` or `yaml` to pick a side.
 
 Each actor in the result has an action: `updated`, `added`, `removed`, `unchanged`, `conflict`, `refused`, `skipped`
-or `failed`. Read the `notes` too. Importing the same session again changes nothing.
+or `failed`. Read the `notes` too. Importing the same session again changes nothing. If the build fails, the import
+stays done: the result keeps its actors and `marked` count, and `buildError` says why. Fix the cause, then run
+`level_build`.
 
-`editor_import` edits the YAML in place with no backup, and it has no game-install guard on that file, so keep the
-YAML in git and outside the game folder. To undo an import, restore the YAML and the session file together. A YAML
-reverted alone reads as edits by hand. Entries that an import drops go to `<session>.dropped.json` beside the session.
+`editor_import` copies the YAML into the backups folder before it writes it (`backup` in the result names the copy),
+but it has no game-install guard on that file, so keep the YAML in git and outside the game folder. To undo an import,
+restore the YAML and the session file together. A YAML reverted alone reads as edits by hand. Entries that an import
+drops go to `<session>.dropped.json` beside the session.
 
 ## Ship the result
 
@@ -435,3 +440,5 @@ YAML has been built from something else since.
 | `levels.json has no NPC mymod_npc_01 (built before Phase 5): run mod_build` | An older build wrote that level. Run `mod_build`. |
 | `<level> is not in levels.json and its file can't be read: if it is ours, run mod_build` | The editor can't tell whose level it is. If it is yours, build it. |
 | `effects not run: the game had paused the world when F8 opened` | Close the editor, unpause the game, and open it again. |
+| `lighting not updated: the game had paused the world when F8 opened (it updates once the world runs)` | The same. |
+| `the session was not re-applied: ... (tried again in 5 s)` | Wait. After three failures in a row it waits until you edit one of its actors or the loaded levels change. `MeleBridge.log` has the cause. |

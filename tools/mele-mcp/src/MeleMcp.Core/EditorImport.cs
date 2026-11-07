@@ -26,7 +26,11 @@ public sealed record FieldConflict(string Field, string Base, string Yaml, strin
 
 /// <param name="Written">Whether the YAML file changed; importing the same session again changes nothing.</param>
 /// <param name="Marked">Session entries marked imported: their base is now what the YAML holds, and MeleBridge drops them once the installed level shows them.</param>
-public sealed record EditorImportResult(string File, string Session, bool Written, IReadOnlyList<ImportedActor> Actors, int Marked, LevelBuildResult? Build, IReadOnlyList<string> Notes);
+/// <param name="Build">The build's receipt; null when no build was asked for, or when it failed (<paramref name="BuildError"/>).</param>
+/// <param name="Backup">The YAML file as it was before this import (in the backups folder); null when the import did not write it.</param>
+/// <param name="BuildError">Why the build failed. The import was done by then: the YAML written and the session marked stay as this result says.</param>
+public sealed record EditorImportResult(string File, string Session, bool Written, IReadOnlyList<ImportedActor> Actors, int Marked, LevelBuildResult? Build, IReadOnlyList<string> Notes,
+    string? Backup = null, string? BuildError = null);
 
 /// <summary>
 /// Merges what the in-game editor saved (MeleBridge's session file, one per map; docs/design/in-game-editor.md §3.7, §10) into a level YAML file, keyed by
@@ -136,6 +140,41 @@ public static class EditorImport
         SessionNpc? Npc = null)
     {
         public bool IsNpcLight => Npc is not null || Light?.Kind == "npc";
+
+        /// <summary>
+        /// Whether an import applied the entry: 'imported', 'installed' (where a Save moves an imported entry's 'before'), or for a
+        /// spawn its base, which only an import gives it and a Save keeps.
+        /// </summary>
+        public bool WasImported => Imported is { ValueKind: JsonValueKind.Object } || Installed is { ValueKind: JsonValueKind.Array } installed && installed.GetArrayLength() > 0
+                                   || Spawned && Base is not null;
+
+        /// <summary>What the entry is, derived from its fields in one place: every branch of the merge reads it from here.</summary>
+        public EntryState State => Spawned && !WasImported ? EntryState.New
+            : Base is null ? EntryState.Unbased
+            : Spawned ? EntryState.Imported
+            : EntryState.Edited;
+    }
+
+    /// <summary>
+    /// What a session entry is, from its own fields (docs/design/in-game-editor.md §10). A base comes from MeleBridge's first edit
+    /// of an actor a build or the game made (what the YAML held then), or from an import; a spawn gets one from an import only.
+    /// </summary>
+    private enum EntryState
+    {
+        /// <summary>Spawned in the editor and never imported (no base, 'imported' or 'installed'): no YAML file builds it yet.</summary>
+        New,
+
+        /// <summary>Spawned in the editor and put in a YAML file by an import: its base is what that import wrote.</summary>
+        Imported,
+
+        /// <summary>An actor a build or the game made (a level actor, a light built from an entry), edited: its base is what the YAML held at the first edit, or what an import wrote.</summary>
+        Edited,
+
+        /// <summary>
+        /// Not new, and no base (a version 1 session, or an entry written by hand): the editor's values win the merge, and whether
+        /// the editor changed it since the YAML had it is unknown.
+        /// </summary>
+        Unbased,
     }
 
     /// <summary>Where an NPC stands, for its lights: location and yaw (Unreal units).</summary>
@@ -220,12 +259,14 @@ public static class EditorImport
         // up to 3 tries.
         Merged? merged = null, wrote = null;
         int? marked = null;
+        // The YAML as it was before this import: taken before its first write, and kept through the retries' writes.
+        string? backup = null;
         for (var attempt = 1; marked is null; attempt++)
         {
             merged = MergeSession(Read(sessionFile));
             if (File.ReadAllText(sessionFile) == merged.SessionText)
             {
-                if (merged.Text != (wrote?.Text ?? original)) File.WriteAllText(file, merged.Text, new UTF8Encoding(false));
+                if (merged.Text != (wrote?.Text ?? original)) backup = WriteYaml(file, merged.Text, backup);
                 wrote = merged;
                 marked = keepSession ? 0 : Mark(sessionFile, merged.SessionText, merged.Updates, merged.Notes, file, dropFile);
             }
@@ -246,9 +287,26 @@ public static class EditorImport
             notes.Add($"Refused on a conflict (the editor and the YAML both changed them): {string.Join(", ", refused)}. Their session entries are left as they are; "
                       + "import again with onConflict=editor or yaml to pick a side.");
         }
-        var built = build ? LevelBuilder.Build(game, file, null) : null;
+        if (backup is not null) notes.Add($"The YAML as it was before this import is backed up at {backup}.");
+        LevelBuildResult? built = null;
+        string? buildError = null;
+        if (build)
+        {
+            try
+            {
+                built = LevelBuilder.Build(game, file, null);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // The import is done by now: the YAML written and the session marked stay, so the receipt goes back with the failure.
+                buildError = e is PartialBuildException ? e.Message : $"{e.GetType().Name}: {e.Message}";
+                notes.Add($"The build failed after the import: {buildError} The import stays as this result says "
+                          + $"({(written ? "the YAML written" : "the YAML unchanged")}, {marked.Value} session entr{(marked.Value == 1 ? "y" : "ies")} marked): "
+                          + "fix the cause, then run level_build on the file.");
+            }
+        }
         if (built is not null) notes.Add("Install the level (game closed: mod_install) to see it after a reload.");
-        return new EditorImportResult(file, sessionFile, written, merged.Results, marked.Value, built, notes);
+        return new EditorImportResult(file, sessionFile, written, merged.Results, marked.Value, built, notes, backup, buildError);
 
         Merged MergeSession((Session Session, string Text) read)
         {
@@ -268,9 +326,13 @@ public static class EditorImport
             var results = new ImportedActor?[actors.Count];
             // In the YAML now (marked imported), or never to be (dropped): written into the session after the YAML.
             var updates = new List<SessionUpdate>();
-            var vanillaKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Each vanilla actor and light met so far, with the index of the session entry that has it first (see MergeVanilla).
+            var vanillaKeys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            // The NPC lights the YAML has before the merge. Read once, for the first pass only: no entry of it adds or removes an
+            // item (AddNpcLight runs in the second pass, which reads the text afresh).
             var npcLights = YamlEdits.NpcLightTags(Root(text));
-            // Two passes: NPC lights after the other entries, since their NPC's entry may move the NPC they are placed from.
+            // Two passes: NPC lights after the other entries, since their NPC's entry may move the NPC they are placed from
+            // (Reference reads that entry's update, so it must be merged first). OrderBy is stable, and false sorts first.
             foreach (var i in Enumerable.Range(0, actors.Count).OrderBy(i => actors[i].IsNpcLight))
             {
                 var actor = actors[i];
@@ -308,7 +370,7 @@ public static class EditorImport
                         results[i] = new ImportedActor(key, "skipped", null, [], $"{actor.Path} is a light of {actorLevel} edited on map {session.Map}, and this file builds {level}: "
                                                                                   + $"the YAML of {session.Map} ships it, else it stays dev-only there (MeleBridge re-applies it).");
                     }
-                    else if (MergeVanillaLight(ref text, actor, i, key, level, streams, copies, files, vanillaFiles, cache, vanillaKeys, policy, keepSession, dropFile) is { } light)
+                    else if (MergeVanillaLight(ref text, actor, i, key, level, streams, copies, files, vanillaFiles, cache, vanillaKeys, results, policy, keepSession, dropFile) is { } light)
                     {
                         results[i] = light.Result;
                         if (light.Update is not null) updates.Add(light.Update);
@@ -321,9 +383,8 @@ public static class EditorImport
                     continue;
                 }
                 var found = tag is null ? null : YamlEdits.Tagged(Root(text), tag);
-                // A spawn gets a base from an import only, and keeps it through a Save (which drops 'imported'): with one, an import
-                // put it in a YAML file already.
-                var imported = actor.Spawned && (actor.Base is not null || actor.Imported is { ValueKind: JsonValueKind.Object });
+                // A spawn an import put in a YAML file already (EntryState: a spawn not new).
+                var imported = actor.Spawned && actor.State != EntryState.New;
                 if (found is { } f)
                 {
                     var entry = $"{f.Section}.{Scalar(f.Entry.Key)}";
@@ -395,7 +456,7 @@ public static class EditorImport
                         results[i] = new ImportedActor(key, "skipped", null, [], actor.Deleted
                             ? $"{elsewhere}. Deleted in the editor: its session entry stays, so importing the file that has it "
                               + (actor.Light is null ? "marks it removed: true." : "switches it off (enabled: false).")
-                            : $"{elsewhere}. Not added again; its session entry stays ({(onlyTaker ? "the editor changed it since the import" : "another level file may have it")}).");
+                            : $"{elsewhere}. Not added again; its session entry stays ({(onlyTaker ? ChangedSince(actor, "since the import") : "another level file may have it")}).");
                     }
                 }
                 else if (actor.Spawned && actor.Deleted)
@@ -440,7 +501,7 @@ public static class EditorImport
                                                                               + $"{level}: the YAML of {session.Map} ships it, else it stays dev-only there (MeleBridge re-applies it).");
                 }
                 else if (!ours && !actor.Spawned
-                         && MergeVanilla(ref text, actor, i, key, level, streams, vanillaFiles, vanillaKeys, policy, keepSession, dropFile, said) is { } vanilla)
+                         && MergeVanilla(ref text, actor, i, key, level, streams, vanillaFiles, vanillaKeys, results, policy, keepSession, dropFile, said) is { } vanilla)
                 {
                     results[i] = vanilla.Result;
                     if (vanilla.Update is not null) updates.Add(vanilla.Update);
@@ -481,8 +542,7 @@ public static class EditorImport
                     return (new ImportedActor(key, "skipped", null, [], $"an NPC light of {owner ?? "no NPC"}, which no npcs entry of this file has: the file that has the NPC imports it."), null);
                 }
                 var where = $"npcs.{npc.Name}.lights";
-                var imported = actor.Base is not null || actor.Imported is { ValueKind: JsonValueKind.Object };
-                if (actor.Spawned && !imported)
+                if (actor.State == EntryState.New)
                 {
                     if (actor.Deleted)
                     {
@@ -494,7 +554,8 @@ public static class EditorImport
                         ? new SessionUpdate(i, NpcLightBase(LightOf(YamlEdits.NpcLightTags(Reread(text, where))[tag].Item, "offset"), actor, Built(owner)), null, [])
                         : null);
                 }
-                // Built from an item, or put in one by an import, and the item is gone since: never added back, as a lights entry.
+                // Built from an item (Edited), or put in one by an import (Imported), and the item is gone since: never added back, as a
+                // lights entry. Without a base (Unbased), whether the editor changed it since is unknown: it stays.
                 var gone = $"an NPC light whose item of {where} is gone: removed by hand (a light is switched off with enabled: false, never removed), or the file reverted alone";
                 if (AsBase(actor) && actor.Deleted == (actor.Base?.Deleted ?? false))
                 {
@@ -503,7 +564,7 @@ public static class EditorImport
                             : $"{gone}. Unchanged since: its session entry is dropped, so the editor stops applying it, and kept in {Path.GetFileName(dropFile)}."),
                         new SessionUpdate(i, null, null, [], "an NPC light whose item is gone from the file (removed by hand, or the file reverted alone), unchanged in the editor since"));
                 }
-                return (new ImportedActor(key, "skipped", where, [], $"{gone}. Not added again: the editor changed it since, so its session entry stays. Add the item back by hand "
+                return (new ImportedActor(key, "skipped", where, [], $"{gone}. Not added again: {ChangedSince(actor, "since")}, so its session entry stays. Add the item back by hand "
                                                                      + "to keep the edit, or undo it in the editor."), null);
             }
 
@@ -514,6 +575,8 @@ public static class EditorImport
                 var j = Enumerable.Range(0, actors.Count).FirstOrDefault(k => !actors[k].IsNpcLight && npcTag.Equals(actors[k].Tag, StringComparison.OrdinalIgnoreCase)
                                                                               && actors[k].Location is { Length: 3 } && actors[k].Rotation is { Length: 3 }, -1);
                 if (j < 0) return Built(npcTag);
+                // Its update, if any, is in by now: the first pass merged it (see the passes above).
+                if (results[j] is null) throw new InvalidOperationException($"editor_import merged a light of {npcTag} before its NPC's session entry (actors[{j}]): its passes are out of order.");
                 var state = updates.FirstOrDefault(u => u.Index == j)?.State ?? [];
                 var location = state.FirstOrDefault(s => s.Field == "location").Value is JsonArray l ? l.Select(Num).ToArray() : actors[j].Location!;
                 return new NpcPose(location, state.FirstOrDefault(s => s.Field == "rotation").Value is JsonArray r ? Num(r[1]) : actors[j].Rotation![1]);
@@ -660,6 +723,25 @@ public static class EditorImport
         : Side.Conflict;
 
     /// <summary>
+    /// A session entry of a vanilla actor or light that an earlier entry (<paramref name="first"/>) has too: left as it is, saying what
+    /// became of the first, which may have been merged, or refused, failed or left out on a conflict.
+    /// </summary>
+    private static ImportedActor Duplicate(string key, string entry, string what, string name, int first, IReadOnlyList<ImportedActor?> results)
+    {
+        // Both are of the first pass, merged in session order: the first has its result by now.
+        var was = results[first] ?? throw new InvalidOperationException($"editor_import met actors[{first}] ({name}) again before it had a result.");
+        return new ImportedActor(key, "skipped", entry, [], was.Action is "updated" or "added" or "removed" or "unchanged"
+            ? $"an earlier session entry is the same {what} ({name}): that one was merged."
+            : $"an earlier session entry is the same {what} ({name}), and that one was not merged ({was.Action}{(was.Reason is { } why ? $": {why}" : "")}). This one is "
+              + "left as it is too.");
+    }
+
+    /// <summary>Why a session entry whose YAML entry is gone stays, as far as its state tells: changed in the editor <paramref name="since"/>, or unknown without a base.</summary>
+    private static string ChangedSince(SessionActor actor, string since) => actor.State == EntryState.Unbased
+        ? $"it has no base (a version 1 session, or an entry written by hand) to tell whether the editor changed it {since}"
+        : $"the editor changed it {since}";
+
+    /// <summary>
     /// A vanilla actor's edit (docs/design/in-game-editor.md §11), merged into vanilla.&lt;file&gt;.&lt;actor&gt;, which the build ships in a fork of the file. The
     /// file is the actor's level when the YAML streams it, else the vanilla file its level stands for as a fork of this map; null when
     /// it is neither (dev-only). Merged field by field as a props entry, a value the entry leaves out being the file's (through its
@@ -671,7 +753,8 @@ public static class EditorImport
     /// file has it: it never had a line.
     /// </summary>
     private static (ImportedActor Result, SessionUpdate? Update)? MergeVanilla(ref string text, SessionActor actor, int index, string key, string map,
-        IReadOnlyList<string> streams, VanillaFiles vanilla, HashSet<string> seen, string policy, bool keepSession, string dropFile, List<string> notes)
+        IReadOnlyList<string> streams, VanillaFiles vanilla, Dictionary<string, int> seen, IReadOnlyList<ImportedActor?> results, string policy, bool keepSession, string dropFile,
+        List<string> notes)
     {
         var level = actor.Level ?? actor.Path!.Split('.')[0];
         var file = streams.FirstOrDefault(s => s.Equals(level, StringComparison.OrdinalIgnoreCase))
@@ -685,7 +768,9 @@ public static class EditorImport
         var name = $"{file}.{parts[3]}";
         var entry = $"vanilla.{name}";
         // A session saved before forks were keyed by their vanilla path may have the actor twice: by the fork's path and by the file's.
-        if (!seen.Add(name)) return (new ImportedActor(key, "skipped", entry, [], $"an earlier session entry is the same actor ({name}): that one was merged."), null);
+        // The first is the one merged, or refused; the other says which.
+        if (seen.TryGetValue(name, out var first)) return (Duplicate(key, entry, "actor", name, first, results), null);
+        seen[name] = index;
 
         ExportEntry export;
         IReadOnlyDictionary<int, string> held;
@@ -733,7 +818,7 @@ public static class EditorImport
         var atFile = actor.Base is { Deleted: not true } at && Of(at.Location, 3) is { } placed && SameLocation(placed, ofFile.Location!)
                      && Of(at.Rotation, 3) is { } turned && Rotations.Same(turned, ofFile.Rotation!) && SameScale([at.Scale ?? 1], [pose.Scale])
                      && SameScale(Of(at.Scale3D, 3) ?? Unscaled, ofFile.Scale3D!);
-        if (!atFile && (actor.Imported is { ValueKind: JsonValueKind.Object } || actor.Installed is { ValueKind: JsonValueKind.Array } installed && installed.GetArrayLength() > 0))
+        if (!atFile && actor.WasImported)
         {
             // Imported, and its line is gone since: removed by hand (or the file reverted alone). Added again, it would come back on every import.
             const string gone = "imported before, and this file has no vanilla entry for it now: removed by hand, or the file reverted alone";
@@ -744,7 +829,7 @@ public static class EditorImport
                         : $"{gone}. Unchanged since the import: its session entry is dropped, so the editor stops applying it, and kept in {Path.GetFileName(dropFile)}."),
                     new SessionUpdate(index, null, null, [], "a vanilla entry imported, then removed from the file (by hand, or the file reverted alone), unchanged in the editor since"));
             }
-            return (new ImportedActor(key, "skipped", entry, [], $"{gone}. Not added again: the editor changed it since the import, so its session entry stays. Add the entry back "
+            return (new ImportedActor(key, "skipped", entry, [], $"{gone}. Not added again: {ChangedSince(actor, "since the import")}, so its session entry stays. Add the entry back "
                                                                  + "by hand to ship it, or undo the edit in the editor."), null);
         }
 
@@ -862,7 +947,7 @@ public static class EditorImport
     /// </summary>
     private static (ImportedActor Result, SessionUpdate? Update)? MergeVanillaLight(ref string text, SessionActor actor, int index, string key, string map,
         IReadOnlyList<string> streams, IReadOnlyList<(string File, string Collection, string Package, string Actor)> copies, Files files, VanillaFiles vanilla,
-        PackageCache cache, HashSet<string> seen, string policy, bool keepSession, string dropFile)
+        PackageCache cache, Dictionary<string, int> seen, IReadOnlyList<ImportedActor?> results, string policy, bool keepSession, string dropFile)
     {
         var parts = actor.Path!.Split('.');
         if (parts.Length != 5 || parts[1] != "TheWorld" || parts[2] != "PersistentLevel")
@@ -909,7 +994,9 @@ public static class EditorImport
         }
         var name = $"{file}.{collection}.{component}";
         var entry = $"vanilla.{name}";
-        if (!seen.Add(name)) return (new ImportedActor(key, "skipped", entry, [], $"an earlier session entry is the same light ({name}): that one was merged."), null);
+        // Twice in an old session, as an actor may be (see MergeVanilla).
+        if (seen.TryGetValue(name, out var first)) return (Duplicate(key, entry, "light", name, first, results), null);
+        seen[name] = index;
         if (ForkBuilder.Refusal(light, held, removed: false) is { } refused)
         {
             return (new ImportedActor(key, "refused", entry, [], $"{refused}. Its session entry stays (the editor re-applies it); nothing ships it."), null);
@@ -937,8 +1024,7 @@ public static class EditorImport
         var atFile = actor.Base is { } at && Of(at.Location, 3) is { } placed && SameLocation(placed, fileLocation) && LightState.Of(at.Light) is { } was
                      && SameRadius([was.Radius], [ofFile.Radius]) && SameLight([was.Brightness], [ofFile.Brightness]) && SameColor(was.Color, fileColor)
                      && SameLight([was.Falloff], [ofFile.Falloff]) && was.Enabled == ofFile.Enabled;
-        if (found.Key is null && !atFile
-            && (actor.Imported is { ValueKind: JsonValueKind.Object } || actor.Installed is { ValueKind: JsonValueKind.Array } installed && installed.GetArrayLength() > 0))
+        if (found.Key is null && !atFile && actor.WasImported)
         {
             // Imported, and its line is gone since: removed by hand (or the file reverted alone). Added again, it would come back on every import.
             const string gone = "imported before, and this file has no vanilla entry for it now: removed by hand, or the file reverted alone";
@@ -949,7 +1035,7 @@ public static class EditorImport
                         : $"{gone}. Unchanged since the import: its session entry is dropped, so the editor stops applying it, and kept in {Path.GetFileName(dropFile)}."),
                     new SessionUpdate(index, null, null, [], "a vanilla light entry imported, then removed from the file (by hand, or the file reverted alone), unchanged in the editor since"));
             }
-            return (new ImportedActor(key, "skipped", entry, [], $"{gone}. Not added again: the editor changed it since the import, so its session entry stays. Add the entry back "
+            return (new ImportedActor(key, "skipped", entry, [], $"{gone}. Not added again: {ChangedSince(actor, "since the import")}, so its session entry stays. Add the entry back "
                                                                  + "by hand to ship it, or undo the edit in the editor."), null);
         }
 
@@ -1062,11 +1148,30 @@ public static class EditorImport
         {
             return (new ImportedActor(key, "failed", entry, [], "the session entry's light block needs kind (props or room), radius, brightness, color [r, g, b], falloff and enabled."), null);
         }
+        // A lights entry is props or room (level_build refuses any other kind). NPC and level lights are merged before they get here
+        // (NpcLight, MergeVanillaLight); any other kind, misspelt in the YAML or the session, is said, never read as props.
+        var odd = editor.Kind is not ("props" or "room") ? $"light block has kind {editor.Kind}"
+            : actor.Base?.Light?.Kind is { } baseKind && baseKind is not ("props" or "room") ? $"base has kind {baseKind}"
+            : null;
+        if (odd is not null)
+        {
+            return (new ImportedActor(key, "failed", entry, [], $"the session entry's {odd}, and {entry} is a lights entry (props or room): not imported. Edit {entry} in the YAML by hand."), null);
+        }
         var before = LightOf(locate(Root(text)));
+        if (before.Kind is { } yamlKind && yamlKind is not ("props" or "room"))
+        {
+            return (new ImportedActor(key, "failed", entry, [], $"{entry} has kind '{yamlKind}': a lights entry is props or room (level_build refuses any other). Fix it in the YAML, "
+                                                                + "then import again."), null);
+        }
         var b = actor.Base;
         var at = b?.Light;
         static double[] Flag(bool on) => [on ? 1 : 0];
-        static double[] Kind(string kind) => [kind == "room" ? 1 : 0];
+        static double[] Kind(string kind) => kind switch
+        {
+            "props" => [0],
+            "room" => [1],
+            _ => throw new InvalidOperationException($"a lights entry's kind is props or room, not {kind}."),
+        };
         var fields = new List<Field>
         {
             new("location", actor.Location!, before.Location ?? Of(b?.Location, 3), Of(b?.Location, 3), SameLocation, WriteLocation),
@@ -1611,14 +1716,28 @@ public static class EditorImport
     }
 
     /// <summary>
+    /// Writes a level YAML file over itself, as editor_import and npc_place do: backed up first (<see cref="PackageWriter.Backup"/>,
+    /// into the backups folder, which M3 never installs) unless <paramref name="backup"/> is this run's backup already, then written
+    /// beside it and moved over it, so a crash mid-write leaves the old file whole. Returns the backup.
+    /// </summary>
+    internal static string WriteYaml(string file, string text, string? backup = null)
+    {
+        backup ??= PackageWriter.Backup(file);
+        var temporary = file + ".tmp";
+        File.WriteAllText(temporary, text, new UTF8Encoding(false));
+        File.Move(temporary, file, overwrite: true);
+        return backup;
+    }
+
+    /// <summary>
     /// Marks the entries this import applied (docs/design/in-game-editor.md §10): 'base' = what the YAML holds now (and 'deleted': whether it removes the
     /// actor), so the next merge starts from it, and 'imported' = { before: the base they had, plus whether the YAML removed them },
     /// the state the installed level still shows: MeleBridge re-applies an entry until the install shows it, then drops it. An entry
     /// without a base (version 1) gets the YAML's entry before this import as 'before'; a props entry this import added, none (no
     /// level has it yet). An entry imported again before an install keeps its 'before'. A mesh spawned and deleted before any import,
     /// or imported and removed from the YAML by hand since, is dropped: nothing ships it. Dropped entries go to the dropped file first
-    /// (<see cref="KeepDropped"/>). Left as it is, and null, when the file changed since it was read (the editor saved meanwhile); not
-    /// rewritten when nothing changed.
+    /// (<see cref="KeepDropped"/>). Left as it is, and null, when the file changed since it was read (the editor saved meanwhile),
+    /// compared up to the moment it is replaced; not rewritten when nothing changed.
     /// </summary>
     private static int? Mark(string sessionFile, string read, List<SessionUpdate> updates, List<string> notes, string yamlFile, string dropFile)
     {
@@ -1658,11 +1777,19 @@ public static class EditorImport
 
         var json = doc.ToJsonString(Indented);
         if (json == JsonNode.Parse(read)!.ToJsonString(Indented)) return marked;
-        // Before the session loses them: a crash between the two writes leaves an entry in both, never in neither.
+        // Before the session loses them: a crash between the two writes leaves an entry in both, never in neither (and a retry after
+        // a save below adds none twice).
         if (dropped.Count > 0) KeepDropped(dropFile, sessionFile, yamlFile, dropped);
         // Written beside it, then moved over it: a crash mid-write leaves the old file whole. Not MeleBridge's .tmp name.
         var temporary = sessionFile + ".import.tmp";
         File.WriteAllText(temporary, json, new UTF8Encoding(false));
+        // Compared again right before the move, the writes above done: a MeleBridge save during them would be overwritten (the caller
+        // merges again instead). The window left is this read and the move.
+        if (File.ReadAllText(sessionFile) != read)
+        {
+            File.Delete(temporary);
+            return null;
+        }
         File.Move(temporary, sessionFile, overwrite: true);
         return marked;
     }
@@ -1704,6 +1831,8 @@ public static class EditorImport
         var at = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
         foreach (var (why, entry) in entries)
         {
+            // Kept already by a try whose session write found the file changed (Mark): the next try drops it again.
+            if (list.Any(d => d?["session"] is JsonValue s && s.TryGetValue<string>(out var from) && from == sessionFile && JsonNode.DeepEquals(d["entry"], entry))) continue;
             list.Add(new JsonObject { ["at"] = at, ["session"] = sessionFile, ["file"] = yamlFile, ["why"] = why, ["entry"] = entry });
         }
         var temporary = dropFile + ".import.tmp";

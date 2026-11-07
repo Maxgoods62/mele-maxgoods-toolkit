@@ -12,6 +12,23 @@ public static class LevelCreator
     /// </summary>
     public static NewLevelResult Create(MEGame game, string path)
     {
+        var full = Checked(game, path);
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        MEPackageHandler.CreateEmptyLevel(full, game);
+
+        using var pcc = MEPackageHandler.OpenMEPackage(full, forceLoadFromDisk: true);
+        return new NewLevelResult(full, Path.GetFileNameWithoutExtension(full), pcc.ExportCount, pcc.Exports.Select(ExportInspector.Row).ToList());
+    }
+
+    /// <summary>
+    /// The same empty level, in memory only, with the same checks: level_build fills it and saves it to <paramref name="path"/>
+    /// (<c>Save(path)</c>) once every check of its YAML passed, so a build that fails creates no file.
+    /// </summary>
+    internal static IMEPackage CreateInMemory(MEGame game, string path) => MEPackageHandler.CreateMemoryEmptyLevel(Checked(game, path), game);
+
+    /// <summary>The full path of a level to create: a .pcc that does not exist yet, outside the game install.</summary>
+    private static string Checked(MEGame game, string path)
+    {
         LecHost.EnsureInitialized();
         var full = Path.GetFullPath(GamePaths.ToWindowsPath(path));
         if (!full.EndsWith(".pcc", StringComparison.OrdinalIgnoreCase))
@@ -23,11 +40,6 @@ public static class LevelCreator
             throw new ArgumentException($"{full} already exists.");
         }
         PackageWriter.EnsureWritable(game, full);
-
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        MEPackageHandler.CreateEmptyLevel(full, game);
-
-        using var pcc = MEPackageHandler.OpenMEPackage(full, forceLoadFromDisk: true);
-        return new NewLevelResult(full, Path.GetFileNameWithoutExtension(full), pcc.ExportCount, pcc.Exports.Select(ExportInspector.Row).ToList());
+        return full;
     }
 }

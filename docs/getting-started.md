@@ -87,6 +87,7 @@ All are optional environment variables. The scripts read the environment first, 
 | `MELE_LE_DIR` | the registry | The Legendary Edition folder. Also read by lectool and `build.sh --install` and `--uninstall`, as a Windows path. |
 | `MELE_BACKUP_DIR` | `%LOCALAPPDATA%\mele-mcp\backups` | Backup root, `<backups>` below. |
 | `MELE_LEVELS_JSON` | `%LOCALAPPDATA%\MeleBridge\LE1\levels.json` | The file `level_build` writes. For tests: MeleBridge ignores this setting. |
+| `MELE_ID_RESERVATIONS` | `%LOCALAPPDATA%\mele-mcp\id-reservations.json` | The ids `id_alloc` reserved. For tests. |
 | `MELE_OWN_DLC` | folders `levels.json` names | Comma-separated DLC folders that `catalog_index` leaves out. |
 | `MELE_DUMP_DIR` | `%LOCALAPPDATA%\mele-mcp\dumps` | Dump root. Refused inside the install. |
 | `MELE_DOTNET` | `dotnet.exe` on the PATH | Scripts: the Windows `dotnet.exe`, as a WSL path. |
@@ -158,11 +159,13 @@ Most write tools refuse the Legendary Edition folder. Edit the mod's copy in M3'
 | Merge mods | `<modRoot>\MergeMods\`, `moddesc.ini`; scratch in `%TEMP%\mele-mcp-merge-<guid>` | The later install patches a core file. Only M3's Restore undoes it. |
 | Saves (LE2, LE3) | `Documents\BioWare\Mass Effect Legendary Edition\Save\ME<n>\<career>` | Backup in `<backups>\saves`. Refused while the game runs, unless `allowRunning`. |
 | Dumps | `MELE_DUMP_DIR`, a folder per game | They are game code: keep them out of repos. |
+| Id reservations (LE1) | `%LOCALAPPDATA%\mele-mcp\id-reservations.json` | Only `id_alloc` reads it. Deleting it drops every reservation. |
 
 These writers have no install guard or make no backup, so check the path you give them:
 
 - `game_screenshot` writes its `path`, or a PNG in `%LOCALAPPDATA%\mele-mcp\screenshots`.
-- `editor_import`, `npc_place` and `live_save` edit the level YAML in place with no backup, then run `level_build`.
+- `editor_import`, `npc_place` and `live_save` write the level YAML with no install guard, then run `level_build`.
+  Each copies it to `<backups>` first.
 - With `sideloader`, `level_build` writes `ConfigDelta-<level>.m3cd` over any file of that name, unless an `.m3cd` beside
   the level already names it.
 - lectool writes where its arguments point, with no backup. `compileclass` deletes an existing output file.

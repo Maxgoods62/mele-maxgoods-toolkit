@@ -49,20 +49,28 @@ render() {
 
 apply() {
     load "$1"
-    local base path text
-    # Every file is tested before the first one is written, so a refusal leaves the repo as it was.
+    local base path list tmp
+    list="$(files)"
+    # Inside the repo's git dir: the same file system as the checkout, so each file below lands by a rename, whole.
+    tmp="$(mktemp -d "$(git -C "$dir" rev-parse --absolute-git-dir)/kit-apply.XXXXXX")"
+    trap "rm -rf -- '$tmp'" EXIT
+    # Every file is rendered and tested before the first one is written, so a refusal leaves the repo as it was. A file
+    # that already holds its render loses nothing when written again, so a run that stopped partway can run again.
     while IFS=$'\t' read -r base path; do
-        [[ -z "$(git -C "$dir" status --porcelain -- "$path")" ]] || die "$folder/$path has uncommitted changes"
-        text="$(render "$base/$path")"
-        ! grep -nE '@[A-Z]+@' <<< "$text" || die "$path: token left"
-        ! grep -nE "$PRIVATE" <<< "$text" || die "$path: private string"
-    done < <(files)
+        mkdir -p "$tmp/$(dirname "$path")"
+        render "$base/$path" > "$tmp/$path"
+        if [[ "$path" == *.sh ]]; then chmod +x "$tmp/$path"; fi
+        ! grep -nE '@[A-Z]+@' "$tmp/$path" || die "$path: token left"
+        ! grep -nE "$PRIVATE" "$tmp/$path" || die "$path: private string"
+        if [[ -n "$(git -C "$dir" status --porcelain -- "$path")" ]] && ! cmp -s "$tmp/$path" "$dir/$path"; then
+            die "$folder/$path has uncommitted changes"
+        fi
+    done <<< "$list"
     while IFS=$'\t' read -r base path; do
         mkdir -p "$dir/$(dirname "$path")"
-        render "$base/$path" > "$dir/$path"
-        if [[ "$path" == *.sh ]]; then chmod +x "$dir/$path"; fi
+        mv -f "$tmp/$path" "$dir/$path"
         echo "wrote $folder/$path"
-    done < <(files)
+    done <<< "$list"
 }
 
 check() {

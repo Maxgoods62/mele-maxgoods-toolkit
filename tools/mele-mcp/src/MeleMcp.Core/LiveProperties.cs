@@ -62,7 +62,7 @@ public static partial class LiveProperties
 
         var shown = values.Where(v => string.IsNullOrEmpty(nameContains) || v.Path.Contains(nameContains, StringComparison.OrdinalIgnoreCase)).ToList();
         var note = unrecognized is not null ? $"The game says: {unrecognized} (names are exact)."
-            : values.Count == 0 ? $"No answer within {timeoutSeconds} s: no live object of class {className}."
+            : values.Count == 0 ? $"No answer within {timeoutSeconds} s: no live object of class {className}, or the game has not run the command yet (a load screen)."
             : null;
         return new LiveValues(command, shown.Count, shown, note);
     }

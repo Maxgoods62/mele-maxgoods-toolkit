@@ -130,13 +130,35 @@ namespace MeleBridge
                 for (auto const& n : names)
                 {
                     auto const f = FindFunctionByPath(ToWide(n.get<std::string>()));
-                    sub->Watches.push_back({ f->Name, static_cast<UClass*>(f->Outer) });
+                    // A function declared in a state (Package.Class.State.Function) has the state as its outer, which no object
+                    // IsA: the class that holds the state is the one calls match on, and the state's name keeps the class's own
+                    // function and its other states' out of the stream (Publish).
+                    Watch watch{ f->Name, nullptr };
+                    auto owner = f->Outer;
+                    if (owner != nullptr && owner->IsA(UState::StaticClass()) && !owner->IsA(UClass::StaticClass()))
+                    {
+                        watch.InState = true;
+                        watch.State = owner->Name;
+                    }
+                    while (owner != nullptr && !owner->IsA(UClass::StaticClass())) owner = owner->Outer;
+                    if (owner == nullptr) throw BridgeError(ToUtf8(PathOf(f)) + " is in no class");
+                    watch.Owner = static_cast<UClass*>(owner);
+                    sub->Watches.push_back(watch);
                     resolved.push_back(ToUtf8(PathOf(f)));
                 }
                 AddSubscriber(sub);
-                return Ok({ { "functions", resolved } });
+                return Ok({
+                    { "functions", resolved },
+                    // GameThread.cpp's ProcessEvent hook says why.
+                    { "skipped", "calls made while a request runs on the game thread (a call op's function and what it calls through "
+                                 "ProcessEvent before it returns, a console command's, status's reads) and the in-game editor's own "
+                                 "calls; what a request sets off later is streamed" },
+                });
             }, timeout);
             if (reply.value("ok", false)) subscription = sub;
+            // A subscription answered as still running is added when its job ends, with no client to read it: closed, the game
+            // thread drops it at its next event.
+            else sub->Closed.store(true);
             return reply;
         }
 

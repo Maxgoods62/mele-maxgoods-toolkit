@@ -12,10 +12,12 @@ The report goes to <out>\\<suite>\\<yyyymmdd-hhmmss>\\. --dry-run validates the 
 suite or prerequisite error; 3 ABORTED; 4 a save restore pending or failed. The format and the guards: docs/scenarios.md.
 """
 import argparse
+import contextlib
 import datetime
 import fnmatch
 import glob
 import hashlib
+import io
 import json
 import math
 import ntpath
@@ -41,6 +43,11 @@ TOOLS = {"live_status", "live_keep_ticking", "live_find", "live_get", "live_set"
          "le_status", "game_remote_event", "game_cycle"}
 REQUIRED = ["live_status", "live_keep_ticking", "live_console", "live_find", "live_get", "live_set", "live_call",
             "game_plot", "game_screenshot", "le_status"]
+# Tools that Session.call may send again when the server died or fell silent after the call was sent, so it may have
+# run: they only read (game_plot without a value), or set keep_ticking to the same value again. A console command, a
+# live_call (QuickSave, CheckActivate, FinalizeParty...) or a game_cycle sent twice would run twice.
+REPLAY_SAFE = {"live_status", "live_find", "live_get", "live_describe", "live_watch", "game_plot", "game_screenshot",
+               "game_kismet_log", "game_log", "game_status", "le_status", "live_keep_ticking"}
 # The game of every run: a suite's game may only be LE1. Every tool of TOOLS but those in NO_GAME requires game, so
 # Runner.call adds it to each call that lacks it.
 GAME = "LE1"
@@ -136,6 +143,10 @@ class ToolError(Exception):
 
 class ServerDead(Exception):
     """The server's stdout closed, or no answer came before the deadline."""
+
+
+class NotSent(ServerDead):
+    """The server's stdin was closed before the request was written: the server cannot have run it."""
 
 
 class Aborted(Exception):
@@ -370,8 +381,9 @@ def normalise(text):
     return re.sub(r"\s+", " ", line).strip()
 
 
-def load_problems(st, want, allow_party):
-    """What keeps a live_status reply from counting as loaded; empty when it does (docs/scenarios.md, wait_loaded)."""
+def load_problems(st, want, allow_party, ticking=True):
+    """What keeps a live_status reply from counting as loaded; empty when it does (docs/scenarios.md, wait_loaded).
+    ticking: keep_ticking must be on (not after a keep_ticking: off step)."""
     why = []
     if want and str(st.get("map") or "").casefold() != str(want).casefold():
         why.append(f"map is {st.get('map')}")
@@ -390,7 +402,7 @@ def load_problems(st, want, allow_party):
         why.append("the squad screen is open")
     if st.get("bPlayersOnly") and not (party and allow_party):
         why.append("the world is paused (bPlayersOnly)")
-    if st.get("keepTicking") is False:
+    if ticking and st.get("keepTicking") is False:
         why.append("keep_ticking is off")
     return why
 
@@ -399,9 +411,8 @@ def restore_command(pending=None, backup=None):
     """The --restore-saves command line for a backup folder, or for the one a PENDING file names."""
     if pending:
         try:
-            with open(pending, encoding="utf-8") as f:
-                backup = f.read().strip()
-        except OSError:
+            backup = read_pending(pending)
+        except RestorePending:
             pass
     return "python3 -I scenario.py --restore-saves" + (f" '{to_win(backup)}'" if backup else "")
 
@@ -423,6 +434,120 @@ def file_stat(path):
 
 
 # ---- saves (D1): backup before the first save, restore with the game closed ----
+
+def save_folder():
+    """LE1's save folder, Documents\\BioWare\\Mass Effect Legendary Edition\\Save\\ME1, as a WSL path."""
+    return os.path.join(documents(), "BioWare", "Mass Effect Legendary Edition", "Save", "ME1")
+
+
+def pending_dir():
+    """The one per-user folder of PENDING files, %LOCALAPPDATA%\\mele-mcp\\scenario-pending, as a WSL path."""
+    return to_wsl(ntpath.join(ntpath.dirname(default_out()), "scenario-pending"))
+
+
+def pending_file(save_root):
+    """The PENDING file of a save folder. Every run uses the same Save\\ME1, whatever its suite or report root, so
+    there is one PENDING per save folder, in one per-user place, named after the folder."""
+    win = ntpath.normpath(to_win(save_root))
+    key = hashlib.sha256(win.casefold().encode("utf-8")).hexdigest()[:12]
+    return os.path.join(pending_dir(), f"{ntpath.basename(win)}-{key}.PENDING")
+
+
+def same_path(a, b):
+    return ntpath.normpath(to_win(a)).casefold().rstrip("\\") == ntpath.normpath(to_win(b)).casefold().rstrip("\\")
+
+
+def read_pending(path):
+    """The backup folder (a WSL path) a PENDING file names; None when there is no such file. One that names no
+    folder (empty or unreadable) raises RestorePending: nothing then says which backup is due."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read().strip()
+    except (OSError, ValueError):  # ValueError: not UTF-8
+        text = ""
+    if not text or "\n" in text:
+        raise RestorePending(f"{to_win(path)} names no backup folder: restore the newest save-backup folder of your "
+                             "suites by name, game closed (python3 -I scenario.py --restore-saves '<folder>'), then "
+                             "delete that file")
+    return to_wsl(text)
+
+
+def write_pending(path, backup):
+    """Writes a PENDING file to a temp file, then moves it in place (as SaveFiles and CatalogBuilder.WriteAtomic do):
+    a crash leaves the old file or the new one, never an empty one."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(to_win(backup) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def drop_pending(backup, pending):
+    """Deletes the PENDING files that name this backup, once it is back: the save folder's (pending), and the one an
+    older scenario.py kept next to the backup folder. One that names another backup, or none, stays. Returns warnings.
+    It runs with signals held, so pending is found before (pending_file runs powershell.exe, which a Ctrl-C ends,
+    and whose SystemExit would skip the report)."""
+    warns = []
+    for path in (pending, os.path.join(os.path.dirname(backup.rstrip("/")), "PENDING")):
+        if not path:
+            continue
+        try:
+            named = read_pending(path)
+        except RestorePending:
+            warns.append(f"{to_win(path)} names no backup folder: kept; delete it once no other backup is due")
+            continue
+        if named is None:
+            continue
+        if not same_path(named, backup):
+            warns.append(f"{to_win(path)} names another backup, {to_win(named)}: kept")
+            continue
+        try:
+            os.remove(path)
+        except OSError as e:
+            warns.append(f"{to_win(path)} not deleted ({e}): delete it, its backup is back")
+    return warns
+
+
+class HoldSignals:
+    """Holds Ctrl-C, SIGTERM and SIGHUP while a save restore moves files. A restore is not atomic (a changed file moves
+    out, then its backup copies in), so an interrupt between the two leaves a half-restored folder. release() then
+    acts on a held signal as its own handler would have."""
+
+    def __enter__(self):
+        self.got, self.old = None, {}
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            old = signal.getsignal(sig)
+            if old is None:  # a handler set outside Python could not be put back: left alone
+                continue
+            try:
+                signal.signal(sig, self.hold)
+                self.old[sig] = old
+            except (ValueError, OSError):  # not the main thread
+                pass
+        return self
+
+    def hold(self, signum, frame):
+        self.got = self.got or signum
+
+    def __exit__(self, *exc):
+        for sig, handler in self.old.items():
+            signal.signal(sig, handler)
+        return False
+
+    def release(self):
+        """After the with block: Ctrl-C and a first SIGTERM or SIGHUP raise KeyboardInterrupt now, a second one kills
+        (on_signal), and an outer HoldSignals keeps holding it."""
+        sig, self.got = self.got, None
+        handler = self.old.get(sig)
+        if callable(handler):
+            handler(sig, None)
+        elif sig is not None and handler == signal.SIG_DFL:
+            signal.raise_signal(sig)
+
 
 def backup_saves(save_root, career, dest):
     """Copies the career folder, PROFILE/GamerProfile.pcsav and Launcher_Profile* into dest, checks every copy, and
@@ -452,8 +577,9 @@ def backup_saves(save_root, career, dest):
 
 
 def restore_saves(backup):
-    """Puts a backup back, the game closed: files the run added or changed move to <backup>/displaced/<stamp>/ (nothing
-    is deleted), manifest files that are missing or differ are copied back. Returns what happened, with 'ok'."""
+    """Puts a backup back, the game closed: files added or changed since the backup (by the run, or by play when the
+    restore came later) move to <backup>/displaced/<stamp>/ (nothing is deleted), manifest files that are missing or
+    differ are copied back. Returns what happened, with 'ok'."""
     if le1_running():
         raise GuardError("close the game first: saves are restored only while LE1 is closed")
     with open(os.path.join(backup, "manifest.json"), encoding="utf-8") as f:
@@ -477,7 +603,7 @@ def restore_saves(backup):
     for n in sorted(os.listdir(root)):
         if n not in man["top_level"]:
             displace(n)
-            warns.append(f"moved out {n}: it appeared in the save folder during the run")
+            warns.append(f"moved out {n}: it appeared in the save folder after the backup of {man['created']}")
     for e in man["files"]:
         dst = os.path.join(root, e["rel"])
         if not os.path.isfile(dst) or sha(dst) != e["sha256"]:
@@ -488,14 +614,21 @@ def restore_saves(backup):
             copied.append(e["rel"])
     bad = [e["rel"] for e in man["files"] if not os.path.isfile(os.path.join(root, e["rel"]))
            or sha(os.path.join(root, e["rel"])) != e["sha256"]]
-    return {"backup": to_win(backup), "restored": copied, "displaced": moved, "warns": warns, "mismatch": bad,
-            "ok": not bad}
+    return {"backup": to_win(backup), "save_root": man["save_root"], "restored": copied, "displaced": moved,
+            "warns": warns, "mismatch": bad, "ok": not bad}
 
 
 # ---- the MCP session ----
 
+def replay_safe(tool, args):
+    """Whether a call the server may have run can go again: a read, or keep_ticking (REPLAY_SAFE)."""
+    return tool in REPLAY_SAFE and not (tool == "game_plot" and "value" in args)
+
+
 class Session:
-    """One long-lived mele-mcp server over stdio (like mcp_smoke.py); a dead or silent one is respawned once per call."""
+    """One long-lived mele-mcp server over stdio (like mcp_smoke.py). A server found dead before a send is replaced
+    first; one that dies or falls silent after it is replaced before the next call, and the call goes again only when
+    it never reached the server or is replay_safe."""
 
     def __init__(self, s, record):
         self.dotnet = s.get("MELE_DOTNET") or "dotnet.exe"
@@ -506,7 +639,8 @@ class Session:
                                                                     "MELE_SCENARIO_OUT"))
         self.env.update((k, s[k]) for k in passed)
         self.env["WSLENV"] = ":".join(passed)
-        self.record, self.proc, self.n, self.buf = record, None, 0, b""
+        # spent: this server died or fell silent with a call sent, so the next call goes to a new one
+        self.record, self.proc, self.n, self.buf, self.spent = record, None, 0, b"", False
         self.start()
 
     def start(self):
@@ -526,13 +660,14 @@ class Session:
             self.tools = {t["name"] for t in self.rpc("tools/list", {}, 30).get("tools", [])}
         except (ServerDead, ToolError, KeyError) as e:
             raise SuiteError(f"no mele-mcp server at {self.dll} ({e}): run deploy.sh, or set MELE_DLL or MELE_OUT")
+        self.spent = False
 
     def send(self, msg):
         try:
             self.proc.stdin.write((json.dumps(msg) + "\n").encode())
             self.proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            raise ServerDead("server closed stdin")
+        except (BrokenPipeError, OSError):  # its stdin is closed: it can read no part of this line
+            raise NotSent("server closed stdin")
 
     def readline(self, deadline):
         while b"\n" not in self.buf:
@@ -570,6 +705,10 @@ class Session:
                 self.proc.wait(timeout=10)
             except (OSError, subprocess.TimeoutExpired):
                 self.proc.kill()
+                try:  # gone before a new server starts, so two never talk to the bridge at once
+                    self.proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
 
     def call(self, tool, args, timeout=None):
         """The tool's reply, parsed as JSON (raw text if it is not); isError raises ToolError with the text."""
@@ -581,17 +720,23 @@ class Session:
         entry, t0 = {"t": now_iso(), "tool": tool, "args": args}, time.time()
         try:
             for attempt in (1, 2):
-                try:
-                    result = self.rpc("tools/call", {"name": tool, "arguments": args}, timeout + 30)
-                    break
-                except ServerDead as e:
-                    if attempt == 2:
-                        raise ToolError(f"mele-mcp: {e}")
+                if self.spent or self.proc is None or self.proc.poll() is not None:
+                    # Dead, or given up on, before this send: a new server cannot have seen the call.
                     self.close()
                     try:  # e.g. deploy.sh is publishing: a step FAILs, and the finally paths still run
                         self.start()
                     except SuiteError as again:
                         raise ToolError(f"mele-mcp could not restart: {again}")
+                try:
+                    result = self.rpc("tools/call", {"name": tool, "arguments": args}, timeout + 30)
+                    break
+                except ServerDead as e:
+                    self.spent = True
+                    if attempt == 2:
+                        raise ToolError(f"mele-mcp: {e}")
+                    if not isinstance(e, NotSent) and not replay_safe(tool, args):
+                        raise ToolError(f"mele-mcp: {e} after {tool} was sent, so it may have run: not sent again "
+                                        "(only reads are)")
             text = "".join(b.get("text", "") for b in result.get("content", []))
             try:
                 value = json.loads(text)
@@ -992,29 +1137,60 @@ def dry_run(selected):
 
 # ---- logs ----
 
+class Offset(int):
+    """A byte offset in a log, with the generation of the file it was taken in (Logs.gen)."""
+
+    def __new__(cls, value, gen):
+        o = super().__new__(cls, value)
+        o.gen = gen
+        return o
+
+
 class Logs:
-    """DebugLogger.log and KismetLogger.log of the game, read by byte offset through /mnt (never written)."""
+    """DebugLogger.log and KismetLogger.log of the game, read by byte offset through /mnt (never written). Each game
+    session writes them again from the start. A log whose first bytes changed is a new file, a new generation, and an
+    Offset of an older one reads from 0, even when the new file is already longer than it (a plain int offset counts
+    as the current generation)."""
+
+    HEAD = 512
 
     def __init__(self, game_dir=None, paths=None):
         base = to_wsl(game_dir.rstrip("\\") + "\\Binaries\\Win64\\Logs") if game_dir else ""
         self.paths = paths or (os.path.join(base, "DebugLogger.log"), os.path.join(base, "KismetLogger.log"))
+        self.head, self.gen = [None, None], [0, 0]
+
+    def same_file(self, which, f):
+        """Counts a new generation when the open log does not start with the bytes it started with before."""
+        head, old = f.read(self.HEAD), self.head[which]
+        if old is not None and head[:len(old)] != old:
+            self.gen[which] += 1
+        self.head[which] = head
 
     def offsets(self):
-        return tuple(file_stat(p)[1] if file_stat(p) else 0 for p in self.paths)
+        out = []
+        for which, path in enumerate(self.paths):
+            try:
+                with open(path, "rb") as f:
+                    self.same_file(which, f)
+                    out.append(Offset(os.fstat(f.fileno()).st_size, self.gen[which]))
+            except OSError:
+                out.append(Offset(0, self.gen[which]))
+        return tuple(out)
 
     def lines(self, which, start, end=None):
         """(whole lines from start to end or the end of log 0 (debug) or 1 (kismet), the offset after them). A start
-        past the end means the next game session rewrote the log, so it reads from 0."""
+        of an older generation, or past the end, means the next game session rewrote the log, so it reads from 0."""
         try:
             with open(self.paths[which], "rb") as f:
+                self.same_file(which, f)
                 size = os.fstat(f.fileno()).st_size
-                start = 0 if start > size else start
+                start = 0 if getattr(start, "gen", self.gen[which]) != self.gen[which] or start > size else start
                 f.seek(start)
                 data = f.read(max(0, min(size, end if end is not None else size) - start))
         except OSError:
             return [], start
         cut = data.rfind(b"\n") + 1
-        return data[:cut].decode("utf-8", "replace").splitlines(), start + cut
+        return data[:cut].decode("utf-8", "replace").splitlines(), Offset(start + cut, self.gen[which])
 
 
 # ---- the runner ----
@@ -1026,10 +1202,26 @@ class Runner:
         self.s, self.unattended = session, unattended
         self.vars, self.scope, self.macros, self.cache, self.marks, self.snapshots = {}, {}, {}, {}, {}, {}
         self.file, self.check_id, self.cur, self.rec, self.st, self.st_t = None, "", None, {}, None, 0
-        self.logs, self.scan_at, self.trigger, self.load_window, self.expect_save = None, [0, 0], None, False, None
+        # trigger: the mark for the wait_loaded right after the running step; trigger_in: the one the step before left
+        self.logs, self.scan_at, self.trigger, self.trigger_in, self.expect_save = None, [0, 0], None, None, None
+        # A save load is expected only while load_window is open: from a load step's command to the end of that step,
+        # or from a game_cycle to the end of the wait_loaded right after it (run_step), or of its list when that
+        # wait_loaded does not run (run_list). loads counts the save loads and game boots the steps started: plot
+        # values read before one belong to another plot table (write_restore).
+        self.load_window, self.load_aborted, self.loads = False, False, 0
         self.warns, self.notes, self.shot_n, self.review = [], set(), 0, False
         self.install = self.run_dir = self.run_win = self.backup = self.saves_root = self.progress = None
-        self.game_down_ok, self.game_closed, self.load_aborted, self.alive_t = False, False, False, time.time()
+        # The save backup (docs/scenarios.md, Saves), in its folder self.backup: None (none taken), "held" (taken or
+        # reused: a PENDING names it, and the saves may differ from it), "restored" (back and checked, PENDING gone, so
+        # a save now would stay), "failed" (a restore stopped or did not check out: PENDING kept, saves half back).
+        self.backup_state = None
+        # The save folder's PENDING file, found with the backup: the restore that deletes it holds signals and spawns
+        # no process (drop_pending).
+        self.pending = None
+        # The game: "up" (a stop is a crash), "down" (close_game or game_cycle at work), "closed" (close_game saw it go;
+        # a game_cycle brings it back). ticking_off: a keep_ticking: off step holds until the end of its check, so
+        # wait_loaded leaves it off (end_ticking_off).
+        self.game_state, self.ticking_off, self.alive_t = "up", False, time.time()
         self.stamp, self.bridge, self.saves = time.strftime("%Y%m%d-%H%M%S"), None, {}
         self.suite = self.suite_root = self.calls_file = None
         self.game = GAME
@@ -1050,7 +1242,7 @@ class Runner:
         try:
             return self.s.call(tool, args, timeout)
         except ToolError as e:
-            if "is not running" in str(e) and not self.game_down_ok and not le1_running():
+            if "is not running" in str(e) and self.game_state == "up" and not le1_running():
                 raise Aborted("the game closed or crashed")
             raise
 
@@ -1275,6 +1467,15 @@ class Runner:
         """After every step and on every poll: abort on a save load nobody asked for or a dead game; flag saves."""
         if self.logs is None:
             return
+        self.scan_logs()
+        if self.game_state == "up" and time.time() - self.alive_t > 5:
+            self.alive_t = time.time()
+            if not le1_running():
+                raise Aborted("the game closed or crashed")
+
+    def scan_logs(self):
+        """The log lines since the last scan: a save load outside load_window aborts; a save the runner did not ask
+        for, and a Kismet autosave, are WARN."""
         lines, self.scan_at[0] = self.logs.lines(0, self.scan_at[0])
         for line in lines:
             m = SAVE_LOAD.search(line)
@@ -1283,17 +1484,28 @@ class Runner:
                 raise Aborted(f"a save loaded that the runner did not ask for (Shepard died?): {m.group(1)}")
             m = SAVED.search(line)
             if m and not self.expect_save:
-                self.warn(f"autosave or save the runner did not ask for: {m.group(1)}; " +
-                          ("restored with the backup" if self.backup else "check Save\\ME1 for a new career folder"))
+                fate = "check Save\\ME1 for a new career folder" if self.backup_state is None else \
+                    "not undone: the save backup was restored before it" if self.backup_state == "restored" else \
+                    "restored with the backup"
+                self.warn(f"autosave or save the runner did not ask for: {m.group(1)}; {fate}")
         lines, self.scan_at[1] = self.logs.lines(1, self.scan_at[1])
         for line in lines:
             m = KISMET.match(line)
             if m and m.group(2) == "BioSeqAct_AutoSave":
                 self.warn(f"Kismet activated an autosave: {m.group(3)}")
-        if not self.game_down_ok and time.time() - self.alive_t > 5:
-            self.alive_t = time.time()
-            if not le1_running():
-                raise Aborted("the game closed or crashed")
+
+    def close_load_window(self):
+        """Ends the time a save load is expected. The log so far is scanned first, the window still open, so the
+        expected load's own lines never abort; after that a save load aborts (docs/scenarios.md, Guards). Never
+        raises: it runs in the finally of run_step and run_list."""
+        if not self.load_window:
+            return
+        try:
+            if self.logs:
+                self.scan_logs()
+        except Exception as e:  # the runner's own bug: the window still closes
+            self.warn(f"log scan at the end of a load failed: {type(e).__name__}: {e}")
+        self.load_window = False
 
     def sleep(self, seconds):
         end = time.time() + float(seconds)
@@ -1369,21 +1581,30 @@ class Runner:
     def run_list(self, steps, label, records, soft=False):
         """Runs steps (macros inlined); stops at the first failing non-optional one unless soft (cleanup: WARN)."""
         flat = flatten(steps, self.macros)
-        for i, (step, scope) in enumerate(flat, 1):
-            nxt = flat[i][0] if i < len(flat) else None
-            if isinstance(nxt, dict) and "wait_loaded" in nxt:
-                self.trigger = self.flush_mark()
-            try:
-                ok = self.run_step(step, scope, i, len(flat), label, records, soft)
-            except SkipCheck:
-                if not soft:
-                    raise
-                continue  # a prompt in cleanup or teardown under --unattended: that step is SKIP, the rest runs
-            if not ok and not soft:
-                return False
-        return True
+        self.trigger = None  # one an earlier list left for a wait_loaded that never ran
+        try:
+            for i, (step, scope) in enumerate(flat, 1):
+                nxt = flat[i][0] if i < len(flat) else None
+                waits = isinstance(nxt, dict) and "wait_loaded" in nxt
+                # The mark taken before a step (game_cycle moves it into the new log) is for the wait_loaded right
+                # after it alone: a step that fails, or is not followed by one, leaves it to no later step.
+                self.trigger_in, self.trigger = self.trigger, self.flush_mark() if waits else None
+                try:
+                    ok = self.run_step(step, scope, i, len(flat), label, records, soft, waits)
+                except SkipCheck:
+                    if not soft:
+                        raise
+                    continue  # a prompt in cleanup or teardown under --unattended: that step is SKIP, the rest runs
+                if not ok and not soft:
+                    return False
+            return True
+        finally:
+            # A game_cycle keeps the load window open for the wait_loaded after it (run_step). When the list stops
+            # before that step runs (the game_cycle failed), the load it expected ends here, not in the next list.
+            self.close_load_window()
 
-    def run_step(self, step, scope, i, n, label, records, soft=False):
+    def run_step(self, step, scope, i, n, label, records, soft=False, waits=False):
+        """One step; waits: the next step is a wait_loaded."""
         kind, a, common = split_step(step)
         self.scope = scope
         rec = self.rec = {"i": i, "kind": kind, "name": common.get("name") or "", "status": "ok", "t": now_iso(),
@@ -1411,6 +1632,10 @@ class Runner:
             rec["status"], rec["detail"] = "ERROR", f"runner error: {type(e).__name__}: {e}"
         finally:
             rec["ms"] = int((time.time() - t0) * 1000)
+            # A load step's expected load ends with the step, passed or not; a game_cycle's ends with the wait_loaded
+            # right after it, or with the list when the list stops first (run_list).
+            if not (kind == "game_cycle" and waits):
+                self.close_load_window()
             self.progress_line(label, i, n, rec)
             self.scope = {}
         if rec["status"] == "WARN":
@@ -1421,6 +1646,8 @@ class Runner:
         res = self.cur = {"id": c["id"], "title": c.get("title", ""), "row": c.get("row", ""), "status": "PASS",
                           "reason": "", "warns": [], "duration": 0, "steps": [], "cleanup": [], "shots": []}
         self.check_id, self.review, self.trigger = c["id"], False, None
+        self.close_load_window()  # no check starts with a load still expected
+        self.end_ticking_off(f"{f['id']}/{c['id']}")  # nor with a keep_ticking: off of the check before
         if c.get("skip"):
             res.update(status="SKIP", reason=str(c["skip"]))
             return res
@@ -1457,7 +1684,8 @@ class Runner:
                               for c in checks]
             return fres
         self.marks = {"file": self.flush_mark()}
-        self.check_id, restore = "setup", []
+        self.check_id, restore, loads = "setup", [], self.loads
+        self.end_ticking_off(f"{f['id']}/setup")  # a keep_ticking: off of the file before ends here
 
         def none_ran(status, reason):
             fres["checks"] = [{"id": c["id"], "title": c.get("title", ""), "row": c.get("row", ""), "status": status,
@@ -1473,6 +1701,7 @@ class Runner:
                 none_ran("ERROR", f"setup step {bad['i']} {bad['kind']}: {bad['detail']}")
             elif ready:
                 try:
+                    loads = self.loads  # the plot table the values come from
                     self.read_restore(doc.get("restore") or {}, f["id"], restore)
                 except (StepFail, ToolError) as e:
                     none_ran("ERROR", f"no check ran: the restore plot values could not be read ({e})")
@@ -1480,6 +1709,7 @@ class Runner:
                     for c in checks:
                         fres["checks"].append(self.run_check(f, c))
             self.cur, self.check_id = fres, "teardown"
+            self.end_ticking_off(f"{f['id']}/teardown")
             self.run_list(doc.get("teardown"), f"{f['id']}/teardown", fres["teardown"], soft=True)
         except BaseException as e:
             if self.cur is not fres and self.cur not in fres["checks"]:
@@ -1489,7 +1719,7 @@ class Runner:
             raise
         finally:
             self.cur = fres
-            self.write_restore(restore)
+            self.write_restore(restore, loads)
             try:
                 self.copy_slices(f["id"])
             except OSError as e:
@@ -1505,14 +1735,21 @@ class Runner:
                 out += [{"file": fid, "kind": kind, "id": i, "value": v} for i, v in self.plot_read(kind, ids).items()]
         return out
 
-    def write_restore(self, values):
-        """Writes the restore plot values back, unless an unexpected load replaced them or the game is gone. Never
-        raises: it runs in a finally."""
+    def write_restore(self, values, loads):
+        """Writes the restore plot values back, unless a save load since they were read (loads: self.loads then)
+        replaced the plot table, or the game is gone. Never raises: it runs in a finally."""
         for r in values:
             try:
-                if self.load_aborted or self.game_closed or not le1_running():
-                    r["restored"] = "skipped: " + ("an unexpected load replaced the plot table" if self.load_aborted
-                                                   else "the game is not running")
+                why = None
+                if self.load_aborted:
+                    why = "an unexpected load replaced the plot table"
+                elif self.game_state == "closed" or not le1_running():
+                    why = "the game is not running"
+                elif self.loads != loads:
+                    why = "a save loaded after setup (load, quickload or game_cycle), so the plot table is that save's"
+                    self.note(f"plot values of {r['file']} not restored: {why}")
+                if why:
+                    r["restored"] = "skipped: " + why
                 else:
                     self.call("game_plot", {"kind": r["kind"], "ids": [r["id"]], "value": str(r["value"])})
                     r["restored"] = "ok"
@@ -1530,44 +1767,78 @@ class Runner:
                 out.write("\n".join(lines) + ("\n" if lines else ""))
 
     def backup_now(self, career):
-        """backup_saves at the start of a run with a file that may save; PENDING marks it until it is restored. A
-        PENDING backup of the same career is reused: it still holds the saves from before any run touched them, and a
-        new backup would copy the saves the earlier run changed."""
-        pending = os.path.join(self.suite_root, "save-backup", "PENDING")
+        """backup_saves at the start of a run with a file that may save, or for a backup_saves step with no backup
+        held; PENDING marks it until it is restored. Every run shares Save\\ME1, so there is one PENDING per save
+        folder (pending_file), and no new backup is taken while it exists. One of the same career is reused: it still
+        holds the saves from before any run touched them, and a new backup would copy the saves the earlier run
+        changed. One of another career, or one that names no folder, stops the run."""
         if not career:
             raise SuiteError("a file with saves: true needs career:")
-        self.saves_root = os.path.join(documents(), "BioWare", "Mass Effect Legendary Edition", "Save", "ME1")
-        if os.path.exists(pending):
-            with open(pending, encoding="utf-8") as f:
-                dest = to_wsl(f.read().strip())
-            with open(os.path.join(dest, "manifest.json"), encoding="utf-8") as f:
-                man = json.load(f)
+        self.saves_root = save_folder()
+        self.pending = pending = pending_file(self.saves_root)
+        dest = read_pending(pending)
+        old = glob.glob(os.path.join(os.path.dirname(self.suite_root), "*", "save-backup", "PENDING"))
+        if dest is None and old:
+            raise RestorePending(f"an older scenario.py left {to_win(old[0])}: restore that backup first, game "
+                                 f"closed: {restore_command(old[0])}")
+        if dest is not None:
+            try:
+                with open(os.path.join(dest, "manifest.json"), encoding="utf-8") as f:
+                    man = json.load(f)
+            except (OSError, ValueError) as e:
+                raise RestorePending(f"{to_win(pending)} names {to_win(dest)}, which has no readable manifest.json "
+                                     f"({e}): restore the right backup by name, game closed, then delete that file")
             if str(man.get("career", "")).lower() != str(career).lower():
                 raise RestorePending(f"the pending backup is of career {man.get('career')}, not {career}: restore it "
                                      f"first, game closed: {restore_command(pending)}")
-            self.backup = dest
-            self.saves.update(backup=to_win(dest), files=len(man["files"]), restored=None, reused=True)
+            self.hold_backup(dest, len(man["files"]), True)
             print(f"saves: reusing the pending backup {to_win(dest)} (taken before the first run)", flush=True)
             return
         dest = os.path.join(self.suite_root, "save-backup", self.stamp)
+        n = 1
+        while os.path.exists(dest):  # a backup_saves step after restore_saves: a folder of its own
+            n += 1
+            dest = os.path.join(self.suite_root, "save-backup", f"{self.stamp}-{n}")
         assert_writable(dest, self.install)
         assert_writable(self.saves_root, self.install)
+        assert_writable(pending, self.install)
         man = backup_saves(self.saves_root, career, dest)
-        with open(pending, "w", encoding="utf-8") as f:
-            f.write(to_win(dest) + "\n")
-        self.backup = dest
-        self.saves.update(backup=to_win(dest), files=len(man["files"]), restored=None)
+        write_pending(pending, dest)
+        self.hold_backup(dest, len(man["files"]), False)
         print(f"saves backed up to {to_win(dest)} ({len(man['files'])} files)", flush=True)
 
+    def hold_backup(self, dest, files, reused):
+        """The way into the held state: the run's restore now owes dest. A restored backup's record moves to
+        saves.earlier."""
+        if self.backup_state is not None:
+            self.saves.setdefault("earlier", []).append({k: self.saves.get(k) for k in ("backup", "files", "reused",
+                                                                                         "restored")})
+        self.saves.pop("reused", None)
+        self.saves.update(backup=to_win(dest), files=files, restored=None, **({"reused": True} if reused else {}))
+        self.backup, self.backup_state = dest, "held"
+
     def restore_now(self):
-        """restore_saves of this run's backup (game closed); PENDING goes once every file checks out."""
-        result = restore_saves(self.backup)
-        self.saves.update(restored=result)
-        for w in result["warns"]:
-            self.warn(w)
-        pending = os.path.join(self.suite_root, "save-backup", "PENDING")
-        if result["ok"] and os.path.exists(pending):
-            os.remove(pending)
+        """restore_saves of this run's backup (game closed), with Ctrl-C, SIGTERM and SIGHUP held until it ends. Every
+        file checked out: restored, and the PENDING that names it goes. Else failed: PENDING stays."""
+        held = HoldSignals()
+        try:
+            with held:
+                try:
+                    result = restore_saves(self.backup)
+                except GuardError:  # the game runs: nothing was touched
+                    raise
+                except BaseException:
+                    self.backup_state = "failed"
+                    raise
+                self.backup_state = "restored" if result["ok"] else "failed"
+                self.saves.update(restored=result)
+                for w in result["warns"]:
+                    self.warn(w)
+                if result["ok"]:
+                    for w in drop_pending(self.backup, self.pending):
+                        self.warn(w)
+        finally:
+            held.release()
         return result
 
     # -- step kinds --
@@ -1590,9 +1861,11 @@ class Runner:
         return lines
 
     def trigger_load(self, cmd, window):
-        """flush_mark, then the load command through the bridge console; a reply lost to the load is fine."""
+        """flush_mark, then the load command through the bridge console; a reply lost to the load is fine. window: a
+        save loads, so it is expected until the step ends, and it brings its own plot table."""
         mark = self.flush_mark()
-        self.load_window = self.load_window or window
+        if window:
+            self.load_window, self.loads = True, self.loads + 1
         try:
             self.call("live_console", {"command": cmd, "timeoutSeconds": 10})
         except ToolError as e:
@@ -1621,8 +1894,12 @@ class Runner:
     def career_guard(self):
         """CurrentGame's m_sCharacterID must be the file's career, and this run must hold a backup."""
         career = self.career()
-        if not self.backup:
-            raise GuardError("no save backup in this run")
+        if self.backup_state != "held":
+            raise GuardError({None: "no save backup in this run",
+                              "restored": "the save backup was restored, so a save now would stay: take a new one "
+                                          "with a backup_saves step first",
+                              "failed": "the save restore failed, so the saves are half back: "
+                                        + restore_command(backup=self.backup)}[self.backup_state])
         game = self.get(self.builtin("world"), "CurrentGame")
         cid = self.get(game, "m_sCharacterID") if game else None
         if str(cid or "").casefold() != career.casefold():
@@ -1642,8 +1919,7 @@ class Runner:
                                  "timeout": a.get("timeout", 240)}, mark)
 
     def k_wait_loaded(self, a):
-        mark, self.trigger = self.trigger or self.marks["step"], None
-        return self.wait_loaded(a, mark)
+        return self.wait_loaded(a, self.trigger_in or self.marks["step"])
 
     def wait_load_start(self, mark, want, until):
         while True:
@@ -1680,11 +1956,11 @@ class Runner:
                     streak, settled = 0, False
             try:
                 st = self.call("live_status", {"timeoutSeconds": 2})
-                last, why = st, load_problems(st, want, allow)
+                last, why = st, load_problems(st, want, allow, not self.ticking_off)
                 if st.get("loadingMovie") is None:
                     unknown = True
                     self.note("loading movie unknown (no SFXLoadMovieManager): 5 s added to the settle of such waits")
-                if st.get("keepTicking") is False and not revived:
+                if st.get("keepTicking") is False and not revived and not self.ticking_off:
                     self.keep_ticking_on(10)
                     revived = True
                     self.note("keep_ticking was off during a wait; turned on again")
@@ -1707,7 +1983,7 @@ class Runner:
                           {k: last.get(k) for k in ("map", "begunPlay", "pawn", "streaming", "loadingMovie",
                                                     "partySelectOpen", "bPlayersOnly")} if last else None, "loaded")
             self.sleep(1)
-        self.marks["load"], self.load_window = mark, False
+        self.marks["load"] = mark  # the load window closes with the step (run_step)
         self.cache.clear()
         self.st, self.st_t = st, time.time()
         self.rec["detail"] = f"{st.get('map')} loaded"
@@ -2098,7 +2374,25 @@ class Runner:
 
     def k_keep_ticking(self, a):
         on = a["on"] if isinstance(a["on"], bool) else str(a["on"]).lower() == "on"
-        return self.keep_ticking_on(30) if on else self.call("live_keep_ticking", {"on": False})
+        r = self.keep_ticking_on(30) if on else self.call("live_keep_ticking", {"on": False})
+        # until keep_ticking: on, a game_cycle or the end of its check, wait_loaded leaves it off
+        self.ticking_off = not on
+        return r
+
+    def end_ticking_off(self, what):
+        """A keep_ticking: off lasts for its own check (or setup, or teardown): what comes next (what: its label) starts
+        with keep_ticking on again, also when a step failed before the check's own keep_ticking: on. Otherwise every
+        later wait_loaded would leave it off, and LE1 in the background holds bPlayersOnly."""
+        if not self.ticking_off:
+            return
+        self.ticking_off = False
+        if self.game_state != "up":  # a game that closed boots with it off, and game_cycle turns it on
+            return
+        try:
+            self.keep_ticking_on(30)
+        except ToolError as e:
+            self.warn(f"keep_ticking not turned back on for {what} ({short(str(e), 120)}): a wait_loaded turns it on "
+                      "when it sees it off")
 
     def k_game_cycle(self, a):
         """Closes and boots the game through M3 with no mod, then runs commands at the main menu."""
@@ -2106,7 +2400,8 @@ class Runner:
         cmds = [str(c) for c in self.interp(a.get("commands") or [])]
         for c in cmds:
             console_guard(c, career)
-        self.load_window = self.game_down_ok = True
+        # A save load is expected until the wait_loaded after this step ends; whatever loads brings a new plot table.
+        self.load_window, self.game_state, self.loads, ready = True, "down", self.loads + 1, False
         try:
             timeout = int(a.get("timeout", 300))
             r = self.call("game_cycle", {"commands": cmds, "waitForMap": self.interp(a.get("wait_for_map")),
@@ -2115,42 +2410,58 @@ class Runner:
             self.rec["detail"] = " | ".join((r.get("steps") or [])[-3:])
             if not r.get("ready"):
                 self.fail("the game did not come back: " + "; ".join((r.get("steps") or [])[-2:]), r.get("map"), "ready")
+            ready = True
             self.scan_at, self.trigger = [0, 0], (0, 0)
             self.marks = {k: (0, 0) for k in self.marks}
-            self.st, self.cache = None, {}
             self.keep_ticking_on(120)
         finally:
-            self.game_down_ok = False
+            # Any attempt may have restarted the game, so what the runner knew of the old session goes on every exit
+            # (Logs itself finds a log the new session wrote, even after a failed cycle).
+            self.st, self.cache, self.ticking_off = None, {}, False
+            self.game_state = "up" if ready or le1_running() else "closed"
 
     def k_close_game(self, a):
         """The only place 'exit' is sent: keep_ticking off, console exit, wait until LE1 is gone."""
         if not self.file["doc"].get("cold_start"):
             raise GuardError("close_game runs only in a cold_start file")
-        self.game_down_ok = True
-        for tool, args in (("live_keep_ticking", {"on": False}), ("live_console", {"command": "exit", "timeoutSeconds": 5})):
-            try:
-                self.call(tool, args)
-            except ToolError:
-                pass
-        deadline, killed = time.time() + float(a.get("timeout", 60)), False
-        while le1_running():
-            if time.time() > deadline:
-                if not a.get("force") or killed:
-                    self.fail("the game did not close", "running", "closed")
-                subprocess.run(["taskkill.exe", "/IM", "MassEffect1.exe", "/F"], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
-                deadline, killed = time.time() + 15, True
-            time.sleep(1)
-        self.game_closed = True
+        self.game_state, closed = "down", False
+        try:
+            for tool, args in (("live_keep_ticking", {"on": False}),
+                               ("live_console", {"command": "exit", "timeoutSeconds": 5})):
+                try:
+                    self.call(tool, args)
+                except ToolError:
+                    pass
+            deadline, killed = time.time() + float(a.get("timeout", 60)), False
+            while le1_running():
+                if time.time() > deadline:
+                    if not a.get("force") or killed:
+                        self.fail("the game did not close", "running", "closed")
+                    subprocess.run(["taskkill.exe", "/IM", "MassEffect1.exe", "/F"], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+                    deadline, killed = time.time() + 15, True
+                time.sleep(1)
+            closed = True
+        finally:
+            # A close that failed leaves the game up, and a later stop is a crash again.
+            self.game_state = "closed" if closed or not le1_running() else "up"
         self.rec["detail"] = "killed" if killed else "closed"
 
     def k_backup_saves(self, a):
-        if not self.backup:
-            self.backup_now(self.career())
+        if self.backup_state == "failed":
+            raise StepFail("the last save restore failed, so no new backup is taken: "
+                           + restore_command(backup=self.backup))
+        if self.backup_state == "held":
+            self.rec["detail"] = f"the run holds {to_win(self.backup)}"
+            return
+        self.backup_now(self.career())
 
     def k_restore_saves(self, a):
-        if not self.backup:
+        if self.backup_state is None:
             raise StepFail("no backup in this run")
+        if self.backup_state == "restored":
+            self.rec["detail"] = f"{to_win(self.backup)} is back already; backup_saves takes a new one"
+            return
         r = self.restore_now()
         self.rec["detail"] = f"{len(r['restored'])} restored, {len(r['displaced'])} displaced"
         if not r["ok"]:
@@ -2245,42 +2556,51 @@ class Runner:
 
     def finish(self, results, status, args, prereq):
         """keep_ticking off, the saves back when the game is closed, the report; returns the exit code. Each part
-        catches its own errors, so the next one still runs."""
-        if not self.game_closed and le1_running():
-            try:
+        catches its own errors, so the next one still runs, and a second Ctrl-C skips only keep_ticking off."""
+        try:
+            if self.game_state != "closed" and le1_running():
                 self.call("live_keep_ticking", {"on": False})
-            except Exception as e:
-                self.warn(f"keep_ticking not turned off ({type(e).__name__}: {short(str(e), 120)}): it goes off "
-                          "when the game restarts")
-        restore_code = 0
-        if self.backup and not self.saves.get("restored"):
-            if le1_running():
+        except (Exception, KeyboardInterrupt) as e:
+            self.warn(f"keep_ticking not turned off ({type(e).__name__}: {short(str(e), 120)}): it goes off "
+                      "when the game restarts")
+        with HoldSignals() as held:  # the save restore and the report: a signal waits until they are done
+            restore_code = 0
+            if self.backup_state in ("held", "failed"):
                 cmd = restore_command(backup=self.backup)
-                self.warn(f"saves not restored: close the game, then run {cmd}")
-                print(f"saves NOT restored yet: close the game, then: {cmd}", flush=True)
-                restore_code = 4
-            else:
-                try:
-                    restore_code = 0 if self.restore_now()["ok"] else 4
-                except Exception as e:
-                    self.warn(f"save restore failed ({type(e).__name__}: {e}): {restore_command(backup=self.backup)}")
+                if le1_running():
+                    self.warn(f"saves not restored: close the game, then run {cmd}. It puts back the saves of the "
+                              "backup and moves out what was saved after it, in play too (nothing is deleted)")
+                    print(f"saves NOT restored yet: close the game, then: {cmd}", flush=True)
                     restore_code = 4
-        elif self.saves.get("restored") and not self.saves["restored"]["ok"]:
-            restore_code = 4
-        checks = [c for f in results for c in f["checks"]]
-        bad_setup = any(r["status"] in ("FAIL", "ERROR") for f in results for r in f["setup"] + f["teardown"])
-        code = restore_code or (4 if isinstance(prereq, RestorePending) else 2 if prereq else 3 if status == "ABORTED"
-                                else 1 if status == "ERROR" or bad_setup
-                                or any(c["status"] in ("FAIL", "ERROR") for c in checks) else 0)
-        res = {"suite": self.suite, "stamp": self.stamp, "args": args.paths, "bridge": self.bridge,
-               "server": getattr(self.s, "server", None), "status": "STOPPED" if prereq else status,
-               "files": results, "saves": {k: v for k, v in self.saves.items() if k != "plot_restore"},
-               "plot_restore": self.saves.get("plot_restore", []), "warns": self.warns, "exit": code}
-        if self.run_dir and os.path.isdir(self.run_dir):
-            try:
-                write_report(self.run_dir, res)
-            except OSError as e:
-                print(f"scenario.py: the report was not written: {e}", file=sys.stderr, flush=True)
+                else:
+                    try:
+                        r = self.restore_now()
+                        if not r["ok"]:
+                            self.warn(f"restored saves differ from the backup: {r['mismatch']}: {cmd}")
+                        restore_code = 0 if r["ok"] else 4
+                    except Exception as e:
+                        self.warn(f"save restore failed ({type(e).__name__}: {e}): {cmd}")
+                        restore_code = 4
+            checks = [c for f in results for c in f["checks"]]
+            bad_setup = any(r["status"] in ("FAIL", "ERROR") for f in results for r in f["setup"] + f["teardown"])
+            code = restore_code or (4 if isinstance(prereq, RestorePending) else 2 if prereq
+                                    else 3 if status == "ABORTED" else 1 if status == "ERROR" or bad_setup
+                                    or any(c["status"] in ("FAIL", "ERROR") for c in checks) else 0)
+            saves = {k: v for k, v in self.saves.items() if k != "plot_restore"}
+            if self.backup_state:
+                saves["state"] = self.backup_state
+            res = {"suite": self.suite, "stamp": self.stamp, "args": args.paths, "bridge": self.bridge,
+                   "server": getattr(self.s, "server", None), "status": "STOPPED" if prereq else status,
+                   "files": results, "saves": saves, "plot_restore": self.saves.get("plot_restore", []),
+                   "warns": self.warns, "exit": code}
+            if self.run_dir and os.path.isdir(self.run_dir):
+                try:
+                    write_report(self.run_dir, res)
+                except OSError as e:
+                    print(f"scenario.py: the report was not written: {e}", file=sys.stderr, flush=True)
+        if held.got:
+            print("scenario.py: a signal came during the save restore or the report; it waited for them",
+                  file=sys.stderr, flush=True)
         for fh in (self.progress, self.calls_file):
             if fh:
                 fh.close()
@@ -2350,26 +2670,43 @@ def step_line(s):
 
 
 def cmd_restore(args, s):
-    """--restore-saves: put a backup back, the game closed."""
-    if args.restore_saves:
-        backup = to_wsl(args.restore_saves)
-    else:
-        root = to_wsl(args.out or s.get("MELE_SCENARIO_OUT") or ntpath.join(ntpath.dirname(default_out()), "scenarios"))
-        pending = glob.glob(os.path.join(root, "*", "save-backup", "PENDING"))
-        if len(pending) != 1:
-            raise SuiteError(f"{len(pending)} PENDING backups under {root}: name the backup folder")
-        with open(pending[0], encoding="utf-8") as f:
-            backup = to_wsl(f.read().strip())
+    """--restore-saves: put a backup back, the game closed. Without a folder, the one the save folder's PENDING names,
+    else the one PENDING an older scenario.py left under the report root. Exit 4 when it is refused or stops."""
     try:
-        r = restore_saves(backup)
+        # The save folder's PENDING is found before the restore, which holds signals and spawns nothing (drop_pending).
+        if args.restore_saves:
+            backup = to_wsl(args.restore_saves)
+            with open(os.path.join(backup, "manifest.json"), encoding="utf-8") as f:
+                pending = pending_file(to_wsl(json.load(f)["save_root"]))
+        else:
+            save_root = save_folder()
+            pending = pending_file(save_root)
+            backup = read_pending(pending)
+            if backup is None:
+                root = to_wsl(args.out or s.get("MELE_SCENARIO_OUT")
+                              or ntpath.join(ntpath.dirname(default_out()), "scenarios"))
+                old = glob.glob(os.path.join(root, "*", "save-backup", "PENDING"))
+                if len(old) != 1:
+                    raise SuiteError(f"no PENDING backup for {to_win(save_root)}, and {len(old)} from an older "
+                                     f"scenario.py under {to_win(root)}: name the backup folder")
+                backup = read_pending(old[0])
+        held = HoldSignals()
+        try:
+            with held:
+                r = restore_saves(backup)
+                print(json.dumps(r, indent=1))
+                for w in drop_pending(backup, pending) if r["ok"] else []:
+                    print(f"scenario.py: {w}", file=sys.stderr)
+        finally:
+            held.release()
+        return 0 if r["ok"] else 4
     except GuardError as e:
         print(f"scenario.py: {e}", file=sys.stderr)
         return 4
-    print(json.dumps(r, indent=1))
-    pending = os.path.join(os.path.dirname(backup.rstrip("/")), "PENDING")
-    if r["ok"] and os.path.exists(pending):
-        os.remove(pending)
-    return 0 if r["ok"] else 4
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as e:  # a locked .pcsav, a broken manifest
+        print(f"scenario.py: the restore stopped ({type(e).__name__}: {e}); its PENDING stays, so it can run again",
+              file=sys.stderr)
+        return 4
 
 
 # ---- self-test (offline) ----
@@ -2409,6 +2746,23 @@ def selftest():
             passed[0] += 1
             return
         raise SystemExit(f"selftest FAILED: {what} did not raise {exc.__name__}")
+
+    @contextlib.contextmanager
+    def patched(**fns):
+        """This module's functions (le1_running, documents...) swapped for the with block."""
+        old = {k: globals()[k] for k in fns}
+        globals().update(fns)
+        try:
+            yield
+        finally:
+            globals().update(old)
+
+    def quiet():
+        """stdout and stderr dropped: progress lines and --restore-saves output."""
+        stack = contextlib.ExitStack()
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+        return stack
 
     # expect and equality
     ok(check_expect("True", True)[0] and check_expect("hench_EXTRA", "Hench_Extra")[0], "plot text and case")
@@ -2499,10 +2853,52 @@ def selftest():
     fake.replies["live_get"] = real_get
     # a respawn that fails is a ToolError (a FAIL), never a SuiteError through the finally paths
     sess = Session.__new__(Session)
-    sess.record, sess.proc = (lambda e: None), None
+    sess.record, sess.proc, sess.spent = (lambda e: None), None, False
     sess.rpc = lambda *a: (_ for _ in ()).throw(ServerDead("server closed stdout"))
     sess.start = lambda: (_ for _ in ()).throw(SuiteError("MeleMcp.dll is locked"))
     raises(ToolError, lambda: sess.call("live_status", {}), "failed respawn")
+    # a call goes again only when the server never got it, or when it only reads (REPLAY_SAFE)
+
+    class Proc:
+        code = None
+
+        def poll(self):
+            return self.code
+    sends, starts, script = [], [], []
+
+    def fake_start():
+        starts.append(1)
+        sess.proc, sess.spent = Proc(), False
+
+    def fake_rpc(method, params, timeout):
+        sends.append(params["name"])
+        step = script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return {"content": [{"text": "{}"}]}
+    sess.proc, sess.start, sess.rpc, sess.close = Proc(), fake_start, fake_rpc, (lambda: None)
+    script[:] = [ServerDead("no answer before the deadline")]
+    try:
+        sess.call("live_console", {"command": "QuickSave"})
+        ok(False, "a silent server after a console command")
+    except ToolError as e:
+        ok("may have run" in str(e) and sends == ["live_console"] and not starts, "a sent console command: not resent")
+    script[:] = [None]
+    sess.call("live_status", {})
+    ok(starts == [1] and sends[-1] == "live_status", "the call after it goes to a new server")
+    script[:] = [NotSent("server closed stdin"), None]
+    sess.call("live_call", {"function": "FinalizeParty"})
+    ok(sends[-2:] == ["live_call"] * 2 and len(starts) == 2, "a call the server never got is sent again")
+    script[:] = [ServerDead("server closed stdout"), None]
+    sess.call("live_get", {})
+    ok(sends[-2:] == ["live_get"] * 2 and len(starts) == 3, "a read is sent again, to a new server")
+    script[:] = [ServerDead("server closed stdout")]
+    raises(ToolError, lambda: sess.call("game_plot", {"kind": "bool", "ids": [1], "value": "True"}), "a plot set")
+    ok(sends[-1] == "game_plot" and sends[-2] == "live_get", "a plot set is not sent again")
+    script[:], sess.spent = [None], False
+    sess.proc.code = 0  # it died between two calls
+    sess.call("game_cycle", {"commands": []})
+    ok(len(starts) == 4 and sends[-1] == "game_cycle", "a server dead before the send is replaced first")
     ok(load_problems(status, "BIOA_ICE00", True) == [] and "the squad screen is open" in load_problems(status, None, False),
        "load_problems with the squad screen")
     ok(any("map is" in w for w in load_problems(dict(status, map="X", pawn=None), "BIOA_ICE00", True)), "wrong map")
@@ -2565,7 +2961,7 @@ def selftest():
         globals()["le1_running"], real = (lambda: True), globals()["le1_running"]
         try:
             r.saves = {}
-            r.write_restore([{"file": "t", "kind": "bool", "id": 4771, "value": "True"}])
+            r.write_restore([{"file": "t", "kind": "bool", "id": 4771, "value": "True"}], r.loads)
         finally:
             globals()["le1_running"] = real
         ok(r.saves["plot_restore"][0]["restored"].startswith("failed: SuiteError"), "write_restore records the failure")
@@ -2635,13 +3031,212 @@ def selftest():
         ok(out["ok"] and open(os.path.join(save, "Car00/Car00_AutoSave.pcsav")).read() == "b", "restore")
         ok(not os.path.exists(os.path.join(save, "Car00/Car00_QuickSave.pcsav")) and not os.path.exists(
             os.path.join(save, "Save")) and len(out["displaced"]) == 4, "restore displaces, deletes nothing")
+        ok(any("Save: it appeared in the save folder after the backup of" in w for w in out["warns"]), "moved-out note")
+
+        # logs: a new game session's log reads from 0, even when it is already longer than the old offset
+        logs = Logs(paths=(os.path.join(tmp, "gen.log"), os.path.join(tmp, "none.log")))
+        with open(logs.paths[0], "w") as f:
+            f.write("[09:00:00.000 info] first session\n")
+        old = logs.offsets()
+        with open(logs.paths[0], "a") as f:
+            f.write("[09:00:01.000 info] more\n")
+        ok(logs.lines(0, old[0])[0] == ["[09:00:01.000 info] more"], "the same log reads from the offset")
+        with open(logs.paths[0], "w") as f:
+            f.write("[10:00:00.000 info] second session, its first line longer than the whole old log\n"
+                    "[10:00:01.000 info] x\n")
+        got, at = logs.lines(0, old[0])
+        ok(len(got) == 2 and got[0].startswith("[10:00:00.000"), "a new log reads an old offset from 0")
+        ok(logs.lines(0, at)[0] == [] and logs.lines(0, 0)[0][1] == "[10:00:01.000 info] x", "offsets of the new log")
+
+        # the load window closes with a load step that failed, so a save load after it aborts
+        fake.replies.update({"live_console": {"lines": []}, "live_keep_ticking": {"on": True},
+                             "game_cycle": {"ready": True, "steps": ["at the main menu"]}})
+        r.scan_at, r.marks, recs, loads = list(r.logs.offsets()), {"check": r.logs.offsets()}, [], r.loads
+        with quiet():
+            r.run_step({"load": {"slot": 7, "map": "BIOA_X", "timeout": 0.2}}, {}, 1, 1, "t", recs)
+        ok(recs[-1]["status"] == "FAIL" and not r.load_window and r.loads == loads + 1, "a failed load: window closed")
+        with open(dl, "a") as f:
+            f.write("[10:01:00.000 error] appLogErrorf: Loading Car00_01 on device Id 0...\n")
+        raises(Aborted, r.scan, "a death reload after a failed load step")
+        # close_game, then game_cycle: up again; a failed close_game leaves crash detection on
+        r.load_aborted, r.ticking_off, r.cache = False, True, {("gvt", "X"): "old"}
+        r.file = {"id": "t", "doc": {"career": "Car00", "cold_start": True}}
+        with quiet(), patched(le1_running=lambda: False):
+            r.run_step({"close_game": {"timeout": 1}}, {}, 1, 1, "t", recs)
+        ok(recs[-1]["status"] == "ok" and r.game_state == "closed", "close_game: closed")
+        loads = r.loads
+        with quiet(), patched(le1_running=lambda: True):
+            r.run_step({"game_cycle": {}}, {}, 1, 2, "t", recs, waits=True)
+            ok(recs[-1]["status"] == "ok" and r.game_state == "up" and r.load_window and r.loads == loads + 1
+               and not r.ticking_off and not r.cache, "game_cycle: up, a new session, the window kept for wait_loaded")
+            r.run_step({"status": None}, {}, 2, 2, "t", recs)
+            ok(not r.load_window, "the window closes with the step after game_cycle")
+            r.run_step({"close_game": {"timeout": 0}}, {}, 1, 1, "t", recs)
+        ok(recs[-1]["status"] == "FAIL" and r.game_state == "up", "a failed close_game leaves crash detection on")
+        # a game_cycle that fails stops its list before the wait_loaded: the load it expected ends with the list
+        fake.replies["game_cycle"], recs = {"ready": False, "steps": ["the game did not start"]}, []
+        with quiet(), patched(le1_running=lambda: True):
+            done = r.run_list([{"game_cycle": {}}, {"wait_loaded": {"expect_load": False}}], "t", recs)
+        ok(done is False and [x["kind"] for x in recs] == ["game_cycle"] and recs[0]["status"] == "FAIL"
+           and not r.load_window, "a failed game_cycle: its wait_loaded never runs, and the window closes")
+        fake.replies["game_cycle"] = {"ready": True, "steps": ["at the main menu"]}
+        # keep_ticking: off holds through a wait_loaded, until keep_ticking: on
+        off = dict(status, keepTicking=False)
+        ok("keep_ticking is off" in load_problems(off, None, True) and not load_problems(off, None, True, False),
+           "load_problems after keep_ticking: off")
+        r.k_keep_ticking({"on": False})
+        fake.replies["live_status"], calls, r.rec = off, len(fake.calls), {}
+        r.wait_loaded({"expect_load": False, "allow_party": True, "timeout": 5}, r.logs.offsets())
+        ok(r.ticking_off and not any(t == "live_keep_ticking" for t, _ in fake.calls[calls:]),
+           "wait_loaded leaves an explicit keep_ticking off alone")
+        fake.replies["live_status"] = status
+        r.k_keep_ticking({"on": True})
+        ok(not r.ticking_off, "keep_ticking: on ends it")
+        # an off lasts for its own check: one that fails before its keep_ticking: on leaves the next check with it on
+        kt = {"on": True}
+        fake.replies["live_keep_ticking"] = lambda a: kt.update(on=a["on"]) or {"on": a["on"]}
+        fake.replies["live_status"] = lambda a: dict(status, keepTicking=kt["on"])
+        f1 = {"id": "t", "doc": r.file["doc"]}
+        with quiet():
+            c1 = r.run_check(f1, {"id": "c1", "steps": [
+                {"keep_ticking": False}, {"live_get": {"object": "L.BioPawn_3", "property": "Tag", "expect": "x"}},
+                {"keep_ticking": True}]})
+            calls = len(fake.calls)
+            c2 = r.run_check(f1, {"id": "c2", "steps": [
+                {"wait_loaded": {"expect_load": False, "allow_party": True, "timeout": 5, "settle": 0}}]})
+        ok(c1["status"] == "FAIL" and c2["status"] == "PASS" and kt["on"] and not r.ticking_off
+           and ("live_keep_ticking", {"on": True, "timeoutSeconds": 5, "game": "LE1"}) in fake.calls[calls:],
+           "a check that turned keep_ticking off and failed: the next one turns it on again")
+        fake.replies["live_status"], fake.replies["live_keep_ticking"] = status, {"on": True}
+        # plot values read before a load are not written into the loaded save's plot table
+        r.saves, loads = {}, r.loads
+        r.loads += 1
+        with patched(le1_running=lambda: True):
+            r.write_restore([{"file": "t", "kind": "bool", "id": 4771, "value": "True"}], loads)
+        ok(r.saves["plot_restore"][0]["restored"].startswith("skipped: a save loaded")
+           and any("plot values of t not restored" in w for w in r.warns), "write_restore after a load: skipped, WARN")
+        # a mark left for a wait_loaded that never ran goes to no later step
+        r.trigger = (5, 5)
+        with quiet():
+            r.run_list([{"mark": "m"}], "t", [])
+        ok(r.trigger_in is None and r.trigger is None, "no stale load trigger")
+
+        # saves: one PENDING per save folder, the backup states, a restore that Ctrl-C does not cut
+        docs = os.path.join(tmp, "Docs")
+        me1 = os.path.join(docs, "BioWare", "Mass Effect Legendary Edition", "Save", "ME1")
+        for rel in ("Car00/Car00_01.pcsav", "PROFILE/GamerProfile.pcsav"):
+            os.makedirs(os.path.dirname(os.path.join(me1, rel)), exist_ok=True)
+            with open(os.path.join(me1, rel), "w") as f:
+                f.write("v1")
+        quick = os.path.join(me1, "Car00", "Car00_QuickSave.pcsav")
+
+        def runner(root):
+            x = Runner(FakeSession({"live_status": status}))
+            x.suite_root, x.install = os.path.join(tmp, root, "s4"), r"C:\Games\LE"
+            x.file = {"id": "t", "doc": {"career": "Car00"}}
+            return x
+        with patched(documents=lambda: docs, pending_dir=lambda: os.path.join(tmp, "pending"),
+                     le1_running=lambda: False):
+            pend = pending_file(me1)
+            a = runner("out-a")
+            with quiet():
+                a.backup_now("Car00")
+            ok(a.backup_state == "held" and same_path(read_pending(pend), a.backup)
+               and not os.path.exists(pend + ".tmp"), "a backup is held, and the save folder's PENDING names it")
+            with open(quick, "w") as f:
+                f.write("q")
+            b = runner("out-b")  # another suite and report root, the same save folder
+            with quiet():
+                b.backup_now("Car00")
+            ok(b.saves.get("reused") and same_path(b.backup, a.backup), "another run reuses the save folder's PENDING")
+            raises(RestorePending, lambda: runner("out-c").backup_now("Other00"), "a PENDING of another career")
+            # restore_saves, then no save until backup_saves takes a new backup, in a folder of its own
+            a.rec = {}
+            a.k_restore_saves({})
+            ok(a.backup_state == "restored" and not os.path.exists(pend) and not os.path.exists(quick), "restore_saves")
+            raises(GuardError, a.career_guard, "a save after restore_saves")
+            first = a.backup
+            with quiet():
+                a.k_backup_saves({})
+            ok(a.backup_state == "held" and not same_path(a.backup, first) and same_path(read_pending(pend), a.backup)
+               and len(a.saves["earlier"]) == 1, "backup_saves after restore_saves takes a new backup")
+            # finish restores a held backup, also after an earlier restore in the run
+            with open(quick, "w") as f:
+                f.write("q2")
+            with quiet():
+                code = a.finish([], "PASS", argparse.Namespace(paths=[]), None)
+            ok(code == 0 and a.backup_state == "restored" and not os.path.exists(quick) and not os.path.exists(pend),
+               "finish restores the held backup")
+            # a PENDING that names no folder stops a backup
+            with open(pend, "w"):
+                pass
+            raises(RestorePending, lambda: read_pending(pend), "an empty PENDING")
+            raises(RestorePending, lambda: runner("out-d").backup_now("Car00"), "a backup while PENDING names none")
+            # --restore-saves deletes only a PENDING that names its folder, and exits 4 when the restore stops
+            write_pending(pend, a.backup)
+            with quiet():
+                code = cmd_restore(argparse.Namespace(restore_saves=first, out=None), {})
+            ok(code == 0 and same_path(read_pending(pend), a.backup), "--restore-saves of another folder keeps PENDING")
+            with quiet():
+                code = cmd_restore(argparse.Namespace(restore_saves="", out=None),
+                                   {"MELE_SCENARIO_OUT": os.path.join(tmp, "out-a")})
+            ok(code == 0 and not os.path.exists(pend), "--restore-saves restores what PENDING names, then deletes it")
+            with quiet():
+                code = cmd_restore(argparse.Namespace(restore_saves=os.path.join(tmp, "nothing"), out=None), {})
+            ok(code == 4, "--restore-saves exits 4 when the restore stops")
+            # Ctrl-C during a restore waits until it ends, then stops the run as usual
+            write_pending(pend, a.backup)
+            a.backup_state = "held"
+            with open(quick, "w") as f:
+                f.write("q3")
+            real_restore, old_int = restore_saves, signal.getsignal(signal.SIGINT)
+
+            def interrupted(backup):
+                os.kill(os.getpid(), signal.SIGINT)  # before the first file moves
+                return real_restore(backup)
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            try:
+                with patched(restore_saves=interrupted):
+                    raises(KeyboardInterrupt, a.restore_now, "Ctrl-C during a restore")
+            finally:
+                signal.signal(signal.SIGINT, old_int)
+            ok(a.backup_state == "restored" and not os.path.exists(quick) and not os.path.exists(pend),
+               "the restore ran to its end before the Ctrl-C")
+            # nothing looks PENDING's path up while signals are held: a Ctrl-C there ends powershell.exe, and
+            # default_out's SystemExit would skip the report
+
+            def outside_hold():
+                if isinstance(getattr(signal.getsignal(signal.SIGINT), "__self__", None), HoldSignals):
+                    raise SystemExit("cannot find %LOCALAPPDATA%")
+                return os.path.join(tmp, "pending")
+            with quiet():
+                a.k_backup_saves({})
+            a.run_dir = os.path.join(tmp, "run-finish")
+            os.makedirs(a.run_dir)
+            with open(quick, "w") as f:
+                f.write("q4")
+            try:
+                with quiet(), patched(pending_dir=outside_hold):
+                    code = a.finish([], "PASS", argparse.Namespace(paths=[]), None)
+            except SystemExit as e:
+                code = f"SystemExit: {e}"
+            ok(code == 0 and a.backup_state == "restored" and not os.path.exists(pend) and not os.path.exists(quick)
+               and os.path.isfile(os.path.join(a.run_dir, "results.json")), "finish: restore, PENDING gone, report")
+            write_pending(pend, a.backup)
+            try:
+                with quiet(), patched(pending_dir=outside_hold):
+                    code = cmd_restore(argparse.Namespace(restore_saves=a.backup, out=None), {})
+            except SystemExit as e:
+                code = f"SystemExit: {e}"
+            ok(code == 0 and not os.path.exists(pend), "--restore-saves finds PENDING before it holds signals")
     print(f"selftest: {passed[0]} checks passed")
     return 0
 
 
 def on_signal(signum, frame):
     """SIGTERM (a stopped background task) and SIGHUP (a closed terminal) take Ctrl-C's path: ABORTED, then
-    keep_ticking off, the plot values and the report. A second signal kills at once."""
+    keep_ticking off, the plot values and the report. A second signal kills at once, but a save restore and the report
+    hold signals until they are done (HoldSignals)."""
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, signal.SIG_DFL)
     if signum == signal.SIGHUP:  # no terminal left: printing would raise

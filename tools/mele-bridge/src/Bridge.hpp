@@ -34,18 +34,27 @@ namespace MeleBridge
     void InstallHooks(::LESDK::Initializer& Init);
 
     /// Runs work on the game thread (from the ProcessEvent hook) and returns its result. Throws BridgeError when the game
-    /// thread does not pick it up in time; work that has not started by then never runs.
+    /// thread does not pick it up in time; work that has not started by then never runs. Work that started runs to its end:
+    /// when it is still running 1.5 s after the timeout, this returns {"ok":false,"running":true,"error":...} instead, and
+    /// drops the result the work hands over later. A throw or a fault (access violation, integer division by zero) in the
+    /// work becomes {"ok":false,"error":...}.
     json RunOnGameThread(std::function<json()> work, std::chrono::milliseconds timeout);
 
     /// A watched function: ProcessEvent gets the most derived override (SeqAct_Log.Activated for SequenceOp.Activated), so a
-    /// call matches by name on an object of the declaring class or a subclass.
+    /// call matches by name on an object of the declaring class or a subclass. For a function declared in a state, Owner is the
+    /// class that holds the state, and a call matches only when the function it runs is declared in a state of that name too
+    /// (a subclass's override of the state keeps the name). A watch on a class function also sees its states' overrides.
     struct Watch
     {
         SFXName Name;
         UClass* Owner;
+        bool InState = false;
+        SFXName State{};
     };
 
     /// An event-stream client: the game thread queues one JSON line per watched ProcessEvent call; the pipe thread writes them.
+    /// Calls made while a request runs on the game thread, and the in-game editor's own calls, are not queued (the ProcessEvent
+    /// hook in GameThread.cpp says why).
     struct Subscriber
     {
         std::vector<Watch> Watches;
@@ -71,8 +80,9 @@ namespace MeleBridge
     /// Any thread: the switch off. A Tick running at that moment still puts back what it changed.
     void KeepTickingOff();
 
-    /// Any thread: {keepTicking, worldTicks, focusPausesCleared, timerRaises}. The counters run since the game started, and
-    /// only while the switch is on.
+    /// Any thread: {keepTicking, worldTicks, focusPausesCleared, timerRaises, gameStarted}. The counters run since the game
+    /// started, and only while the switch is on. gameStarted is the game process's start time (UTC, ISO 8601), the same at
+    /// every call until the game restarts with the switch off.
     json KeepTickingState();
 
     /// Game thread: a BioWorldInfo's m_bPausedByFocusLoss, through the field reflection gives (BridgeError when it has none).

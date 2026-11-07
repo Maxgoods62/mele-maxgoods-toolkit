@@ -1,4 +1,3 @@
-using System.Text;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Unreal;
 using YamlDotNet.RepresentationModel;
@@ -7,14 +6,17 @@ using static MeleMcp.Core.YamlFiles;
 namespace MeleMcp.Core;
 
 /// <param name="From">player (Shepard's position in the running game) or given.</param>
+/// <param name="Build">The build's receipt; null when no build was asked for, or when it failed (<paramref name="BuildError"/>).</param>
 /// <param name="Live">Actors moved in the running game to preview the result (until the level is installed); empty when the game is not running.</param>
+/// <param name="Backup">The YAML file as it was before the move (in the backups folder); null when the file did not change.</param>
+/// <param name="BuildError">Why the build failed. The YAML holds the move by then, and keeps it.</param>
 public sealed record NpcPlacement(string File, string Npc, string From, float X, float Y, float Z, float YawDegrees, IReadOnlyList<string> YamlChanges,
-    LevelBuildResult? Build, IReadOnlyList<ActorState> Live, IReadOnlyList<string> Notes);
+    LevelBuildResult? Build, IReadOnlyList<ActorState> Live, IReadOnlyList<string> Notes, string? Backup = null, string? BuildError = null);
 
 /// <summary>
 /// Puts an NPC of a level YAML file where Shepard stands (or at given coordinates): writes 'location' and 'yaw' into the
-/// file, keeping its comments, builds the level, and moves the NPC and her lights in the running game as a preview. Warns when the
-/// in-game editor's session holds an edit of her or her lights not imported yet.
+/// file (backed up first), keeping its comments, builds the level, and moves the NPC and her lights in the running game as a
+/// preview. Warns when the in-game editor's session holds an edit of her or her lights not imported yet.
 /// </summary>
 public static class NpcPlacer
 {
@@ -52,9 +54,25 @@ public static class NpcPlacer
                 notes.Add($"the editor's session for {map} holds an unimported edit of {tag} or its lights: editor_import first, or this move will conflict");
             }
         }
-        if (edited != text) File.WriteAllText(file, edited, new UTF8Encoding(false));
+        var backup = edited != text ? EditorImport.WriteYaml(file, edited) : null;
+        if (backup is not null) notes.Add($"The YAML as it was before the move is backed up at {backup}.");
 
-        var result = build ? LevelBuilder.Build(game, file, null) : null;
+        LevelBuildResult? result = null;
+        string? buildError = null;
+        if (build)
+        {
+            try
+            {
+                result = LevelBuilder.Build(game, file, null);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // The YAML holds the move by now: the receipt goes back with the failure, and nothing is moved live.
+                buildError = e is PartialBuildException ? e.Message : $"{e.GetType().Name}: {e.Message}";
+                notes.Add($"The build failed {(backup is null ? "(the YAML had this place already)" : "after the YAML was written")}: {buildError} The file keeps her new place: "
+                          + "fix the cause, then run level_build on it.");
+            }
+        }
         var moved = new List<ActorState>();
         if (live && result is not null && GameBridge.IsGameRunning(game))
         {
@@ -68,7 +86,7 @@ public static class NpcPlacer
             }
         }
         if (result is not null) notes.Add("Install the level (game closed: mod_install) to keep her there; the live move lasts until the level reloads.");
-        return new NpcPlacement(file, name, from, px, py, pz, degrees, changes, result, moved, notes);
+        return new NpcPlacement(file, name, from, px, py, pz, degrees, changes, result, moved, notes, backup, buildError);
     }
 
     /// <summary>Replaces the NPC's location and yaw values in the YAML text (or adds them after her tag), leaving everything else as written.</summary>

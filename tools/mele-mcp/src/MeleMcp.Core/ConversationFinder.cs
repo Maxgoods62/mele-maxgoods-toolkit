@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Enumeration;
 using System.Text.RegularExpressions;
-using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Unreal;
 
@@ -36,7 +35,7 @@ public static partial class ConversationFinder
     {
         LecHost.EnsureInitialized();
         var lang = game.IsGame1() ? language.Trim().ToUpperInvariant() : TalkTables.Language(language);
-        var files = MELoadedFiles.GetFilesLoadedInGame(game)
+        var files = GamePaths.LoadedFiles(game)
             .Where(kv => kv.Key.EndsWith(".pcc", StringComparison.OrdinalIgnoreCase)
                          && FileSystemName.MatchesSimpleExpression(fileFilter, kv.Key, ignoreCase: true)
                          && LocFile().Match(kv.Key) is var m && (!m.Success || m.Groups["lang"].Value.Equals(lang, StringComparison.OrdinalIgnoreCase)))

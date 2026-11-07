@@ -13,7 +13,9 @@ public static class StatusTools
     public static LecStatus LeStatus() => ToolErrors.Run(LecHost.EnsureInitialized);
 
     [McpServerTool(Name = "le_refresh_files", Idempotent = true),
-     Description("Forgets the cached list of game and DLC mod files. Call after an install mod_install did not run (it clears the list itself), or after copying files into the game.")]
+     Description("Forgets the cached list of game and DLC mod files. Each lookup already rescans it when a DLC folder comes or goes, an AutoLoad.ini or Mount.dlc changes, "
+                 + "or a file is added to or removed from a CookedPCConsole folder (an install from M3's window included). Call this after a file was added in a subfolder of one, "
+                 + "which that check does not see.")]
     public static string LeRefreshFiles() => ToolErrors.Run(() =>
     {
         LecHost.EnsureInitialized();

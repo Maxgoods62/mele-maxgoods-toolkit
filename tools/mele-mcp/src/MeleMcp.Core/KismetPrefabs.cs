@@ -42,8 +42,11 @@ internal static class KismetPrefabs
 
     /// <summary>The level's SeqEvent_LevelLoaded, created when it has none.</summary>
     internal static ExportEntry LevelLoaded(ExportEntry sequence, PackageCache cache) =>
-        KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().FirstOrDefault(o => o.ClassName == "SeqEvent_LevelLoaded")
-        ?? SequenceObjectCreator.CreateSequenceObject(sequence, "SeqEvent_LevelLoaded", cache);
+        FindLevelLoaded(sequence) ?? SequenceObjectCreator.CreateSequenceObject(sequence, "SeqEvent_LevelLoaded", cache);
+
+    /// <summary>The level's SeqEvent_LevelLoaded; null when it has none (a build that only cuts links creates nothing).</summary>
+    internal static ExportEntry? FindLevelLoaded(ExportEntry sequence) =>
+        KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().FirstOrDefault(o => o.ClassName == "SeqEvent_LevelLoaded");
 
     /// <summary>The first object of class <paramref name="className"/> an output of <paramref name="from"/> links to.</summary>
     internal static ExportEntry? Next(ExportEntry from, string output, string className)
@@ -61,5 +64,27 @@ internal static class KismetPrefabs
         if (KismetHelper.GetOutputLinksOfNode(from)[index].Any(o => o.LinkedOp == to && o.InputLinkIdx == input)) return;
         KismetHelper.CreateOutputLink(from, output, to, input);
         changes.Add(change);
+    }
+
+    /// <summary>
+    /// Cuts the links of output <paramref name="output"/> of <paramref name="from"/> to the objects <paramref name="drop"/> picks, and
+    /// returns those objects (each once, in link order). <see cref="Link"/> only adds, so a build whose YAML no longer asks for a link
+    /// cuts it with this, or the old target fires beside the new one. Only that output's links are rewritten; the objects stay.
+    /// </summary>
+    internal static List<ExportEntry> Unlink(ExportEntry from, string output, Func<ExportEntry, bool> drop)
+    {
+        var index = KismetHelper.GetOutputLinkNames(from).IndexOf(output);
+        if (index < 0) throw new InvalidOperationException($"#{from.UIndex} {from.ClassName} has no output '{output}'.");
+        var outputs = from.GetProperty<ArrayProperty<StructProperty>>("OutputLinks")!;
+        var cut = new List<ExportEntry>();
+        if (outputs[index].GetProp<ArrayProperty<StructProperty>>("Links") is not { } links) return cut;
+        for (var i = 0; i < links.Count; i++)
+        {
+            if (links[i].GetProp<ObjectProperty>("LinkedOp")?.ResolveToEntry(from.FileRef) is not ExportEntry to || !drop(to)) continue;
+            if (!cut.Contains(to)) cut.Add(to);
+            links.RemoveAt(i--);
+        }
+        if (cut.Count > 0) from.WriteProperty(outputs);
+        return cut;
     }
 }

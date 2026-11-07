@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.IO.Enumeration;
-using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Packages;
 
 namespace MeleMcp.Core;
@@ -19,7 +18,7 @@ public static class NameFinder
     public static NameSearchResult Find(MEGame game, string nameContains, string fileFilter, int limit)
     {
         LecHost.EnsureInitialized();
-        var files = MELoadedFiles.GetFilesLoadedInGame(game)
+        var files = GamePaths.LoadedFiles(game)
             .Where(kv => kv.Key.EndsWith(".pcc", StringComparison.OrdinalIgnoreCase))
             .Where(kv => FileSystemName.MatchesSimpleExpression(fileFilter, kv.Key, ignoreCase: true))
             .ToList();

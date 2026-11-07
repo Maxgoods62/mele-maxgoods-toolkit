@@ -7,7 +7,8 @@ These builds target LE1 only. `level_build`, `conv_build` and `plot_build` refus
 it reaches one of them. [games.md](games.md) lists what works on LE2 and LE3. A complete mod with a level and a conversation
 is in [examples/README.md](../examples/README.md).
 
-Ids on this page are placeholders, so take your own with `id_alloc`.
+Ids on this page are placeholders, so take your own with `id_alloc`. It reserves the free ids it returns for 30 days, or until
+it finds them installed, so give it `owner` (your mod's DLC folder name) and a later call gets the same ids back.
 
 | Term | Meaning |
 |---|---|
@@ -38,14 +39,16 @@ A file with nothing but `vanilla` or `lights` is skipped by `mod_build`, though 
 4. Conversation files.
 5. The level files that had a missing conversation, again (`levelsAgain`), so their Kismet can start it.
 
-The build stops at the first error and names the file. Files built before the error stay saved.
+The build stops at the first error and names the file. Files built before the error stay saved, and the error lists each
+file they saved and its backup.
 
 `level_build`, `conv_build` and `plot_build` each build one file. They take `game` (required, `LE1`), `file` and an
 optional `package` that replaces the file's own. `level_build` with `package` does not write `levels.json`. Paths are
 Windows or `/mnt/<drive>/` paths.
 
-These tools write into a level file, keep its comments, then run `level_build`. They take no backup of the YAML and do not
-check where it lies, so keep your YAML in a source folder under version control.
+These tools write into a level file, keep its comments, then run `level_build`. Each copies the YAML into the backups
+folder before it changes it (`backup` in its result names the copy), and a build that fails comes back as `buildError` with the YAML
+kept. None checks where the YAML lies, so keep your YAML in a source folder under version control.
 
 | Tool | What it writes |
 |---|---|
@@ -92,7 +95,11 @@ because it could resolve into the game install.
 With `mod_build out=<folder>`, that folder is the mod root:
 
 - Each `package` goes under `out` by its DLC folder. A `package` without a DLC folder is refused.
-- When `out` lacks the DLC folder and the source one exists, the build first copies that folder whole into `out`.
+- When `out` lacks the DLC folder and the source one exists, the build first copies that folder whole into `out`. A copy
+  that stops half way leaves nothing, so the next build copies again. The copy is a snapshot: later builds into `out` build
+  on it as it is, and a note names the source files that are newer than their copy, or were added since and are missing
+  from it (a file a build deleted from the copy, such as a fork with no entries left, does not count). Delete the DLC
+  folder under `out` to copy it again.
 - A GlobalTlk or `AutoLoad.ini` the build changes must lie under `out`, or have a copy there by its DLC folder. Otherwise
   the build is refused.
 - `levels.json` is left alone. Backups aside, nothing outside `out` changes.
@@ -141,7 +148,11 @@ Names, wheel text and journal text put a `strref` and languages in one mapping: 
 
 - It writes only the values that differ, so a second build changes nothing.
 - It copies each file it saves to `%LOCALAPPDATA%\mele-mcp\backups` (or `MELE_BACKUP_DIR`), named
-  `<yyyyMMdd-HHmmss-fff>_<file>`. Forks have no backup, because each build makes them again.
+  `<yyyyMMdd-HHmmss-fff>_<file>`, with `-2`, `-3`... after the time when two backups of one name share a millisecond. Forks
+  have no backup, because each build makes them again: an error names a fork written over an earlier build's as rewritten.
+- It saves its files one after the other, with no rollback. When it fails after saving some, the error names each file
+  saved and its backup, and `mod_build`'s error names those of the files built before too. Fix the cause and build again,
+  or put the backups back.
 - It refuses any file inside the Legendary Edition folder. Build into the mod's copy in M3's library and install it with
   `mod_install`.
 
@@ -171,7 +182,12 @@ any case.
 | `levels` | Required, at least one. The files the level shows, by name. An extension is dropped |
 
 The volume gets one state, `Default`, so `levels` show while the player is inside it. Its `InChunkName` is the first level.
-Without one, pawns that touch the volume stay in stasis, with no AI and no light updates.
+Without one, pawns that touch the volume stay in stasis, with no AI and no light updates. A changed `volume` replaces the copy
+an earlier build made; a volume the build did not write stays.
+
+The level's streaming list only grows. A file that leaves `levels` stays on it, under its own name again when the level
+streamed its fork, and that fork is deleted. A YAML with no `streaming` section any more does the same for every file: the
+list and the volume stay, and each fork the level streamed goes.
 
 ### startPoints
 
@@ -184,7 +200,8 @@ navigation list with `bBlocked` true. It has no paths, so AI paths must not star
 
 The level copies the squad prefab of the mission map in `package`: the sequence around its
 `BioSeqAct_ShowPartySelectionGUI`. When the level is loaded and its `streaming` levels are visible, the party selection
-screen opens. The picked henchmen then spawn and follow Shepard.
+screen opens. The picked henchmen then spawn and follow Shepard. Without `squad`, the build unlinks the chain, so no party
+selection screen opens.
 
 ### sideloader
 
@@ -212,7 +229,7 @@ Give a sideloaded level a name that does not start with `BIOA_`, so it never mat
 | `skin` | 3 or 4 numbers | `SkinTone` on the pawn's body, face and scalp materials |
 | `hair` | 3 or 4 numbers | `HED_Hair_Colour_Vector` on its hair and face materials |
 | `eyes` | 3 or 4 numbers | `EYE_Iris_Colour_Vector` on its eye material |
-| `conversation` | A conversation name | Kismet: Shepard uses the NPC and the conversation starts. The next build links one the level lacks |
+| `conversation` | A conversation name | Kismet: Shepard uses the NPC and the conversation starts. The next build links one the level lacks. A new name, or none, unlinks the old one |
 | `idle` | `{ package, pose, weights }` | [idle](#idle) |
 | `lights` | A list | [NPC lights](#npc-lights) |
 
@@ -227,7 +244,8 @@ Colours change only the pawn's own materials.
 | `weights` | `{ <fidget>: <weight> }`: the prefab's `Wt_<fidget>` slots. Fidgets left out keep the prefab's weight |
 
 The prefab starts when the level is loaded and visible. Using the NPC leaves the pose, and the end of the conversation starts
-it again. A new `pose` replaces the prefab.
+it again. Without a linked conversation, using the NPC keeps the pose. A new `pose` replaces the prefab. Without `idle`, the
+build unlinks the prefab and it never starts.
 
 #### NPC lights
 
@@ -243,7 +261,8 @@ Each item of `npcs.<name>.lights` is a light that keeps its place relative to th
 | `enabled` | true | Off with `false` |
 
 The build always writes `bOnlyAffectSameAndSpecifiedLevels` false. [LE1 character lighting](le1-lighting.md) explains why, and
-which values work.
+which values work. A light whose tag moves from `lights` to an NPC takes back its template's channels, shadows, dynamic light
+and level list.
 
 ### usables
 
@@ -333,12 +352,16 @@ point and spot lights that Kismet does not hold may change. A field left out kee
 
 Each streamed file with entries gets a fork beside the level, and the level streams the fork in its place. A fork is a copy of
 the file's highest mounted copy outside the mod's DLC folder. It is named `<level>_<file>` without `BIOA_`, as in
-`MYM01_FRE31_00_LAY`, with copies of its localized packages as `<fork>_LOC_<lang>`. A fork with no entries left is deleted.
+`MYM01_FRE31_00_LAY`, with copies of its localized packages as `<fork>_LOC_<lang>`. A fork with no entries left is deleted,
+and so is the fork of a file that left `streaming.levels`.
 
 ### What a level build writes
 
-Besides the level, its forks, its `.m3cd` and its names, a build writes the level's entry of `levels.json` last. That file
-is `%LOCALAPPDATA%\MeleBridge\LE1\levels.json`, or `MELE_LEVELS_JSON`, and [formats.md](formats.md) describes it.
+A build checks the file, its forks and the level in memory before it writes anything, so a refused build writes nothing.
+It then writes the forks, the level, its `.m3cd` and the level's entry of `levels.json`, deletes the forks it no longer
+streams, and writes the names last. `levels.json` is backed up as the level is. That file is
+`%LOCALAPPDATA%\MeleBridge\LE1\levels.json`, or `MELE_LEVELS_JSON`, and [formats.md](formats.md) describes it. A failure
+after the first write names each file written and its backup.
 
 ## Conversation files
 

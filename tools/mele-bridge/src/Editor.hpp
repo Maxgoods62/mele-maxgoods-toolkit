@@ -15,14 +15,20 @@ namespace MeleBridge::Editor
     // ! Shared state
     // ========================================
 
-    /// The editor is open: set by the game thread, read everywhere (input is held back from the game while it is set).
+    /// The editor is open: set by the game thread, read everywhere (input is held back from the game while it is set, unless
+    /// the overlay has failed: Input.cpp).
     extern std::atomic<bool> Open;
+    /// How many times the editor opened: the game thread adds one before it sets Open. The overlay tells a new session from
+    /// the one it drew last by it, also when a close and an open both fall between two of its frames.
+    extern std::atomic<unsigned> Sessions;
 
     /// Set by the render thread from ImGui after each frame: the cursor is over a window, or a text field has focus.
     extern std::atomic<bool> WantMouse;
     extern std::atomic<bool> WantKeyboard;
 
-    /// The right mouse button is held for free-cam look: the game thread turns cursor moves away from Anchor into look.
+    /// The right mouse button is held for free-cam look: the game thread turns cursor moves away from Anchor into look. Set
+    /// by the overlay; cleared by it when the button goes up, or by the game thread when the free cam goes off or the editor
+    /// closes. Either way the overlay puts the cursor back where the look started.
     extern std::atomic<bool> Looking;
     extern std::atomic<LONG> AnchorX;
     extern std::atomic<LONG> AnchorY;
@@ -277,7 +283,8 @@ namespace MeleBridge::Editor
     struct Command
     {
         /// Move, Rotate, Scale and Light are drag commands: the first one of a drag opens its undo step. EndDrag closes it and lets
-        /// the paused world tick once, so the prop's light catches up. PickLight selects a listed light, Light sets the selected
+        /// the paused world tick once, so the prop's light catches up (not while the game had its own pause when F8 opened: the
+        /// status line says so). PickLight selects a listed light, Light sets the selected
         /// light's settings (the panel), AddLight spawns a prop light (On: a room light) where the view points, PropLight (L)
         /// adds a prop light for the selected prop, AutoLight turns Auto light on or off. PickEffect selects an effect.
         /// AddNpcLight adds a light to one of our NPCs (docs/design/in-game-editor.md §12).
@@ -293,7 +300,9 @@ namespace MeleBridge::Editor
         bool On = false;
         /// Spawn: the StaticMesh's path in memory, as the In this level list shows it, or a catalog entry's vanilla path. PickLight,
         /// PickEffect: the light's or the effect's path. AddNpcLight: the NPC's tag (its section's button), or empty for the
-        /// selected pawn.
+        /// selected pawn. Move, Rotate, Scale and Light: the selection's path in the snapshot the overlay built it from
+        /// (SelectedPath). The snapshot is a tick old, so the game thread drops one whose selection is not the current one (a
+        /// pick or an undo ran before it in the same tick): it must not land on another actor.
         std::string Text;
         /// Spawn from the catalog: the catalog package's path, which DynamicLoadObject reads when no level has Text in memory,
         /// and a vanilla file that has the mesh (the session's mesh.file, for editor_import). Empty for the In this level list.
@@ -323,6 +332,12 @@ namespace MeleBridge::Editor
     // ! Diagnostics
     // ========================================
 
+    /// The overlay's life (Overlay.cpp), in Counters::Overlay. NotStarted until the first Present. Ready once it started on a
+    /// swap chain: the game's, which it follows when the game makes a new one for its window on the same device. Failed for
+    /// the rest of the game run: it could not start, a frame threw or faulted, or the game's window presented a swap chain of
+    /// another device. F8 opens the editor only while Ready, and once Failed the game gets its input back at once (Input.cpp).
+    enum class OverlayState { NotStarted, Ready, Failed };
+
     struct Counters
     {
         std::atomic<DWORD> PresentThread{ 0 };
@@ -336,8 +351,8 @@ namespace MeleBridge::Editor
         std::atomic<bool> DirectInputHooked{ false };
         std::atomic<bool> CursorHooked{ false };
         std::atomic<bool> WindowHooked{ false };
-        std::atomic<bool> OverlayReady{ false };
-        std::atomic<bool> OverlayFailed{ false };
+        /// Written by the render thread only.
+        std::atomic<OverlayState> Overlay{ OverlayState::NotStarted };
 
         std::atomic<unsigned long long> Presents{ 0 };
         std::atomic<unsigned long long> OverlayFrames{ 0 };
@@ -397,6 +412,7 @@ namespace MeleBridge::Editor
     /// The cursor calls the game is kept from while the editor is open; ours go through.
     BOOL MoveCursor(int x, int y);
     /// Game thread, on open and close: keep the cursor in the window while open, give the game its own clip back after.
+    /// HoldCursor(false) does nothing unless the cursor is held: the clip is the game's then.
     void HoldCursor(bool hold);
 }
 

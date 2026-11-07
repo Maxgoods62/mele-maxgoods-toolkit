@@ -55,11 +55,18 @@ public static class PackageWriter
         return string.IsNullOrWhiteSpace(dir) ? DefaultBackupDir : GamePaths.ToWindowsPath(dir);
     }
 
+    /// <summary>
+    /// &lt;backups&gt;\&lt;yyyyMMdd-HHmmss-fff&gt;_&lt;file&gt;. A second backup of a file of that name in the same millisecond (two files
+    /// of one name in different folders, a file saved twice by one build) is &lt;time&gt;-2_&lt;file&gt;, then -3...: File.Copy never
+    /// overwrites a backup, and used to throw on the second one, after the build had saved other files.
+    /// </summary>
     internal static string Backup(string path)
     {
         var dir = BackupRoot();
         Directory.CreateDirectory(dir);
-        var target = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss-fff}_{Path.GetFileName(path)}");
+        var stamp = $"{DateTime.Now:yyyyMMdd-HHmmss-fff}";
+        var target = Path.Combine(dir, $"{stamp}_{Path.GetFileName(path)}");
+        for (var n = 2; File.Exists(target); n++) target = Path.Combine(dir, $"{stamp}-{n}_{Path.GetFileName(path)}");
         File.Copy(path, target);
         return target;
     }

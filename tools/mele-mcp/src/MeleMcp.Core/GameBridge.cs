@@ -83,7 +83,10 @@ public static class GameBridge
         }
     }
 
-    /// <summary>Sends a command and waits for the first reply that matches, ignoring replies that arrived before it.</summary>
+    /// <summary>
+    /// Sends a command and waits for the first reply that matches, ignoring replies that arrived before it. Replies carry no
+    /// request id, so a late reply to an earlier request that timed out still matches: GameLink fences after a timeout.
+    /// </summary>
     public static string SendAndWait(MEGame game, string command, Func<string, bool> isReply, TimeSpan timeout)
     {
         var receiver = ReplyReceiver.Instance;
@@ -127,22 +130,38 @@ public static class GameBridge
     /// <summary>Hidden window on its own thread with a message loop; stores every WM_COPYDATA string it gets.</summary>
     private sealed class ReplyReceiver
     {
-        private static readonly Lazy<ReplyReceiver> Lazy = new(() => new ReplyReceiver());
-        public static ReplyReceiver Instance => Lazy.Value;
+        private static readonly object InstanceGate = new();
+        private static ReplyReceiver? _instance;
+        private static int _attempts;
+
+        /// <summary>
+        /// Made on first use. A window that could not be made is tried again at the next use: a Lazy would keep that first
+        /// exception and refuse every LE1 LEX Interop tool until the server restarts. One attempt at a time, so there is never a
+        /// second window of ours titled "Legendary Explorer" to take the replies.
+        /// </summary>
+        public static ReplyReceiver Instance
+        {
+            get
+            {
+                lock (InstanceGate) return _instance ??= new ReplyReceiver(++_attempts);
+            }
+        }
 
         private const int MaxKept = 200;
         private readonly List<(long Seq, ulong Signature, string Text)> _messages = [];
         private long _seq;
         private readonly Native.WndProc _wndProc; // kept alive: the window calls it from native code
 
-        private ReplyReceiver()
+        private ReplyReceiver(int attempt)
         {
             _wndProc = WndProc;
+            // A class that a failed attempt registered points at that attempt's window procedure, which is gone: a retry registers its own.
+            var className = attempt == 1 ? "MeleMcpLexReplyWindow" : $"MeleMcpLexReplyWindow{attempt}";
             var ready = new ManualResetEventSlim();
             Exception? failure = null;
             var thread = new Thread(() =>
             {
-                try { CreateWindow(); }
+                try { CreateWindow(className); }
                 catch (Exception ex) { failure = ex; }
                 ready.Set();
                 if (failure is null) Native.RunMessageLoop();
@@ -177,9 +196,8 @@ public static class GameBridge
             lock (_messages) return _messages.LastOrDefault(m => m.Signature == signature && isReply(m.Text)).Text;
         }
 
-        private void CreateWindow()
+        private void CreateWindow(string className)
         {
-            var className = "MeleMcpLexReplyWindow";
             var wc = new Native.WNDCLASSEXW
             {
                 cbSize = (uint)Marshal.SizeOf<Native.WNDCLASSEXW>(),

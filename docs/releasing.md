@@ -45,9 +45,11 @@ Each repo runs `scripts/protect-repo.sh` once, when it goes public and before it
 | Ruleset `main` | No one can force-push to `main` or delete it. I still push to it directly. |
 | Actions policy | Workflows can use only GitHub's actions and my own. Actions from other repos must be pinned to a full commit. A pull request from a fork runs no workflow until I approve it. |
 
-While a repo is still private, I push a tag only to test the workflow. That tag publishes a private release with no
-signed record, and a push to `main` publishes no latest page. I delete each test release before the repo goes public:
-`gh release delete v<N> --cleanup-tag`.
+On a public repo, the release job of a mod built on GitHub publishes nothing until `protect-repo.sh` has run.
+
+While a repo is still private, I push a tag only to test the workflow. That tag stops at a draft release: checked, not
+signed, not published. A push to `main` publishes no latest page. I delete each test draft and its tag before the repo
+goes public: `gh release delete v<N> --cleanup-tag`.
 
 ## Publish a version
 
@@ -73,9 +75,16 @@ The workflow then builds the zip from the tag and publishes the release. Each ru
 also keeps the `.pdb` files for 90 days, as its `pdb` artifact. A `.pdb` matches only the ASI built in the same run.
 
 The workflow refuses the tag, and publishes nothing, when the tag differs from the version in `src/SharedVersion.h`,
-its commit is not on `main`, `CHANGELOG.md` has no dated entry for it, or it already has a release. Once
-`protect-repo.sh` has run, a pushed tag can't be moved or deleted, even one the workflow refused. To fix a bad tag, I
-release the next version number.
+its commit is not on `main`, `CHANGELOG.md` has no dated entry for it, it already has a release, or the repo is public
+and `protect-repo.sh` has not run. Once `protect-repo.sh` has run, a pushed tag can't be moved or deleted, even one the
+workflow refused. To fix a bad tag, I release the next version number.
+
+If a run fails, I re-run it. A run that failed after signing leaves a signed draft, and the re-run publishes that
+draft as it is, so a tag never gets two signed builds. I don't delete that draft. The re-run first checks that the
+workflow made the draft and that each zip verifies as the workflow's build of that tag; if not, it stops and publishes
+nothing. When the re-run built new zips, its
+summary lists the published hashes, and its `pdb` artifact doesn't match the published ASI. The re-run deletes any
+draft of the tag that holds no signed zip.
 
 ## How the GitHub build is protected
 
@@ -86,10 +95,15 @@ Each repo's `.github/workflows/build.yml` comes from the release kit.
   `package.sh` I run at home.
 - Every action and every library that `build.sh` downloads is pinned to a full commit. The compiler and the other tools
   come with GitHub's Windows image, which GitHub updates.
-- A tag that is not on `main`, or that already has a release, publishes nothing.
+- A tag that is not on `main`, that already has a release, or that comes before `protect-repo.sh` has locked a public
+  repo publishes nothing.
 - The jobs that publish don't check out the repo, so they run none of its scripts. They check the zips against the
-  build's hashes and sign where the zips came from. The release job then publishes, downloads what it published, and
-  checks it again.
+  build's hashes and sign where the zips came from.
+- A published release can't change, so the release job checks it as a draft first. It uploads the zips to a draft,
+  downloads them back and checks them against `SHA256SUMS`, then signs them and publishes the draft.
+- GitHub shows the immutable releases setting only to the repo's admin, and the job's token can't get admin access.
+  Before publishing, the job checks the two tag rulesets instead, which `protect-repo.sh` sets only after it has turned
+  immutability on. After publishing, it reads the release's own immutable flag and fails if it is off.
 
 ## Check a download
 

@@ -43,14 +43,21 @@ namespace MeleBridge::Editor
         constexpr float FarPlane = 1e6f;
         constexpr float UnitsToRadians = 3.14159265f / 32768.f;
 
-        // Render thread only.
-        IDXGISwapChain* GameChain = nullptr;
+        // Render thread only (inside Present), but for ResizeBuffers_hook, which reads GameChain and takes Target on the thread
+        // that resizes. A swap chain is not free-threaded: the game never presents and resizes one chain at once, so the hook
+        // never runs during a frame of that chain; both are atomic for a resize of another chain during a rebind (Rebind).
+        // The overlay's state is Diag.Overlay (Editor.hpp): NotStarted, Ready, Failed.
+        std::atomic<IDXGISwapChain*> GameChain{ nullptr };
         ID3D11Device* Device = nullptr;
         ID3D11DeviceContext* Context = nullptr;
-        ID3D11RenderTargetView* Target = nullptr;
-        bool Ready = false;
-        bool Failed = false;
+        std::atomic<ID3D11RenderTargetView*> Target{ nullptr };
+        /// A frame drew the open editor since the last close, and the session it drew (Sessions).
         bool WasOpen = false;
+        unsigned DrawnSession = 0;
+        /// When GameChain last presented: another chain of the game's window takes over only once it has gone quiet (Rebind).
+        LARGE_INTEGER BoundAt{};
+        /// A swap chain of another window presented: said once.
+        bool OtherChainSaid = false;
         thread_local bool InPresent = false;
         LARGE_INTEGER LastFrame{};
         LARGE_INTEGER LastCalibrationLog{};
@@ -60,8 +67,10 @@ namespace MeleBridge::Editor
         std::string DraggedPath;
         float DragModel[16]{};
         bool HadFocus = true;
-        /// Where the cursor was when a free-cam look started: it goes back there when the button is released.
+        /// Where the cursor was when a free-cam look started: it goes back there when the look ends (EndLook), whoever ends it.
         POINT LookStart{};
+        /// The overlay started the look under way: Looking may be cleared by the game thread, the cursor is still to go back.
+        bool LookHeld = false;
 
         enum class Tool { Move, Turn, Scale };
         Tool Current = Tool::Move;
@@ -249,6 +258,16 @@ namespace MeleBridge::Editor
                 ImGuizmo::Enable(false);
                 ImGuizmo::Enable(true);
             }
+        }
+
+        /// Ends the free-cam look the overlay started, whoever ended it (the button went up, the free cam went off, the editor
+        /// closed, the overlay failed): the cursor goes back to where the look began.
+        void EndLook()
+        {
+            if (!LookHeld) return;
+            LookHeld = false;
+            Looking.store(false);
+            MoveCursor(LookStart.x, LookStart.y);
         }
 
         // ! Input
@@ -613,7 +632,8 @@ namespace MeleBridge::Editor
                 PanelLight = light;
                 PanelEditing = true;
                 PanelFrame = s.Frame;
-                Post({ .Type = Command::Kind::Light, .Light = light });
+                // For this selection only: the game thread drops it if another was selected before it runs.
+                Post({ .Type = Command::Kind::Light, .Text = s.SelectedPath, .Light = light });
             }
         }
 
@@ -1885,9 +1905,10 @@ namespace MeleBridge::Editor
                     std::memcpy(DragModel, model, sizeof model);
                     // A turn or a scale sends only on a frame that changed the matrix. A move sends where the gizmo is: Post keeps
                     // the latest, and the game thread ignores one that doesn't move the actor (a click without motion edits nothing).
+                    // Each names the selection it is for: the game thread drops it if another was selected before it runs.
                     if (moving)
                     {
-                        Post({ .Type = Command::Kind::Move, .X = model[12], .Y = model[13], .Z = model[14] });
+                        Post({ .Type = Command::Kind::Move, .X = model[12], .Y = model[13], .Z = model[14], .Text = s.SelectedPath });
                     }
                     else if (changed && pawnTurn)
                     {
@@ -1895,16 +1916,16 @@ namespace MeleBridge::Editor
                         // straight up or down.
                         DragYaw = std::remainder(DragYaw + std::atan2(delta[1], delta[0]) * 180.f / 3.14159265f, 360.f);
                         auto const yaw = static_cast<int>(std::lround(DragYaw * 65536.f / 360.f));
-                        Post({ .Type = Command::Kind::Rotate, .Rotation = { DragRotation.Pitch, yaw, DragRotation.Roll } });
+                        Post({ .Type = Command::Kind::Rotate, .Rotation = { DragRotation.Pitch, yaw, DragRotation.Roll }, .Text = s.SelectedPath });
                     }
                     else if (changed && tool == Tool::Turn)
                     {
-                        Post({ .Type = Command::Kind::Rotate, .Rotation = RotatorOf(DragModel) });
+                        Post({ .Type = Command::Kind::Rotate, .Rotation = RotatorOf(DragModel), .Text = s.SelectedPath });
                     }
                     else if (changed && tool == Tool::Scale)
                     {
                         auto const scale = ScaleOf(DragModel, ctrl);
-                        Post({ .Type = Command::Kind::Scale, .X = scale.X, .Y = scale.Y, .Z = scale.Z });
+                        Post({ .Type = Command::Kind::Scale, .X = scale.X, .Y = scale.Y, .Z = scale.Z, .Text = s.SelectedPath });
                     }
                 }
                 if (!holding && Dragging)
@@ -1955,7 +1976,7 @@ namespace MeleBridge::Editor
             auto const& io = ImGui::GetIO();
             auto const free = !io.WantCaptureMouse && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing();
 
-            if (s.FreeCam && free && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+            if (s.FreeCam && free && !LookHeld && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
             {
                 // The look is the cursor's travel away from the anchor each frame: anchored mid-window, a click near an edge can
                 // still look that way (the cursor is clipped to the window).
@@ -1975,12 +1996,10 @@ namespace MeleBridge::Editor
                 AnchorX.store(centre.x);
                 AnchorY.store(centre.y);
                 Looking.store(true);
+                LookHeld = true;
             }
-            if (Looking.load() && (!s.FreeCam || !ImGui::IsMouseDown(ImGuiMouseButton_Right)))
-            {
-                Looking.store(false);
-                MoveCursor(LookStart.x, LookStart.y);
-            }
+            // Also when the game thread ended it (the free cam went off): the cursor still goes back.
+            if (LookHeld && (!Looking.load() || !s.FreeCam || !ImGui::IsMouseDown(ImGuiMouseButton_Right))) EndLook();
             if (Looking.load()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
             // Keys, unless a text field has them (the Props search).
@@ -2038,7 +2057,7 @@ namespace MeleBridge::Editor
             ImGui::GetStyle().FrameRounding = 4;
             if (!ImGui_ImplDX11_Init(Device, Context)) return false;
 
-            GameChain = chain;
+            GameChain.store(chain);
             QueryPerformanceCounter(&LastFrame);
             SubclassWindow(desc.OutputWindow);
             LEASI_INFO("editor: overlay ready, back buffer {}x{} format {}, present thread {}", desc.BufferDesc.Width, desc.BufferDesc.Height,
@@ -2046,32 +2065,55 @@ namespace MeleBridge::Editor
             return true;
         }
 
+        /// Lets go of the view on the old back buffer: it must be gone before the chain's buffers can be resized.
+        void DropTarget()
+        {
+            if (auto const view = Target.exchange(nullptr)) view->Release();
+        }
+
+        /// The view on the chain's back buffer, made again when it is not on the buffer the chain has now: a resize the hook
+        /// did not see, or a new chain at a freed one's address (Rebind), would leave it on an old buffer nobody shows.
         bool EnsureTarget(IDXGISwapChain* chain)
         {
-            if (Target != nullptr) return true;
             ID3D11Texture2D* back = nullptr;
             if (FAILED(chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))) || back == nullptr) return false;
-            auto hr = Device->CreateRenderTargetView(back, nullptr, &Target);
+            if (auto const existing = Target.load())
+            {
+                ID3D11Resource* resource = nullptr;
+                existing->GetResource(&resource);
+                auto const same = resource == static_cast<ID3D11Resource*>(back);
+                if (resource != nullptr) resource->Release();
+                if (same)
+                {
+                    back->Release();
+                    return true;
+                }
+                DropTarget();
+            }
+            ID3D11RenderTargetView* view = nullptr;
+            auto hr = Device->CreateRenderTargetView(back, nullptr, &view);
             if (FAILED(hr))
             {
                 // A typeless back buffer needs a format for its view.
-                D3D11_RENDER_TARGET_VIEW_DESC view{};
-                view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                view.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-                hr = Device->CreateRenderTargetView(back, &view, &Target);
+                D3D11_RENDER_TARGET_VIEW_DESC typed{};
+                typed.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                typed.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                hr = Device->CreateRenderTargetView(back, &typed, &view);
                 if (FAILED(hr)) LEASI_ERROR("editor: no render target view on the back buffer (0x{:08X})", static_cast<unsigned>(hr));
             }
             back->Release();
-            return Target != nullptr;
+            Target.store(view);
+            return view != nullptr;
         }
 
         void Render(IDXGISwapChain* chain)
         {
             if (!EnsureTarget(chain)) return;
+            auto target = Target.load();
             ID3D11RenderTargetView* saved[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
             ID3D11DepthStencilView* savedDepth = nullptr;
             Context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved, &savedDepth);
-            Context->OMSetRenderTargets(1, &Target, nullptr);
+            Context->OMSetRenderTargets(1, &target, nullptr);
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             Context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved, savedDepth);
             for (auto view : saved)
@@ -2081,45 +2123,117 @@ namespace MeleBridge::Editor
             if (savedDepth != nullptr) savedDepth->Release();
         }
 
+        /// What an editor session left in the overlay, let go of when it ends (a close, a close and an open between two frames,
+        /// a failure): the queued input, the focus flags the game thread reads, a free-cam look (the cursor goes back), the
+        /// gizmo's and the panel's drags, the mesh list asked for (a Close run before the ask drops it) and the thumbnails on the
+        /// GPU. A drag's end is not posted: the game thread closed its step when it closed the editor, and an EndDrag run in a
+        /// later session would tick the paused world for nothing. ImGui's own state is left to EndSession: after a failure it
+        /// may be what failed.
+        void LetGo()
+        {
+            DrainInput();
+            WantMouse.store(false);
+            WantKeyboard.store(false);
+            EndLook();
+            Dragging = false;
+            RefusedFor.clear();
+            PanelEditing = false;
+            PanelPath.clear();
+            MeshesAsked = false;
+            ReleaseThumbnails();
+        }
+
+        /// The end of a session the overlay drew: nothing held from it, no button stays down, no event replays.
+        void EndSession()
+        {
+            LetGo();
+            ImGui::GetIO().ClearInputKeys();
+            ImGui::GetIO().ClearInputMouse();
+            // Dragging is off: this ends ImGuizmo's own drag and posts nothing.
+            ResetGizmo();
+        }
+
+        /// The overlay is off for the rest of the game run (OverlayState::Failed). Input goes back to the game at once
+        /// (Input.cpp), F8 is refused, and the game thread closes the editor at its next tick. No frame runs again, so what an
+        /// open editor held is let go of now, and the view on the back buffer too.
+        void Fail()
+        {
+            Diag.Overlay.store(OverlayState::Failed, std::memory_order_release);
+            LetGo();
+            WasOpen = false;
+            DropTarget();
+        }
+
+        /// A Present of a swap chain other than the one the overlay draws on (docs/design/in-game-editor.md §3.3). Another
+        /// window's chain is never drawn on. One of the game's window takes over once the chain the overlay draws on has not
+        /// presented for half a second: the game made a new chain, the old one is gone or going (while both present, the
+        /// overlay stays on its own, as it always did). On the same device the overlay draws on it from then on; on another
+        /// device it can't (ImGui's buffers and the thumbnails are the first device's), so it turns off.
+        bool Rebind(IDXGISwapChain* chain, LARGE_INTEGER now)
+        {
+            DXGI_SWAP_CHAIN_DESC desc{};
+            if (FAILED(chain->GetDesc(&desc)) || desc.OutputWindow == nullptr || desc.OutputWindow != GameWindow())
+            {
+                if (!std::exchange(OtherChainSaid, true)) LEASI_INFO("editor: a swap chain of another window presents too; the overlay stays on the game's");
+                return false;
+            }
+            LARGE_INTEGER frequency;
+            QueryPerformanceFrequency(&frequency);
+            if (now.QuadPart - BoundAt.QuadPart < frequency.QuadPart / 2) return false;
+            ID3D11Device* device = nullptr;
+            if (FAILED(chain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) device = nullptr;
+            // Device holds a reference from Initialize: its address is never reused, the comparison holds.
+            auto const same = device != nullptr && device == Device;
+            if (device != nullptr) device->Release();
+            if (!same)
+            {
+                LEASI_ERROR("editor: the game's window presents a swap chain of another D3D11 device; overlay off");
+                Fail();
+                return false;
+            }
+            DropTarget();
+            GameChain.store(chain);
+            BoundAt = now;
+            LEASI_INFO("editor: the game presents a new swap chain on its window, back buffer {}x{}: the overlay draws on it", desc.BufferDesc.Width,
+                       desc.BufferDesc.Height);
+            return true;
+        }
+
         void Frame(IDXGISwapChain* chain)
         {
             Diag.Presents.fetch_add(1, std::memory_order_relaxed);
             Diag.PresentThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
-            if (Failed) return;
-            if (!Ready)
+            auto const state = Diag.Overlay.load(std::memory_order_relaxed);
+            if (state == OverlayState::Failed) return;
+            if (state == OverlayState::NotStarted)
             {
-                Ready = Initialize(chain);
-                if (!Ready)
+                if (!Initialize(chain))
                 {
-                    Failed = true;
-                    Diag.OverlayFailed.store(true);
                     LEASI_ERROR("editor: the overlay could not start on this swap chain");
+                    Fail();
                     return;
                 }
-                Diag.OverlayReady.store(true);
+                Diag.Overlay.store(OverlayState::Ready, std::memory_order_release);
             }
-            if (chain != GameChain) return;
+            LARGE_INTEGER presented;
+            QueryPerformanceCounter(&presented);
+            if (chain == GameChain.load()) BoundAt = presented;
+            else if (!Rebind(chain, presented)) return;
 
             if (!Open.load(std::memory_order_acquire))
             {
                 if (WasOpen)
                 {
-                    // Nothing held from the last session: no button stays down, no event replays.
                     WasOpen = false;
-                    DrainInput();
-                    ImGui::GetIO().ClearInputKeys();
-                    ImGui::GetIO().ClearInputMouse();
-                    WantMouse.store(false);
-                    WantKeyboard.store(false);
-                    ResetGizmo();
-                    RefusedFor.clear();
-                    ReleaseThumbnails();
-                    PanelEditing = false;
-                    PanelPath.clear();
+                    EndSession();
                 }
                 return;
             }
+            // Sessions is raised before Open is set: a close and an open since the last frame show as a new number.
+            auto const session = Sessions.load(std::memory_order_acquire);
+            if (WasOpen && session != DrawnSession) EndSession();
             WasOpen = true;
+            DrawnSession = session;
 
             DXGI_SWAP_CHAIN_DESC desc{};
             chain->GetDesc(&desc);
@@ -2175,10 +2289,28 @@ namespace MeleBridge::Editor
             }
             catch (std::exception const& e)
             {
-                Failed = true;
-                Diag.OverlayFailed.store(true);
-                LEASI_ERROR("editor overlay: {}", e.what());
-                ReleaseThumbnails();
+                LEASI_ERROR("editor overlay: {}; overlay off", e.what());
+                Fail();
+            }
+        }
+
+        void Faulted()
+        {
+            LEASI_ERROR("editor overlay: access violation in a frame; overlay off");
+            Fail();
+        }
+
+        /// After an access violation in a frame, Fail as after an exception, under a guard of its own: what it lets go of may be
+        /// what faulted. No C++ object may live in this frame.
+        void FaultedGuarded()
+        {
+            __try
+            {
+                Faulted();
+            }
+            __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+            {
+                Diag.Overlay.store(OverlayState::Failed, std::memory_order_release);
             }
         }
 
@@ -2191,8 +2323,7 @@ namespace MeleBridge::Editor
             }
             __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
             {
-                Failed = true;
-                Diag.OverlayFailed.store(true);
+                FaultedGuarded();
             }
         }
 
@@ -2225,11 +2356,7 @@ namespace MeleBridge::Editor
         {
             auto const orig = Wait(ResizeBuffers_orig);
             // The view holds the old back buffer, which must be released before it can be resized.
-            if (chain == GameChain && Target != nullptr)
-            {
-                Target->Release();
-                Target = nullptr;
-            }
+            if (chain == GameChain.load()) DropTarget();
             return orig(chain, count, width, height, format, flags);
         }
     }

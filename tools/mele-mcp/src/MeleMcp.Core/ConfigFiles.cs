@@ -361,15 +361,21 @@ public static class ConfigFiles
             results.Add(new ConfigEntryResult(entry.Asset, entry.Section, entry.Key, entry.Operation!, line, Path.GetFileName(path), outcome));
         }
 
-        var written = new List<string>();
-        var backups = new List<string>();
-        foreach (var file in files.Values.Where(f => f.Changed))
+        // Several files, saved one after the other with no rollback: a failure after the first names those saved and their backups.
+        var writes = new BuildWrites();
+        writes.Guard(() =>
         {
-            Directory.CreateDirectory(cooked);
-            if (File.Exists(file.Path)) backups.Add(PackageWriter.Backup(file.Path));
-            file.Save();
-            written.Add(file.Path);
-        }
+            foreach (var file in files.Values.Where(f => f.Changed))
+            {
+                Directory.CreateDirectory(cooked);
+                var backup = File.Exists(file.Path) ? PackageWriter.Backup(file.Path) : null;
+                file.Save();
+                writes.Wrote(file.Path, backup);
+            }
+            return 0;
+        });
+        var written = writes.Written.Select(w => w.File).ToList();
+        var backups = writes.Backups;
 
         var notes = new List<string>();
         if (delta)

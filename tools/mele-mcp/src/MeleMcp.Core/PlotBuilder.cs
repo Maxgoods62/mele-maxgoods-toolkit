@@ -59,7 +59,12 @@ public static partial class PlotBuilder
     }
 
     /// <param name="outRoot">mod_build out=: the mod root to build into instead (see <see cref="YamlFiles.Target"/>).</param>
-    public static PlotBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null)
+    /// <param name="writes">
+    /// The files written so far, each with its backup: the package, each GlobalTlk, the AutoLoad.ini are saved one after the
+    /// other with no rollback, so a failure after the first becomes a <see cref="PartialBuildException"/> naming them. mod_build
+    /// passes one for all its files; null: this build's own.
+    /// </param>
+    public static PlotBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null, BuildWrites? writes = null)
     {
         if (!game.IsGame1()) throw new ArgumentException("plot_build handles Game 1 (LE1) plots.");
         LecHost.EnsureInitialized();
@@ -76,86 +81,98 @@ public static partial class PlotBuilder
         var autoload = FindAutoLoad(spec.AutoLoad, package, dir, notes) is { } ini ? InOut(ini, outRoot, "autoload") : null;
         foreach (var target in globals.Prepend(package).Concat(autoload is null ? [] : [autoload])) PackageWriter.EnsureWritable(game, target);
 
-        if (create)
+        var written = writes ?? new BuildWrites();
+        return written.Guard(() =>
         {
-            PlotMaps.NewPackage(game, package);
-            notes.Add($"Created {Path.GetFileName(package)}.");
-        }
-
-        var backups = new List<string>();
-        var ((events, quests, loaded), backup) = PackageWriter.Edit(game, package, pcc =>
-        {
-            var events = new List<BuiltPlotEvent>();
-            var loaded = new List<(string Key, string Export)>();
-            foreach (var (list, (export, key)) in new[] { spec.Transitions, spec.Consequences }.Zip(Maps))
+            // This build's backups for its result; written may hold earlier builds' files too (mod_build).
+            var backups = new List<string>();
+            void Wrote(string path, string? backup)
             {
-                if (list is null) continue;
-                var map = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioStateEventMap" && e.InstancedFullPath.Equals(export, StringComparison.OrdinalIgnoreCase))
-                          ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no BioStateEventMap '{export}' (plot_map_new writes one).");
-                var bin = ObjectBinary.From<BioStateEventMap>(map);
-                foreach (var e in list)
+                if (backup is not null) backups.Add(backup);
+                written.Wrote(path, backup);
+            }
+
+            if (create)
+            {
+                PlotMaps.NewPackage(game, package);
+                Wrote(package, null);
+                notes.Add($"Created {Path.GetFileName(package)}.");
+            }
+
+            var ((events, quests, loaded), backup) = PackageWriter.Edit(game, package, pcc =>
+            {
+                var events = new List<BuiltPlotEvent>();
+                var loaded = new List<(string Key, string Export)>();
+                foreach (var (list, (export, key)) in new[] { spec.Transitions, spec.Consequences }.Zip(Maps))
                 {
-                    var (before, after) = PlotMaps.SetEventIn(bin, e.Id, e.Elements);
-                    var action = (before, after) switch
+                    if (list is null) continue;
+                    var map = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioStateEventMap" && e.InstancedFullPath.Equals(export, StringComparison.OrdinalIgnoreCase))
+                              ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no BioStateEventMap '{export}' (plot_map_new writes one).");
+                    var bin = ObjectBinary.From<BioStateEventMap>(map);
+                    foreach (var e in list)
                     {
-                        (null, null) => "absent",
-                        (null, _) => "added",
-                        (_, null) => "removed",
-                        ({ } b, { } a) => b.SequenceEqual(a) ? "unchanged" : "replaced",
-                    };
-                    events.Add(new BuiltPlotEvent(export, e.Id, action, after));
+                        var (before, after) = PlotMaps.SetEventIn(bin, e.Id, e.Elements);
+                        var action = (before, after) switch
+                        {
+                            (null, null) => "absent",
+                            (null, _) => "added",
+                            (_, null) => "removed",
+                            ({ } b, { } a) => b.SequenceEqual(a) ? "unchanged" : "replaced",
+                        };
+                        events.Add(new BuiltPlotEvent(export, e.Id, action, after));
+                    }
+                    map.WriteBinary(bin);
+                    var kept = bin.StateEvents.Select(e => e.ID).Except(list.Select(e => e.Id)).ToList();
+                    if (kept.Count > 0) notes.Add($"{export}: kept events not in the file: {string.Join(", ", kept)}.");
+                    if (bin.StateEvents.Count > 0) loaded.Add((key, map.InstancedFullPath));
                 }
-                map.WriteBinary(bin);
-                var kept = bin.StateEvents.Select(e => e.ID).Except(list.Select(e => e.Id)).ToList();
-                if (kept.Count > 0) notes.Add($"{export}: kept events not in the file: {string.Join(", ", kept)}.");
-                if (bin.StateEvents.Count > 0) loaded.Add((key, map.InstancedFullPath));
+
+                var quests = new List<BuiltQuest>();
+                if (spec.Quests is { } questSpecs)
+                {
+                    var (export, key) = Maps[2];
+                    ExportRow? row = null;
+                    foreach (var q in questSpecs)
+                    {
+                        var r = QuestMaps.SetIn(pcc, export, q.Id, q.IsMission, q.Goals, q.Tasks, q.PlotItems, q.Evals, remove: false);
+                        row = r.Map;
+                        var action = r.Before is null ? "added"
+                                     : JsonSerializer.Serialize(r.Before) + JsonSerializer.Serialize(r.BeforeEvals) == JsonSerializer.Serialize(r.After) + JsonSerializer.Serialize(r.TaskEvals)
+                                         ? "unchanged" : "replaced";
+                        if (r.CreatedMap) notes.Add($"Created the BioQuestMap '{export}'.");
+                        quests.Add(new BuiltQuest(q.Id, action, q.Goals.Count, q.Tasks.Count, q.PlotItems.Count, r.TaskEvals.Count));
+                    }
+                    if (row is not null)
+                    {
+                        var kept = ObjectBinary.From<BioQuestMap>(pcc.GetUExport(row.UIndex)).Quests.Select(q => q.ID).Except(questSpecs.Select(q => q.Id)).ToList();
+                        if (kept.Count > 0) notes.Add($"{export}: kept quests not in the file: {string.Join(", ", kept)}.");
+                        loaded.Add((key, row.InstancedFullPath));
+                    }
+                }
+                return (events, quests, loaded);
+            });
+            Wrote(package, backup);
+
+            var tlkFiles = new List<string>();
+            if (spec.Strings.Count > 0)
+            {
+                foreach (var globalPath in globals)
+                {
+                    var language = LanguageOfFile(Path.GetFileNameWithoutExtension(globalPath));
+                    var edit = TalkFiles.Set(game, globalPath, StringsFor(spec.Strings, language, spec.DefaultLanguage), null);
+                    Wrote(edit.Path, edit.BackupPath);
+                    tlkFiles.Add($"{Path.GetFileName(globalPath)} ({language})");
+                }
             }
 
-            var quests = new List<BuiltQuest>();
-            if (spec.Quests is { } questSpecs)
-            {
-                var (export, key) = Maps[2];
-                ExportRow? row = null;
-                foreach (var q in questSpecs)
-                {
-                    var r = QuestMaps.SetIn(pcc, export, q.Id, q.IsMission, q.Goals, q.Tasks, q.PlotItems, q.Evals, remove: false);
-                    row = r.Map;
-                    var action = r.Before is null ? "added"
-                                 : JsonSerializer.Serialize(r.Before) + JsonSerializer.Serialize(r.BeforeEvals) == JsonSerializer.Serialize(r.After) + JsonSerializer.Serialize(r.TaskEvals)
-                                     ? "unchanged" : "replaced";
-                    if (r.CreatedMap) notes.Add($"Created the BioQuestMap '{export}'.");
-                    quests.Add(new BuiltQuest(q.Id, action, q.Goals.Count, q.Tasks.Count, q.PlotItems.Count, r.TaskEvals.Count));
-                }
-                if (row is not null)
-                {
-                    var kept = ObjectBinary.From<BioQuestMap>(pcc.GetUExport(row.UIndex)).Quests.Select(q => q.ID).Except(questSpecs.Select(q => q.Id)).ToList();
-                    if (kept.Count > 0) notes.Add($"{export}: kept quests not in the file: {string.Join(", ", kept)}.");
-                    loaded.Add((key, row.InstancedFullPath));
-                }
-            }
-            return (events, quests, loaded);
+            var packageName = Path.GetFileNameWithoutExtension(package);
+            var wanted = loaded.Select(l => (l.Key, $"{packageName}.{l.Export}")).ToList();
+            List<string> added = [];
+            if (autoload is not null) added = EnsureAutoLoad(autoload, wanted, Wrote);
+            else if (wanted.Count > 0) notes.Add($"Add to the DLC's AutoLoad.ini [Packages]: {string.Join("; ", wanted.Select(w => $"{w.Key}1={w.Item2}"))}.");
+
+            return new PlotBuildResult(package, create, events, quests, spec.Strings.Count, tlkFiles, autoload, added, notes, backups);
         });
-        backups.Add(backup);
-
-        var tlkFiles = new List<string>();
-        if (spec.Strings.Count > 0)
-        {
-            foreach (var globalPath in globals)
-            {
-                var language = LanguageOfFile(Path.GetFileNameWithoutExtension(globalPath));
-                var edit = TalkFiles.Set(game, globalPath, StringsFor(spec.Strings, language, spec.DefaultLanguage), null);
-                backups.Add(edit.BackupPath);
-                tlkFiles.Add($"{Path.GetFileName(globalPath)} ({language})");
-            }
-        }
-
-        var packageName = Path.GetFileNameWithoutExtension(package);
-        var wanted = loaded.Select(l => (l.Key, $"{packageName}.{l.Export}")).ToList();
-        List<string> added = [];
-        if (autoload is not null) added = EnsureAutoLoad(autoload, wanted, backups);
-        else if (wanted.Count > 0) notes.Add($"Add to the DLC's AutoLoad.ini [Packages]: {string.Join("; ", wanted.Select(w => $"{w.Key}1={w.Item2}"))}.");
-
-        return new PlotBuildResult(package, create, events, quests, spec.Strings.Count, tlkFiles, autoload, added, notes, backups);
     }
 
     /// <summary>The file's 'autoload' (relative to the YAML's folder or the package's; none: leave it alone), else the DLC folder's AutoLoad.ini.</summary>
@@ -179,8 +196,9 @@ public static partial class PlotBuilder
     /// <summary>
     /// Adds the [Packages] lines missing for <paramref name="wanted"/> (key without its number, package.export), numbered
     /// after the file's own. A line edit that keeps everything else (LEC's AutoloadIni drops ConsequenceMap entries).
+    /// <paramref name="wrote"/> gets the file and its backup once it is saved.
     /// </summary>
-    private static List<string> EnsureAutoLoad(string ini, List<(string Key, string Value)> wanted, List<string> backups)
+    private static List<string> EnsureAutoLoad(string ini, List<(string Key, string Value)> wanted, Action<string, string?> wrote)
     {
         var bytes = File.ReadAllBytes(ini);
         var bom = bytes is [0xEF, 0xBB, 0xBF, ..];
@@ -215,8 +233,9 @@ public static partial class PlotBuilder
         }
         if (added.Count == 0) return added;
 
-        backups.Add(PackageWriter.Backup(ini));
+        var backup = PackageWriter.Backup(ini);
         File.WriteAllText(ini, string.Join(newline, lines), new UTF8Encoding(bom));
+        wrote(ini, backup);
         return added;
     }
 

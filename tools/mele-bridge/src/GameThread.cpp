@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <future>
 #include <vector>
 
@@ -15,7 +16,16 @@ namespace MeleBridge
 
     namespace
     {
-        enum class JobState : int { Queued, Running, Cancelled };
+        /// A request's life. The pipe thread queues it (Queued); the game thread takes it (Running) and marks it Done just before it
+        /// hands the result over. The pipe thread gives up on a Queued job at its timeout (Cancelled: it never runs), and on a Running
+        /// one RunningGrace later (Abandoned: it runs to its end, and its result is dropped). Each move is one compare-exchange, so
+        /// the two threads never both win the same job.
+        enum class JobState : int { Queued, Running, Done, Cancelled, Abandoned };
+
+        /// How long a request the game thread took before its timeout ended gets on top of that timeout. Then the client hears that
+        /// it is still running, instead of nothing. mele-mcp waits 4 s past the timeout for a reply line (older builds 2 s): both
+        /// get this answer before they give up.
+        constexpr std::chrono::milliseconds RunningGrace{ 1500 };
 
         struct Job
         {
@@ -30,6 +40,15 @@ namespace MeleBridge
 
         /// Set while the game thread runs jobs: the work calls ProcessEvent itself, and a job must not start inside another.
         thread_local bool InJobs = false;
+
+        /// InJobs for the length of a scope, put back however the scope ends: left set, it would keep every later job from running.
+        struct InJobsScope
+        {
+            InJobsScope() { InJobs = true; }
+            ~InJobsScope() { InJobs = false; }
+            InJobsScope(InJobsScope const&) = delete;
+            InJobsScope& operator=(InJobsScope const&) = delete;
+        };
 
         /// Set while a BioWorldInfo.Tick runs with keep_ticking's raised timer (CanPause() false): jobs wait for the first
         /// ProcessEvent after it, so a request (the pause menu, a save) never sees that timer.
@@ -55,19 +74,51 @@ namespace MeleBridge
             }
         }
 
-        /// An access violation in a request (a stale pointer, a wrong guess about memory) fails the request instead of the game.
+        /// The faults a request may raise in the game code it calls that fail the request instead of the game: they leave the game
+        /// as an access violation does. A stack overflow is not one: its guard page is gone afterwards, and the next overflow would
+        /// end the process without a word.
+        bool Recoverable(DWORD code)
+        {
+            return code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR || code == EXCEPTION_INT_DIVIDE_BY_ZERO
+                || code == EXCEPTION_INT_OVERFLOW;
+        }
+
+        /// A fault Recoverable takes, in the words of the request's error.
+        char const* FaultName(DWORD code)
+        {
+            switch (code)
+            {
+            case EXCEPTION_ACCESS_VIOLATION: return "access violation";
+            case EXCEPTION_IN_PAGE_ERROR: return "in-page error";
+            case EXCEPTION_INT_DIVIDE_BY_ZERO: return "integer division by zero";
+            default: return "integer overflow";
+            }
+        }
+
+        /// An access violation in a request (a stale pointer, a wrong guess about memory) fails the request instead of the game, and
+        /// so do the other faults Recoverable names. Returns 0 when the work ran, else the fault's code.
         /// No C++ object may live in this frame: __try cannot unwind one.
-        bool RunGuarded(void (*work)(void*), void* context)
+        DWORD RunGuarded(void (*work)(void*), void* context)
         {
             __try
             {
                 work(context);
-                return true;
+                return 0;
             }
-            __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+            __except (Recoverable(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
             {
-                return false;
+                return GetExceptionCode();
             }
+        }
+
+        /// Hands a job's result over. One the pipe thread abandoned meanwhile still gets it, as no one waits for it any more: setting
+        /// a promise whose future is gone is harmless, and the Job lives on in the batch until then.
+        void Finish(Job& job, json result)
+        {
+            auto expected = JobState::Running;
+            if (!job.State.compare_exchange_strong(expected, JobState::Done))
+                LEASI_WARN("a request finished after its client was told it was still running: its reply is dropped");
+            job.Result.set_value(std::move(result));
         }
 
         void RunJobs()
@@ -84,25 +135,32 @@ namespace MeleBridge
                 if (!job->State.compare_exchange_strong(expected, JobState::Running)) continue;
 
                 GuardContext context{ &job->Work, {}, {} };
-                if (!RunGuarded(RunWork, &context))
+                if (auto const fault = RunGuarded(RunWork, &context); fault != 0)
                 {
-                    LEASI_ERROR("access violation while running a request");
-                    job->Result.set_value(json{ { "ok", false }, { "error", "access violation in the game while running the request" } });
+                    LEASI_ERROR("{} while running a request", FaultName(fault));
+                    Finish(*job, json{ { "ok", false }, { "error", std::string(FaultName(fault)) + " in the game while running the request" } });
                 }
                 else if (context.Error)
                 {
+                    // Every throw ends in a reply: one that escaped here would leave the pipe thread waiting and leave the game.
+                    std::string error;
                     try
                     {
                         std::rethrow_exception(context.Error);
                     }
                     catch (std::exception const& e)
                     {
-                        job->Result.set_value(json{ { "ok", false }, { "error", e.what() } });
+                        error = e.what();
                     }
+                    catch (...)
+                    {
+                        error = "the request threw something that is not a std::exception";
+                    }
+                    Finish(*job, json{ { "ok", false }, { "error", error } });
                 }
                 else
                 {
-                    job->Result.set_value(std::move(context.Result));
+                    Finish(*job, std::move(context.Result));
                 }
             }
         }
@@ -126,8 +184,18 @@ namespace MeleBridge
         {
             throw BridgeError("the game thread did not take the request in time (game loading, or not running script?)");
         }
-        // Started just now: let it finish rather than leave it half done.
-        return result.get();
+        // Started: it can't be stopped, so it gets a little longer to finish. Past that the client hears it is still running.
+        if (result.wait_for(RunningGrace) == std::future_status::ready) return result.get();
+        expected = JobState::Running;
+        if (!job->State.compare_exchange_strong(expected, JobState::Abandoned)) return result.get(); // Done just now: being set.
+        LEASI_WARN("a request was still running {} ms after its {} ms timeout: answered as still running", RunningGrace.count(), timeout.count());
+        // "did not answer": the words clients already take for a reply lost to a load (scenario.py's LOADING).
+        return json{
+            { "ok", false },
+            { "running", true },
+            { "error", std::format("the game thread did not answer the request in time: it started, and was still running {} ms after its {} ms "
+                                   "timeout, so it may still complete; check its effect before sending it again", RunningGrace.count(), timeout.count()) },
+        };
     }
 
     // ! Event stream
@@ -152,7 +220,13 @@ namespace MeleBridge
                     continue;
                 }
                 auto const watched = std::any_of(sub->Watches.begin(), sub->Watches.end(), [&](Watch const& w) {
-                    return std::memcmp(&w.Name, &function->Name, sizeof(SFXName)) == 0 && context->IsA(w.Owner);
+                    if (std::memcmp(&w.Name, &function->Name, sizeof(SFXName)) != 0 || !context->IsA(w.Owner)) return false;
+                    if (!w.InState) return true;
+                    // A state's function: the call must run one declared in a state of that name, not the class's own function
+                    // or another state's, which share its name on the same objects.
+                    auto const outer = function->Outer;
+                    return outer != nullptr && outer->IsA(UState::StaticClass()) && !outer->IsA(UClass::StaticClass())
+                        && std::memcmp(&w.State, &outer->Name, sizeof(SFXName)) == 0;
                 });
                 if (!watched) continue;
 
@@ -350,6 +424,23 @@ namespace MeleBridge
 
     void KeepTickingOff() { KeepTicking.store(false, std::memory_order_relaxed); }
 
+    namespace
+    {
+        /// This game process's start time, UTC, ISO 8601 to the second; null when Windows does not say. The switch is off at every
+        /// game start, so a client that turned it on tells from this whether it still talks to that game.
+        json GameStarted()
+        {
+            static json const started = [] {
+                FILETIME created{}, exited{}, kernel{}, user{};
+                SYSTEMTIME utc{};
+                if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) || !FileTimeToSystemTime(&created, &utc))
+                    return json(nullptr);
+                return json(std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond));
+            }();
+            return started;
+        }
+    }
+
     json KeepTickingState()
     {
         return json{
@@ -357,6 +448,7 @@ namespace MeleBridge
             { "worldTicks", WorldTicks.load(std::memory_order_relaxed) },
             { "focusPausesCleared", FocusPausesCleared.load(std::memory_order_relaxed) },
             { "timerRaises", TimerRaises.load(std::memory_order_relaxed) },
+            { "gameStarted", GameStarted() },
         };
     }
 
@@ -391,10 +483,14 @@ namespace MeleBridge
             auto const editor = Editor::Busy();
             if (HasJobs.load(std::memory_order_acquire) && !InJobs && !InRaisedTick && !editor)
             {
-                InJobs = true;
+                InJobsScope scope;
                 RunJobs();
-                InJobs = false;
             }
+            // Calls a request makes (InJobs: a call op's function and what it calls through ProcessEvent before it returns, a console
+            // command's, status's reads) and the editor's are not published. status reads the loading movie and the squad screen
+            // through calls at every poll of a test's wait, and the editor calls Canvas.Project and Actor.Trace every frame: a watch
+            // would show the bridge's own reads as the game's. What a request sets off later (Kismet on the next tick) is published.
+            // The subscribe reply says so in "skipped" (docs/formats.md §3.6).
             if (Watching.load(std::memory_order_relaxed) && !InJobs && !editor) Publish(Context, Function, Parms);
 
             // keep_ticking wraps the world's own Tick, whoever calls it (jobs and the editor never do).

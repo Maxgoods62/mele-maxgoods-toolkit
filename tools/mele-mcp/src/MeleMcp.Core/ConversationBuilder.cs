@@ -71,7 +71,12 @@ public static partial class ConversationBuilder
     }
 
     /// <param name="outRoot">mod_build out=: the mod root to build into instead (see <see cref="YamlFiles.Target"/>).</param>
-    public static ConvBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null)
+    /// <param name="writes">
+    /// The files written so far, each with its backup: the level, then each GlobalTlk, are saved one after the other with no
+    /// rollback, so a failure after the first becomes a <see cref="PartialBuildException"/> naming them. mod_build passes one for
+    /// all its files; null: this build's own.
+    /// </param>
+    public static ConvBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null, BuildWrites? writes = null)
     {
         if (!game.IsGame1()) throw new ArgumentException("conv_build handles Game 1 (LE1) conversations.");
         LecHost.EnsureInitialized();
@@ -90,41 +95,48 @@ public static partial class ConversationBuilder
         var strings = new Dictionary<int, Dictionary<string, string>>();
         var backups = new List<string>();
         var tlkFiles = new List<string>();
+        var written = writes ?? new BuildWrites();
 
-        var ((row, created, built, start, path), backup) = PackageWriter.Edit(game, package, pcc =>
+        return written.Guard(() =>
         {
-            var conv = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioConversation" && (e.ObjectName.Instanced.Equals(conversation, StringComparison.OrdinalIgnoreCase)
-                                                                                           || e.InstancedFullPath.Equals(conversation, StringComparison.OrdinalIgnoreCase)));
-            ConvCreated? created = null;
-            if (conv is null && spec.From is { } from)
+            var ((row, created, built, start, path), backup) = PackageWriter.Edit(game, package, pcc =>
             {
-                (conv, created) = ConversationEditor.CreateIn(game, pcc, from.Package, from.Conversation, conversation, from.ResRef, from.NodeIds);
-                notes.Add($"Created {conv.InstancedFullPath} from {from.Conversation}: {created.NewExports} exports, resref {from.ResRef}, node ids from {from.NodeIds}, plot removed from {created.PlotCleared} nodes.");
-            }
-            if (conv is null && !conversation.StartsWith('#'))
-            {
-                throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no BioConversation '{conversation}'. Give 'from' (a conversation to copy, with resref and nodeIds) to create it.");
-            }
-            conv ??= ExportInspector.Resolve(pcc, conversation);
-            if (conv.ClassName != "BioConversation") throw new ArgumentException($"#{conv.UIndex} is a {conv.ClassName}, not a BioConversation.");
+                var conv = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioConversation" && (e.ObjectName.Instanced.Equals(conversation, StringComparison.OrdinalIgnoreCase)
+                                                                                               || e.InstancedFullPath.Equals(conversation, StringComparison.OrdinalIgnoreCase)));
+                ConvCreated? created = null;
+                if (conv is null && spec.From is { } from)
+                {
+                    (conv, created) = ConversationEditor.CreateIn(game, pcc, from.Package, from.Conversation, conversation, from.ResRef, from.NodeIds);
+                    notes.Add($"Created {conv.InstancedFullPath} from {from.Conversation}: {created.NewExports} exports, resref {from.ResRef}, node ids from {from.NodeIds}, plot removed from {created.PlotCleared} nodes.");
+                }
+                if (conv is null && !conversation.StartsWith('#'))
+                {
+                    throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no BioConversation '{conversation}'. Give 'from' (a conversation to copy, with resref and nodeIds) to create it.");
+                }
+                conv ??= ExportInspector.Resolve(pcc, conversation);
+                if (conv.ClassName != "BioConversation") throw new ArgumentException($"#{conv.UIndex} is a {conv.ClassName}, not a BioConversation.");
 
-            var labels = PlaceNodes(pcc, conv, spec, notes, out var placed);
-            var built = ApplyFields(game, conv, spec, labels, placed, strings, notes);
-            var start = ApplyStart(conv, spec, labels);
-            tlkFiles.AddRange(WriteLocalStrings(pcc, conv, strings, spec.DefaultLanguage));
-            return (ExportInspector.Row(conv), created, built, start, pcc.FilePath);
+                var labels = PlaceNodes(pcc, conv, spec, notes, out var placed);
+                var built = ApplyFields(game, conv, spec, labels, placed, strings, notes);
+                var start = ApplyStart(conv, spec, labels);
+                tlkFiles.AddRange(WriteLocalStrings(pcc, conv, strings, spec.DefaultLanguage));
+                return (ExportInspector.Row(conv), created, built, start, pcc.FilePath);
+            });
+            backups.Add(backup);
+            written.Wrote(path, backup);
+
+            // TalkFiles.Set refuses an empty list: a file whose lines all reuse strrefs has no text for the GlobalTlk files.
+            foreach (var globalPath in strings.Count > 0 ? globals : [])
+            {
+                var language = LanguageOfFile(Path.GetFileNameWithoutExtension(globalPath));
+                var edit = TalkFiles.Set(game, globalPath, StringsFor(strings, language, spec.DefaultLanguage), null);
+                backups.Add(edit.BackupPath);
+                written.Wrote(edit.Path, edit.BackupPath);
+                tlkFiles.Add($"{Path.GetFileName(globalPath)} ({language})");
+            }
+
+            return new ConvBuildResult(path, row, created, built, start, strings.Count, tlkFiles, notes, backups);
         });
-        backups.Add(backup);
-
-        foreach (var globalPath in globals)
-        {
-            var language = LanguageOfFile(Path.GetFileNameWithoutExtension(globalPath));
-            var edit = TalkFiles.Set(game, globalPath, StringsFor(strings, language, spec.DefaultLanguage), null);
-            backups.Add(edit.BackupPath);
-            tlkFiles.Add($"{Path.GetFileName(globalPath)} ({language})");
-        }
-
-        return new ConvBuildResult(path, row, created, built, start, strings.Count, tlkFiles, notes, backups);
     }
 
     private sealed record Placed(string Action, List<string> Changes);

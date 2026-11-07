@@ -12,7 +12,7 @@ public static class ModTools
      Description("Builds the YAML files at the top of a mod's source folder (not its subfolders): plot files (with transitions, consequences or quests) through plot_build, "
                  + "then level files (with npcs, usables, props, streaming, characterLights, startPoints or squad) through level_build, then conversation files (with 'conversation') through conv_build, then again "
                  + "the level files whose NPCs named a conversation the level did not have yet. A YAML file with none of these keys is skipped and listed. Stops at the first error, naming the file; files "
-                 + "built before it stay saved. A file's 'package' is a full path, or a path under the mod root from the DLC folder on "
+                 + "built before it stay saved, and the error lists each file they saved with its backup. A file's 'package' is a full path, or a path under the mod root from the DLC folder on "
                  + "(DLC_MOD_MyMod\\CookedPCConsole\\BIOA_MyMap.pcc): the YAML's folder when it has that DLC folder, else the mod of M3's library "
                  + "that has it; a missing level or plot package is created from either. A file may have a top-level 'requires: mele-mcp >= X.Y.Z' "
                  + "(the oldest server that builds it): every file is checked first, and an older server builds nothing.")]
@@ -42,7 +42,8 @@ public static class ModTools
 
     [McpServerTool(Name = "mod_install", Destructive = true),
      Description("Installs a mod into the game with ME3Tweaks Mod Manager (M3 --installmod, as LEX does): M3 copies the DLC folders, merges "
-                 + "ConfigDelta files into Coalesced and runs AutoTOC. Refuses while the game runs. M3 is a GUI app (its window comes up); this "
+                 + "ConfigDelta files into Coalesced and runs AutoTOC. Refuses while the game runs, or while another mele-mcp call closes, "
+                 + "cycles or installs that game or installs or boots through M3 (it waits 5 s first). M3 is a GUI app (its window comes up); this "
                  + "waits for the end of the install in M3's log, then compares every [CUSTOMDLC] file with its installed copy. A merge mod patches a core "
                  + "file in place: Differences names it when M3 logged no save, and the log holds M3's merge lines. A failed install stops the wait "
                  + "at once, with M3's dialog left open for a click.")]

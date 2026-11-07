@@ -25,7 +25,7 @@ The examples use the map `BIOA_MYM01` and the NPC `guard`; use your own names.
 | `.pcsav` career saves | LE2 30, LE3 59 | the game, `save_set`, `save_head_default` | mele-mcp | "Save format N: LE2 saves are format 30." |
 
 The protocol number is `MELE_PROTOCOL_VERSION` in `tools/mele-bridge/src/SharedVersion.h` and `Versions.BridgeProtocol`
-in mele-mcp. The same header holds `ASI_VERSION` 4, which `ping` and `status` report as `"bridge": "4"`. It is for
+in mele-mcp. The same header holds `ASI_VERSION` 5, which `ping` and `status` report as `"bridge": "5"`. It is for
 people and logs; programs check `"protocol"`. mele-mcp's own version, 0.1.0, is the `<Version>` in
 `tools/mele-mcp/src/MeleMcp/MeleMcp.csproj`, and a YAML's `requires: mele-mcp >= X.Y.Z` is checked against it.
 
@@ -85,27 +85,32 @@ Saves are in the game's own folder (§7). Backups and other files mele-mcp write
 |---|---|---|
 | `op` | request, required | The op name (§3.4). |
 | `id` | request, optional | Any JSON value. Echoed in the reply, an error reply included, when the request parsed as an object. |
-| `timeoutMs` | request, optional | How long the bridge waits for the game thread to take the request. Default 5000. |
+| `timeoutMs` | request, optional | How long the bridge waits for the game thread to take the request. Default 5000. A request it has taken gets 1.5 s more to finish. |
 | other keys | request | The op's arguments. A `null` is the same as a missing key, except `set`'s `value`. A wrong type is refused: `"command" is a string`. |
 | `ok` | reply | `true` with the op's reply keys beside it, or `false` with `error`. |
 | `error` | reply | What went wrong, in words, ready to show. |
 
 | Case | Reply |
 |---|---|
-| The game thread does not take it in time (a load screen, a menu that runs no script) | `"the game thread did not take the request in time (game loading, or not running script?)"`. A request already started runs to its end, even if its reply comes late. |
-| An access violation while it runs | `"access violation in the game while running the request"`. The game keeps running. |
+| The game thread does not take it in time (a load screen, a menu that runs no script) | `"the game thread did not take the request in time (game loading, or not running script?)"`. It never runs. |
+| Taken in time, and still running 1.5 s after `timeoutMs` | `"running": true` beside `"the game thread did not answer the request in time: it started, ..."`. It runs to its end and may still take effect; its result is dropped. MeleBridge 4 and older send nothing until it ends. |
+| A fault while it runs | `"access violation in the game while running the request"`; also `integer division by zero`, `integer overflow` or `in-page error` in place of `access violation`. The game keeps running. A stack overflow still ends the game. |
 | An unknown op | `"unknown op X (ping, console, find, get, set, call, describe, subscribe, editor, status, keep_ticking)"` |
 
-mele-mcp's client (`LiveBridge.cs`) drops `null` keys, except `set`'s `value`, where `null` means None. It sets
-`timeoutMs` from the tool's timeout and waits 2 s longer for the reply line. It reports "`<game>` is not running" when
-the game is closed, and "Pipe MeleBridge_LE`<n>` not found" when the ASI is missing or the game is still starting.
+mele-mcp's client (`LiveBridge.cs`) drops `null` keys, except `set`'s `value`, where `null` means None. It gives each
+request an `id` of its own and skips a reply line with another `id` (a line without one is taken). It sets `timeoutMs`
+from the tool's timeout and waits 4 s longer for the reply line. No reply in that time, or `running: true`, gives an
+error that says the request may have started and may still complete ("MeleBridge did not answer ..."). Where one tool
+sends several requests over a connection (`live_console`'s command and its flush, `game_plot`'s set and read-back), the
+error also names the requests answered before it and those never sent. It reports "`<game>` is not running" when the
+game is closed, and "Pipe MeleBridge_LE`<n>` not found" when the ASI is missing or the game is still starting.
 
 ### 3.3 The version check
 
 `ping` returns:
 
 ```json
-{"ok": true, "bridge": "4", "protocol": 1, "map": "BIOA_NOR00", "objects": 512345}
+{"ok": true, "bridge": "5", "protocol": 1, "map": "BIOA_NOR00", "objects": 512345}
 ```
 
 - mele-mcp pings before its first request to a game process, known by process id and start time. It caches the answer
@@ -131,10 +136,10 @@ the game is closed, and "Pipe MeleBridge_LE`<n>` not found" when the ASI is miss
 | `set` | `object`, `property`, `value` (all required) | `value`: the property read back after the write. |
 | `call` | `object`, `function` (required); `args` (a list, default `[]`) | `return` when the function returns a value; `out` (`{name: value}`) when it has out parameters. |
 | `describe` | `object` or `class` (exactly one); `functions` (true) | `class` (path), `chain` (class names up to `Object`), `properties`: `[{name, type, owner}]`, `functions`: `[{name, owner, signature}]`. |
-| `subscribe` | `functions` (a non-empty list of function paths); `objectContains`; `params` (true) | `functions`: the paths resolved. The connection then becomes an event stream (§3.6). |
+| `subscribe` | `functions` (a non-empty list of function paths); `objectContains`; `params` (true) | `functions`: the paths resolved; `skipped`: what the stream leaves out (MeleBridge 5). The connection then becomes an event stream (§3.6). |
 | `editor` | none | The in-game editor's state (§3.7). LE1 only. |
 | `status` | none | One look at the game for tests. Keys below. |
-| `keep_ticking` | `on` (a bool; missing reads the switch) | `keepTicking`, `worldTicks`, `focusPausesCleared`, `timerRaises`; `clearedFocusPause` and `world` (`null` unless `on` is true). |
+| `keep_ticking` | `on` (a bool; missing reads the switch) | `keepTicking`, `worldTicks`, `focusPausesCleared`, `timerRaises`, `gameStarted`; `clearedFocusPause` and `world` (`null` unless `on` is true). |
 
 What differs per game:
 
@@ -171,9 +176,10 @@ read is `null`, with why in `notes` (a list of strings).
 | `begunPlay`, `bPlayersOnly` | Those fields of `world`. |
 | `pausedByFocusLoss` | Its `m_bPausedByFocusLoss`. |
 | `keepTicking`, `worldTicks`, `focusPausesCleared`, `timerRaises` | As `keep_ticking` returns them. |
+| `gameStarted` | The game process's start time, UTC, to the second (`"2026-11-07T09:12:44Z"`), or `null` when Windows does not say. The switch is off at every game start, so a client that turned it on can tell whether the game has restarted since. MeleBridge 5; older bridges leave the key out. |
 | `pc`, `pawn` | The map's live player controller (under `<map>.TheWorld.`, not being destroyed), else the first one in memory; its `Pawn`. |
 | `streaming` | `{levels, pending, pendingNames}` over the world's `StreamingLevels`. `pendingNames` holds the first 5 package names. |
-| `loadingMovie` | `{object, playing, state, inLoad}` of the first `SFXLoadMovieManager` (`IsLoadingMoviePlaying()`, `PlaybackState`, `bIsInLoad`). `null` when there is none, then looked for again after 5 s at the earliest. |
+| `loadingMovie` | `{object, playing, state, inLoad}` of the first `SFXLoadMovieManager` (`IsLoadingMoviePlaying()`, `PlaybackState`, `bIsInLoad`). `null` when there is none, then looked for again after 5 s at the earliest: until then a manager that appeared stays unseen. A note says which (MeleBridge 5): `no SFXLoadMovieManager in memory`, or `at the last look, N s ago`. |
 | `partySelectOpen` | Whether the player's GUI manager (`GetScaleFormManager()`) has a `PartySelect` panel (`GetPanelByTag`). |
 | `partySelect` | `null` unless open, else `{panel, handler, handlerClass, membersAvailable, varPath}`. |
 | `notes` | Why a part is `null`. |
@@ -236,8 +242,17 @@ until the client closes the connection.
 | `{"dropped": n}` | n events were dropped, because 10,000 were already waiting to be sent. |
 
 - A watch matches its function by name on any object of the function's class or a subclass. A watch on
-  `Engine.SequenceOp.Activated` therefore sees every Kismet op that fires.
+  `Engine.SequenceOp.Activated` therefore sees every Kismet op that fires. For a function declared in a state, the
+  class is the one that holds the state, and a call matches only when the function it runs is declared in a state of
+  that name, a subclass's override of the state included (MeleBridge 4 and older matched nothing there). A watch on a
+  class function also sees its states' functions of that name.
 - `objectContains` keeps only calls on objects whose path contains it, without case.
+- Calls made while a request runs on the game thread are not sent: a `call` op's function and what it calls through
+  `ProcessEvent` before it returns, a `console` command's, `status`'s reads. Nor are the F8 editor's own calls. `status`
+  reads the loading movie and the squad screen through calls at every poll of a test's wait, and the editor calls
+  `Canvas.Project` and `Actor.Trace` every frame, so a watch would show the bridge's own reads as the game's. What a
+  request sets off later, such as Kismet on the next tick, is sent. The `subscribe` reply says so in `skipped`, and
+  `live_watch` in its `note`.
 - mele-mcp's `live_watch` closes the connection when its time or event limit is reached. It hides heartbeats and adds up
   `dropped`.
 
@@ -266,7 +281,7 @@ and returns the reply as it is. It is for checks and tests, and nothing ships fr
 | `selection` | `null` or `{path, class, tag, location, rotation, drawScale, drawScale3D, pawn, static, spawned, undeletable, unmovable, ships, file, light, npc, propLighting, effect}`. A level light adds `levelLight`. |
 | `calibration` | `null` or `{ours, canvasProject, errorPixels}`: the editor's projection against `Canvas.Project` (design §3.4). |
 | `threads` | Which thread ran `present`, `postRender`, `updateCamera` and `window`. |
-| `hooks` | `{present, present1, resizeBuffers, directInput, cursor, window, overlayReady, overlayFailed}`. |
+| `hooks` | `{present, present1, resizeBuffers, directInput, cursor, window, overlayReady, overlayFailed}`. `overlayReady`: the overlay runs. `overlayFailed`: it is off until the game restarts. Both are false before the first frame. |
 | `counters` | `{presents, overlayFrames, swallowedMessages, zeroedDeviceStates, zeroedDeviceData, blockedCursorCalls}`. |
 
 ## 4. levels.json (version 1)
@@ -274,7 +289,9 @@ and returns the reply as it is. It is for checks and tests, and nothing ships fr
 The file says which levels are ours, which vanilla files each streams, and which built props, lights and NPCs the editor
 may change (design §11.4, §12.1). It describes the last build, not the install.
 
-`level_build` writes the key of the level it built, last, after its forks. Other keys stay. It writes nothing with its
+`level_build` writes the key of the level it built right after the level and its `.m3cd`, before its names, and backs the
+file up first as it does the level: the backups put back give the level and its key from before the build together.
+Other keys stay. It writes nothing with its
 `package` parameter or with `mod_build`'s `out`. The bridge reads the file on each map change. It reads it again when
 its write time changes, checked when F8 opens and once a second while the editor is open.
 

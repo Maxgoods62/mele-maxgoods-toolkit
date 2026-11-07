@@ -281,14 +281,15 @@ public static partial class FileFinder
     }
 
     /// <summary>
-    /// LEC's cached name → path list, which the other tools resolve file names with. It throws when a DLC folder it counts as
-    /// mounted has no CookedPCConsole (e.g. an AutoLoad.ini-only mod), and so does every tool that takes a file name.
+    /// LEC's cached name → path list, which the other tools resolve file names with, rescanned as theirs is when the folders
+    /// changed (<see cref="GamePaths.LoadedFiles(MEGame, bool)"/>). It throws when a DLC folder it counts as mounted has no CookedPCConsole
+    /// (e.g. an AutoLoad.ini-only mod), and so does every tool that takes a file name.
     /// </summary>
     private static IReadOnlyDictionary<string, string>? LecFiles(MEGame game, List<string> warnings)
     {
         try
         {
-            return MELoadedFiles.GetFilesLoadedInGame(game);
+            return GamePaths.LoadedFiles(game);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -365,7 +366,7 @@ public static partial class FileFinder
             && lec.TryGetValue(file, out var other) && !string.Equals(other, winner?.Path, StringComparison.OrdinalIgnoreCase))
         {
             lecPath = other;
-            notes.Add($"The other mele tools open {other} for this name (LEC's cached file list; le_refresh_files rescans it).");
+            notes.Add($"The other mele tools open {other} for this name (LEC's file list: LEC's mount rules, or a change in a cooked subfolder it has not seen; le_refresh_files rescans it).");
         }
         if (winner is null && autoToc is not { File: null }) notes.Add("No copy loads: none is in a folder or with an extension the game reads.");
 

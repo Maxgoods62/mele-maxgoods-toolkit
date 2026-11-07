@@ -32,11 +32,12 @@ python3 -I scenario.py --selftest
 | `--dry-run` | Validates offline and prints the plan. No server starts. |
 | `--out` | Report root, a Windows or `/mnt` path. Else the first file's `out`, `MELE_SCENARIO_OUT`, `%LOCALAPPDATA%\mele-mcp\scenarios`. |
 | `--unattended` | A check with `needs: [user]`, or one reaching a `prompt` that does not hold yet, is SKIP. |
-| `--restore-saves` | Puts a backup back, game closed. Without a folder it needs exactly one `PENDING` under the root. |
+| `--restore-saves` | Puts a backup back, game closed. Without a folder it takes the one the save folder's `PENDING` names (see Saves). |
 | `--selftest` | Checks the runner's own logic offline. |
 
 Exit codes: 0 no FAIL, ERROR or ABORTED; 1 a FAIL or ERROR; 2 a usage, suite or prerequisite error; 3 ABORTED; 4 a save
-restore pending or failed. Code 4 wins over the others.
+restore pending or failed. Code 4 wins over the others. `--restore-saves` also exits 4 when it is refused or stops
+(game running, a locked file, no `manifest.json`).
 
 ## What a run does
 
@@ -44,13 +45,20 @@ restore pending or failed. Code 4 wins over the others.
 2. Turns `keep_ticking` on and checks that `worldTicks` grows, so the game runs with its window in the background.
 3. Backs up the career when a selected file has `saves: true`.
 4. For each file: `setup`, reads the `restore` plot values, runs each check with its `cleanup`, then `teardown`. The
-   plot values go back at the end of the file, unless an unexpected load replaced them or the game is gone.
+   plot values go back at the end of the file, unless the game is gone or a save loaded since they were read, which
+   makes the plot table that save's: a `load`, `quickload` or `game_cycle` step (a WARN says so), or an unexpected load.
 5. Turns `keep_ticking` off, restores saves if the game is closed, and writes the report.
 
 A failed `setup` or unreadable `restore` values make every check ERROR, and only `teardown` runs. A check stops at its
 first failing step. Failures in `cleanup` and `teardown` are WARN, and so is a failed `screenshot`. A guard refusal is
 always FAIL, even on an `optional` step. Ctrl-C, SIGTERM and SIGHUP end as ABORTED, which skips `cleanup` and
-`teardown`. A failing server or prerequisite stops the run with exit 2.
+`teardown`. A second Ctrl-C cuts the plot values or turning `keep_ticking` off short, and a second SIGTERM or SIGHUP
+kills at once, but a save restore and the report hold all three until they are done. A failing server or prerequisite
+stops the run with exit 2.
+
+When the server dies or does not answer in time, the next call starts a new one. A call goes again to the new server
+only when the old one never got it, or when it only reads or sets `keep_ticking`. Any other call that got no answer
+FAILs its step with "may have run", so a `QuickSave`, a `live_call` or a `game_cycle` never runs twice.
 
 ## A suite file
 
@@ -155,8 +163,8 @@ Required keys come before the semicolon. `key: value` shows a default.
 | `assert_kismet` | `contains; expect: {min: 1}` or `order`; `since: check` | KismetLogger lines. `order` wants each text after the last. |
 | `prompt` | text, or `text; until, timeout: 300` | A message box for a person. It ends when `until` holds, or else when the box closes. |
 | `watch` | `functions; seconds: 10, object_contains, expect: {min: 1}` | `live_watch`, counting the calls. |
-| `keep_ticking` | `on` or `off` | Only for checks that test focus behaviour. |
-| `game_cycle` | `commands, wait_for_map, settle: 8, timeout: 300` | `cold_start` only. Reboots through M3 with no mod and runs `commands` at the main menu. Follow it with `wait_loaded`. |
+| `keep_ticking` | `on` or `off` | Only for checks that test focus behaviour. `off` holds until `on`, a `game_cycle` or the end of its check (or `setup`), even when a step fails first: `wait_loaded` then neither turns it back on nor requires it. The next check, `teardown` or file starts with it on again. |
+| `game_cycle` | `commands, wait_for_map, settle: 8, timeout: 300` | `cold_start` only. Reboots through M3 with no mod and runs `commands` at the main menu. Follow it with `wait_loaded`: a save load is expected until that step ends. |
 | `close_game` | `timeout: 60, force: false` | `cold_start` only, and the only place `exit` is sent. `force` kills the game. |
 | `backup_saves`, `restore_saves` | none | See Saves. |
 | `status` | none | Records one `live_status`. |
@@ -169,8 +177,8 @@ polls `live_status` every second, and a bridge timeout counts as loading.
 
 A poll is ok when the map is right, the world has begun play and a pawn exists. No streaming level may be pending, the
 loading movie must be off, and the world must not be paused. The squad screen must be closed unless `allow_party` is
-set, and `keep_ticking` must be on. Two ok polls, `settle` seconds and one more ok poll mean loaded. Without `map`, the
-map of that line must be the one loaded.
+set, and `keep_ticking` must be on, unless a `keep_ticking: off` step of the same check turned it off. Two ok polls,
+`settle` seconds and one more ok poll mean loaded. Without `map`, the map of that line must be the one loaded.
 
 Send nothing between a load and its `wait_loaded`, because console input during a load screen is lost.
 
@@ -191,21 +199,32 @@ close. It then checks the InParty flags, and `expect_spawn` waits for loading.
   with `Save` or `Saving`, except `IsAbleToSave`.
 - Paths: nothing is written under the game install. Developer save slots live there, so they are only read.
 - The run stops as ABORTED when a save loads that no step asked for (Shepard died, for example), or when the game
-  closes. An autosave is a WARN.
+  closes. A `load` or `quickload` step expects its save load until it ends, passed or failed; a `game_cycle` until the
+  end of the `wait_loaded` right after it, or its own end when that `wait_loaded` does not run (none follows, or the
+  `game_cycle` failed). An autosave is a WARN.
 
 ## Saves
 
 With a `saves: true` file selected, the runner backs up before the first file. It copies the career folder,
 `PROFILE\GamerProfile.pcsav` and `Launcher_Profile*` from `Documents\BioWare\Mass Effect Legendary Edition\Save\ME1` to
 `<root>\<suite>\save-backup\<stamp>\`, checks each copy, and writes a `PENDING` file. A `backup_saves` step does the
-same when the run has no backup yet.
+same when the run holds no backup, in a folder of its own after a `restore_saves`.
 
-`quicksave` and `quickload` refuse unless `CurrentGame.m_sCharacterID` is the file's career and the run holds a backup.
+Every run shares the save folder, so its `PENDING` is one file per save folder, in
+`%LOCALAPPDATA%\mele-mcp\scenario-pending\`, whatever the suite or report root. While it exists, no run takes a new
+backup: one of the same career is reused, since it still holds the saves from before any run changed them. One of
+another career, one that names no folder, or one an older `scenario.py` left in `<root>\<suite>\save-backup\` stops the
+run with exit 4 and says how to restore it.
+
+`quicksave` and `quickload` refuse unless `CurrentGame.m_sCharacterID` is the file's career and the run holds a backup
+that no restore has run on yet. After a `restore_saves`, a `backup_saves` step must come before the next one.
 `quicksave` ends when `<career>_QuickSave.pcsav` is rewritten and still for 1 s, or the game reports a finished save.
 
-A restore needs the game closed. It runs at the end of the run, by a `restore_saves` step after `close_game`, or later
-with `--restore-saves '<backup folder>'`. Changed files move to `<backup>\displaced\<stamp>\`. A `PENDING` backup of
-the same career is reused, and one of another career stops the run.
+A restore needs the game closed. It runs at the end of the run whenever a backup is held, by a `restore_saves` step
+after `close_game`, or later with `--restore-saves '<backup folder>'`. Changed files move to
+`<backup>\displaced\<stamp>\`, nothing is deleted. A later restore also moves out what was saved in play after the
+backup, and puts back that backup's `GamerProfile.pcsav`. Signals wait until a restore ends. Once every file checks out,
+the restore deletes the `PENDING` that names its backup, and only that one.
 
 ## The report
 

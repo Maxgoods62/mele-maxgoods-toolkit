@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json.Nodes;
 using LegendaryExplorerCore.Packages;
 using static MeleMcp.Core.YamlFiles;
@@ -14,7 +13,11 @@ public sealed record PlacedActor(string Path, string Class, string Tag, float X,
 public sealed record LivePlacement(string Action, PlacedActor? Actor, string? From, IReadOnlyList<string> Notes);
 
 /// <param name="Entry">The YAML entry written, as section.name.</param>
-public sealed record LiveSave(string File, string Entry, bool Added, IReadOnlyList<string> YamlChanges, PlacedActor Actor, LevelBuildResult? Build, IReadOnlyList<string> Notes);
+/// <param name="Build">The build's receipt; null when no build was asked for, or when it failed (<paramref name="BuildError"/>).</param>
+/// <param name="Backup">The YAML file as it was before this save (in the backups folder); null when the file did not change.</param>
+/// <param name="BuildError">Why the build failed. The YAML holds the actor's place by then, and keeps it.</param>
+public sealed record LiveSave(string File, string Entry, bool Added, IReadOnlyList<string> YamlChanges, PlacedActor Actor, LevelBuildResult? Build, IReadOnlyList<string> Notes,
+    string? Backup = null, string? BuildError = null);
 
 /// <summary>
 /// Places actors in the running game through MeleBridge: spawns copies of live actors, moves them, removes them, and writes where
@@ -77,30 +80,63 @@ public static class LivePlacer
         var location = new JsonObject { ["X"] = px, ["Y"] = py, ["Z"] = pz };
         var placed = new JsonObject { ["Pitch"] = rotation["Pitch"]!.GetValue<int>(), ["Yaw"] = units, ["Roll"] = rotation["Roll"]!.GetValue<int>() };
 
-        string path, action;
-        string? standIn = null;
-        if (template is not null)
+        // The copy Spawn made, once it exists: a failure after that removes it again, so a retry does not leave a second copy with
+        // the same tag, and the error names it.
+        var spawned = new List<string>(1);
+        try
         {
-            // Spawned where it goes, so nothing it does on spawn (touching volumes, falling) happens elsewhere.
-            (path, standIn) = Spawn(game, template, tag!, location, placed, notes);
-            action = "spawned";
-        }
-        else
-        {
-            path = objectPath!;
-            if (tag is not null) Set(game, path, "Tag", tag);
-            action = "moved";
-            if (Bool(game, path, "bStatic")) notes.Add("A static actor: its baked lighting and shadows stay where it was.");
-        }
-        Set(game, path, "Location", location.DeepClone());
-        Set(game, path, "Rotation", placed.DeepClone());
-        // Re-attaching the components moves what is drawn and what collides; a spawned copy's components are still where its template is.
-        Call(game, path, "ForceUpdateComponents", true, false);
-        if (template is not null) Uncover(game, path, notes);
+            string path, action;
+            string? standIn = null;
+            if (template is not null)
+            {
+                // Spawned where it goes, so nothing it does on spawn (touching volumes, falling) happens elsewhere.
+                (path, standIn) = Spawn(game, template, tag!, location, placed, notes, spawned);
+                action = "spawned";
+            }
+            else
+            {
+                path = objectPath!;
+                if (tag is not null) Set(game, path, "Tag", tag);
+                action = "moved";
+                if (Bool(game, path, "bStatic")) notes.Add("A static actor: its baked lighting and shadows stay where it was.");
+            }
+            Set(game, path, "Location", location.DeepClone());
+            Set(game, path, "Rotation", placed.DeepClone());
+            // Re-attaching the components moves what is drawn and what collides; a spawned copy's components are still where its template is.
+            Call(game, path, "ForceUpdateComponents", true, false);
+            if (template is not null) Uncover(game, path, notes);
 
-        if (from != "given") notes.Add(isPawn ? "At Shepard's height (a pawn's location is its middle)." : $"On the floor (Shepard's Z - {FloorBelowShepard}){(raise != 0 ? $", raised {raise}" : "")}.");
-        notes.Add("Lasts until the map reloads: live_save writes it into the level YAML.");
-        return new LivePlacement(action, Actor(game, path, standIn), from, notes);
+            if (from != "given") notes.Add(isPawn ? "At Shepard's height (a pawn's location is its middle)." : $"On the floor (Shepard's Z - {FloorBelowShepard}){(raise != 0 ? $", raised {raise}" : "")}.");
+            notes.Add("Lasts until the map reloads: live_save writes it into the level YAML.");
+            return new LivePlacement(action, Actor(game, path, standIn), from, notes);
+        }
+        catch (Exception e) when (spawned.Count > 0 && e is not OperationCanceledException)
+        {
+            throw Discard(game, spawned[0], tag!, e);
+        }
+    }
+
+    /// <summary>
+    /// The error for a failure after <paramref name="copy"/> was spawned, which is destroyed as live_remove would first (in the
+    /// DlcScaffold way: undo what this call made, then fail). The error says what became of it.
+    /// </summary>
+    private static Exception Discard(MEGame game, string copy, string tag, Exception failure)
+    {
+        string fate;
+        try
+        {
+            fate = Destroy(game, copy) == "removed"
+                ? $"The copy it had spawned, {copy} (tag {tag}), was removed again."
+                : $"The copy it had spawned, {copy} (tag {tag}), could not be destroyed: it is hidden without collision until the map reloads.";
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            // Whatever went wrong here, the first failure is the one to report.
+            fate = $"The copy it had spawned, {copy} (tag {tag}), is still in the game (removing it failed: {e.Message.TrimEnd('.')}): "
+                   + "live_remove it before you try again.";
+        }
+        var message = $"{failure.Message.TrimEnd('.')}. {fate}";
+        return failure is IOException ? new IOException(message, failure) : new InvalidOperationException(message, failure);
     }
 
     /// <summary>
@@ -112,22 +148,33 @@ public static class LivePlacer
         var chain = Chain(game, objectPath);
         if (!chain.Contains("Actor")) throw new ArgumentException($"{objectPath} is a {chain[0]}, not an actor.");
         if (Player(game).Pawn == objectPath) throw new ArgumentException("That is Shepard.");
+        return Destroy(game, objectPath) switch
+        {
+            "removed" => new LivePlacement("removed", null, null, []),
+            "shut down" => new LivePlacement("hidden", null, null, ["A level actor the engine won't destroy (bNoDelete): shut down (hidden, no collision) until the map reloads."]),
+            _ => new LivePlacement("hidden", null, null, ["A level actor the engine won't destroy (bStatic): hidden and without collision until the map reloads."]),
+        };
+    }
+
+    /// <summary>Kismet's Destroy action on the actor: "removed", "shut down" (bNoDelete: OnDestroy hid it), or "hidden" (bStatic: hidden here).</summary>
+    private static string Destroy(MEGame game, string objectPath)
+    {
         Call(game, objectPath, "OnDestroy", "Engine.Default__SeqAct_Destroy");
-        if (Bool(game, objectPath, "bDeleteMe")) return new LivePlacement("removed", null, null, []);
-        if (Bool(game, objectPath, "bNoDelete")) return new LivePlacement("hidden", null, null, ["A level actor the engine won't destroy (bNoDelete): shut down (hidden, no collision) until the map reloads."]);
+        if (Bool(game, objectPath, "bDeleteMe")) return "removed";
+        if (Bool(game, objectPath, "bNoDelete")) return "shut down";
 
         // SetCollision is an opcode native: the flags, then the components re-attached.
         Call(game, objectPath, "SetHidden", true);
         Set(game, objectPath, "bCollideActors", false);
         Set(game, objectPath, "bBlockActors", false);
         Call(game, objectPath, "ForceUpdateComponents", true, false);
-        return new LivePlacement("hidden", null, null, ["A level actor the engine won't destroy (bStatic): hidden and without collision until the map reloads."]);
+        return "hidden";
     }
 
     /// <summary>
     /// Writes a live actor's location and rotation into the level YAML entry with its tag (npcs, usables, props or lights); with none, adds
     /// a props entry copying the template. npcs and usables keep a yaw; props a yaw while upright, else a full rotation; lights a location
-    /// only. Then builds the level.
+    /// only. The YAML is backed up first. Then builds the level; a build that fails returns the save with its error, as the YAML keeps it.
     /// </summary>
     public static LiveSave Save(MEGame game, string yamlPath, string objectPath, string? name, string? template, bool build)
     {
@@ -185,11 +232,29 @@ public static class LivePlacer
                 if (standIn is not null) changes.Insert(0, standIn);
             }
         }
-        if (edited != text) File.WriteAllText(file, edited, new UTF8Encoding(false));
+        // Backed up, then written beside the file and moved over it (as editor_import and npc_place do): a crash mid-write leaves the
+        // old file whole, and the backup gives back the YAML from before this save.
+        var backup = edited != text ? EditorImport.WriteYaml(file, edited) : null;
+        if (backup is not null) notes.Add($"The YAML as it was before this save is backed up at {backup}.");
 
-        var result = build ? LevelBuilder.Build(game, file, null) : null;
+        LevelBuildResult? result = null;
+        string? buildError = null;
+        if (build)
+        {
+            try
+            {
+                result = LevelBuilder.Build(game, file, null);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // The YAML holds the actor's place by now: the receipt goes back with the failure.
+                buildError = e is PartialBuildException ? e.Message : $"{e.GetType().Name}: {e.Message}";
+                notes.Add($"The build failed {(backup is null ? "(the YAML had this place already)" : "after the YAML was written")}: {buildError} The file keeps "
+                          + $"{entry}'s place: fix the cause, then run level_build on it.");
+            }
+        }
         if (result is not null) notes.Add("Install the level (game closed: mod_install) to see it there after a reload; the live copy lasts until then.");
-        return new LiveSave(file, entry, added, changes, actor, result, notes);
+        return new LiveSave(file, entry, added, changes, actor, result, notes, backup, buildError);
     }
 
     /// <summary>{ package: BIOA_FRE31_00_LAY.pcc, actor: StaticMeshActor_12 }, or the bare actor name when it is in the level built.</summary>
@@ -206,14 +271,17 @@ public static class LivePlacer
     /// <summary>
     /// A copy of a live actor through Actor.Spawn with it as the template. Classes whose defaults are bStatic or bNoDelete (like
     /// StaticMeshActor, most meshes of a level) can't spawn, so a BioInert copied from the loaded maps shows the template's mesh instead.
+    /// The copy goes into <paramref name="copies"/> as soon as it exists, so the caller can remove it when a later step fails.
     /// </summary>
-    private static (string Path, string? StandIn) Spawn(MEGame game, string template, string tag, JsonObject location, JsonObject rotation, List<string> notes)
+    private static (string Path, string? StandIn) Spawn(MEGame game, string template, string tag, JsonObject location, JsonObject rotation, List<string> notes,
+        List<string> copies)
     {
         var cls = Get(game, template, "Class")!.GetValue<string>();
         var defaults = cls.Insert(cls.LastIndexOf('.') + 1, "Default__");
         if (!Bool(game, defaults, "bStatic") && !Bool(game, defaults, "bNoDelete"))
         {
             var spawned = Spawned(game, cls, tag, template, location, rotation);
+            copies.Add(spawned);
             // A placed actor is often bNoDelete (the engine checks the class, not the template); the copy can go again.
             if (Bool(game, spawned, "bNoDelete")) Set(game, spawned, "bNoDelete", false);
             return (spawned, null);
@@ -225,6 +293,7 @@ public static class LivePlacer
         var inert = Find(game, "BioInert", "TheWorld.PersistentLevel").FirstOrDefault(p => Get(game, p, "PlaceableMesh") is not null)
                     ?? throw new InvalidOperationException("No BioInert in the loaded maps to copy as a stand-in for a static mesh.");
         var standIn = Spawned(game, "SFXGame.BioInert", tag, inert, location, rotation);
+        copies.Add(standIn);
         var shown = Get(game, standIn, "PlaceableMesh")!.GetValue<string>();
         Call(game, shown, "SetStaticMesh", mesh, true);
         var materials = Get(game, component, "Materials") as JsonArray ?? [];

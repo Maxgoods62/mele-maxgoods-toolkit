@@ -61,7 +61,8 @@ DirectInput8 GetDeviceState, GetDeviceData: zeroed while open
 ```
 
 - Only the game thread touches game objects (`Editor.cpp`). The render thread (`Overlay.cpp`) reads a snapshot.
-- Game-thread work runs under `__try`. An access violation closes the editor, gives the pause back and logs the frames.
+- Game-thread work runs under `__try`. An access violation closes the editor, gives the pause back at the next tick and
+  logs the frames. F8 does not open the editor while the overlay has failed.
 - Sessions, `levels.json`, the catalog and thumbnails live in `%LOCALAPPDATA%\MeleBridge\LE1\`. `imgui.ini` is off,
   because it would land next to the game's executable.
 
@@ -87,7 +88,12 @@ restores it.
 - Input: a window-procedure subclass queues input for ImGui and swallows it while open. The game reads the mouse through
   buffered DirectInput, so `GetDeviceState` and `GetDeviceData` return nothing while open.
 - Cursor: the game calls `SetCursorPos` and `ClipCursor` every frame, so both are blocked while open. ImGui draws its
-  own cursor.
+  own cursor. The game's own clip comes back on close.
+- Overlay failure: the overlay is off for the game run when it can't start, or when a frame throws or faults. The game
+  gets its input and cursor back at once, and the game thread closes the editor at its next tick.
+- Swap chain: the overlay draws on the first one that presents. A new chain on the game's window takes over once the old
+  one has not presented for half a second; one of another D3D11 device turns the overlay off. Each frame checks the
+  view against the chain's back buffer.
 
 ### 3.4 Picking and the gizmo
 
@@ -97,6 +103,8 @@ restores it.
 - Gizmo: `ImGuizmo::Manipulate`, with matrices from the same frame's `CameraCache.POV`.
 - Moves write `Location`, `Rotation` and `DrawScale3D` raw, then call `ForceUpdateComponents`. `SetLocation` refuses
   `bStatic` actors, and blocking ones where they would overlap.
+- Each move, turn, scale and light-panel command names the selection it was built for. The overlay's snapshot is a tick
+  old, so the game thread drops one whose selection changed before it ran, for example by a pick in the same tick.
 
 ### 3.5 Prop catalog
 
@@ -128,7 +136,9 @@ restores it.
 - Props: `Actor.Spawn` of `Engine.DynamicSMActor_Spawnable` on the player controller, so it lands in the map's level,
   then `SetStaticMesh`. The mesh comes from memory, else from `DynamicLoadObject`.
 - A light environment computes only while the world ticks, so a prop spawned while paused would render black. After a
-  spawn the editor releases the pause for one world tick (`TickOnce`). The switch of §11.1 then runs.
+  spawn the editor releases the pause for one world tick (`TickOnce`). The switch of §11.1 then runs. When the game had
+  its own pause as the editor opened, no release happens and the status line says so: the world the game paused stays
+  paused, and a game unpause during the release would read as the editor's.
 - Tags: `ed_<mesh>_<run>_<n>`. `<run>` is a short stamp of the game run, so tags never repeat across runs.
 
 ### 3.7 Save and reload
@@ -251,12 +261,18 @@ A pass matches pending entries to actors of the persistent level and each `World
 - An unmatched spawn spawns again, with its mesh from memory, else `mesh.load`, else the catalog. A deleted spawn with
   no actor stays as a tombstone edit.
 - Rebinding: when a built copy with a spawn's tag shows up in a later pass, the spawned actor is destroyed and the edit
-  moves to the copy. An edit still equal to its entry is first judged against the copy by rules 1 and 2.
+  moves to the copy. An edit still equal to its entry is first judged against the copy by rules 1 and 2. A spawn the
+  engine won't destroy is hidden and left out of later passes, so it never passes for the copy.
+- When the copy's level unloads, the edit waits for it and spawns nothing. If that level loads again without any actor
+  of the tag, the copy is gone and the edit spawns again.
 - "Has a state" compares as `editor_import` does: location within 0.01 after rounding to 2 decimals, rotation as an
   orientation (axes within 0.02°), scales within 0.001.
 - Timing: a pass runs on the first tick after a load. It runs again when the set of loaded and visible levels changed
   and stayed the same for 0.5 s, editor open or not. It waits while a level is being added or removed, for at most 5 s.
-  A pass that faults isn't tried again until the level set changes.
+  A pass that faults runs again 5 s later, up to three faults in a row. After that it runs when an edit of an actor its
+  entries name asks for it (at most every 5 s), when `levels.json` changes, or when the level set changes.
+- A map change commits the new world only once its setup (levels, `levels.json`, session) ran to the end. A setup that
+  faults runs again at the next tick, up to three tries in all, and then the editor is off in that world.
 
 mele-mcp (`EditorImport.cs`, `YamlEdits.cs`):
 
@@ -387,7 +403,11 @@ and `lights`.
 
 ### 11.6 level_build
 
-Forks come first, because the map never names a file not written yet (`ForkBuilder`).
+Every check runs before the first write: the forks are made in memory, then the level, a new one too, is filled in
+memory, so a refusal or a bad entry writes nothing. The writes then go forks, level, `.m3cd`, `levels.json`, deleted
+forks, GlobalTlk. Forks come first, because the map never names a file not written yet (`ForkBuilder`). The level's
+description comes right after it, so a GlobalTlk that fails leaves it describing the level on disk; `BuildWrites` names
+what was written in the error.
 
 - The build copies the highest-mounted copy outside our DLC into memory and renames it. `PackageGUID` is the name's MD5,
   since two packages with one GUID are one package to the engine.
@@ -403,13 +423,19 @@ Forks come first, because the map never names a file not written yet (`ForkBuild
 
 Streaming renames the `LevelStreamingKismet` in place, because a second entry would stream both. Every
 `SeqAct_WaitForLevelsVisible`'s `LevelNames` follow: a wait for a name not streamed never finishes, and the squad never
-spawns.
+spawns. Entries are only added, so a file that leaves `streaming.levels` stays streamed: an entry naming its fork names
+the vanilla file again, and the fork is deleted once the level is saved. Only a name that is `ForkName(map, file)` of a
+file loaded outside our DLC counts as a fork, never the mod's own sub-levels. Only `StreamingLevels` counts: an entry off
+it (a pair's other name) keeps no fork. A changed `volume` is imported, and the volumes in the shape the build writes
+(one `Default` state over listed names) are removed with it.
 
 Lights go through `ApplyLight`. A light with the entry's tag is edited in place, else its template is copied. Every
 light gets `Location`, `Tag`, `CachedParentToWorld.WPlane`, the component's `bEnabled`,
 `bOnlyAffectSameAndSpecifiedLevels` false, and `Radius` and `Brightness` when given. A new copy gets new `LightGuid` and
 `LightmapGuid`. A `lights:` entry also gets the actor's `bEnabled`, `LightColor`, `FalloffExponent`, `CastShadows`
-false, `bForceDynamicLight` true and its kind's channels, and drops `OtherLevelsToAffect`. NPC lights are in §12.3.
+false, `bForceDynamicLight` true and its kind's channels, and drops `OtherLevelsToAffect`. NPC lights are in §12.3. A
+light whose channels are a kind's in full, found under an NPC, was a `lights:` entry: it takes its template's channels,
+`CastShadows`, `bForceDynamicLight` and, when it has none, `OtherLevelsToAffect` back.
 
 ### 11.7 editor_import
 
@@ -452,8 +478,9 @@ A light's kind comes from its source, read once when the editor tracks it. Chann
   light, else 2. A Phase 4 bridge would apply such an entry through its own writer, so it refuses version 3. Current
   readers take 1, 2 and 3. Dropping entries recomputes the version, and a version 1 file stays 1.
 - `levels.json` adds `npcs` and `characterLights` per level. It stays version 1, and readers skip unknown keys.
-- The bridge reads it on a map change and when its write time changes, checked on F8 and every 1000 ms while open,
-  because `npc_place` rebuilds the level while the map runs.
+- The bridge reads it on a map change and when its write time changes, checked on F8, before each re-apply pass (which
+  also runs with the editor closed) and every 1000 ms while open, because `npc_place` rebuilds the level while the map
+  runs.
 - Kismet set: every actor a loaded `SeqVar_Object.ObjValue` or `SeqVar_ObjectList.ObjList` names, rebuilt when first
   needed after a map change or a level turning visible. It reads only loaded levels, and the fork, which reads the whole
   file, has the last word.

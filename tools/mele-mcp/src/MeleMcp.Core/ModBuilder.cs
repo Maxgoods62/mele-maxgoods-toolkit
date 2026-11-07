@@ -45,20 +45,37 @@ public static class ModBuilder
 
         // Plot files first (one can create the plot package whose transitions the conversations run), then levels (one can
         // create the level a conversation lives in), then conversations (one can be created in that level), then the
-        // levels that could not start a conversation yet.
-        var plotResults = plots.Select(f => Named(f, () => PlotBuilder.Build(game, f, null, into))).ToList();
-        var levelResults = levels.Select(f => (File: f, Result: Named(f, () => LevelBuilder.Build(game, f, null, into)))).ToList();
-        var conversationResults = conversations.Select(f => Named(f, () => ConversationBuilder.Build(game, f, null, into))).ToList();
-        var again = levelResults.Where(l => l.Result.MissingConversations.Count > 0).Select(l => Named(l.File, () => LevelBuilder.Build(game, l.File, null, into))).ToList();
-        return new ModBuildResult(dir, into, plotResults, levelResults.Select(l => l.Result).ToList(), conversationResults, again, skipped);
+        // levels that could not start a conversation yet. One record of the files written for all of them: a failure in a
+        // later file names those of the files built before it too.
+        var writes = new BuildWrites();
+        return writes.Guard(() =>
+        {
+            var plotResults = plots.Select(f => Named(f, () => PlotBuilder.Build(game, f, null, into, writes), writes)).ToList();
+            var levelResults = levels.Select(f => (File: f, Result: Named(f, () => LevelBuilder.Build(game, f, null, into, writes), writes))).ToList();
+            var conversationResults = conversations.Select(f => Named(f, () => ConversationBuilder.Build(game, f, null, into, writes), writes)).ToList();
+            var again = levelResults.Where(l => l.Result.MissingConversations.Count > 0)
+                .Select(l => Named(l.File, () => LevelBuilder.Build(game, l.File, null, into, writes), writes)).ToList();
+            return new ModBuildResult(dir, into, plotResults, levelResults.Select(l => l.Result).ToList(), conversationResults, again, skipped);
+        });
     }
 
-    /// <summary>Errors name the file they come from; files built before it stay saved.</summary>
-    private static T Named<T>(string file, Func<T> build)
+    /// <summary>
+    /// Errors name the file they come from. Files built before it stay saved: once any file is written, the error is a
+    /// <see cref="PartialBuildException"/> that names each one and its backup.
+    /// </summary>
+    private static T Named<T>(string file, Func<T> build, BuildWrites? writes = null)
     {
         try
         {
             return build();
+        }
+        catch (PartialBuildException e)
+        {
+            // Every build here records into writes, so e.Written is that record already; the union keeps the earlier files named
+            // should a build keep a record of its own.
+            var all = (writes?.Written ?? []).Concat(e.Written).Distinct().ToList();
+            var failure = e.InnerException!;
+            throw new PartialBuildException(new InvalidOperationException($"{Path.GetFileName(file)}: {failure.Message}", failure), all);
         }
         catch (Exception e) when (e is ArgumentException or IOException or InvalidOperationException)
         {

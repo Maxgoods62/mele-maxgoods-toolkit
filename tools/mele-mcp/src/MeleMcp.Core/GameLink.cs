@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
 using LegendaryExplorerCore.Packages;
@@ -22,6 +23,29 @@ public static class GameLink
     private static readonly TimeSpan ReplyTimeout = TimeSpan.FromSeconds(3);
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
+    private const string LleOff = "LLE_DEACTIVATE", GpsOff = "DEACTIVATE_PLAYERGPS", Ready = "LIVELEVELEDITOR READY";
+
+    /// <summary>
+    /// What this server may have left in one game's LEX Interop ASI. Two modes stay on until their deactivate arrives: the live
+    /// level editor (LLE_TEST_ACTIVE) and the player GPS (ACTIVATE_PLAYERGPS). And replies carry no request id, so the late
+    /// reply to a request that timed out would answer the next request of its kind (the last actor's position read as this
+    /// one's). Read and changed only inside <see cref="Sequence{T}"/>, which holds the game's LEX Interop lock.
+    /// </summary>
+    private sealed class LinkState
+    {
+        /// <summary>
+        /// Deactivates still owed, sent first by the next sequence. Both at server start: a server ended by stop-server.ps1
+        /// (Stop-Process -Force) runs no finally, so what it turned on stays on. Sending one with its mode off does no harm: LEX
+        /// sends both whenever its Live Level Editor closes.
+        /// </summary>
+        public readonly HashSet<string> Owed = [LleOff, GpsOff];
+
+        /// <summary>A request timed out and its reply may still come: the next sequence fences first (<see cref="Fence"/>).</summary>
+        public bool Unsettled;
+    }
+
+    private static readonly ConcurrentDictionary<MEGame, LinkState> States = new();
+
     public static GameStatus Status(MEGame game)
     {
         var running = GameBridge.IsGameRunning(game);
@@ -35,9 +59,20 @@ public static class GameLink
         {
             try
             {
-                GameBridge.SendAndWait(game, "LLE_TEST_ACTIVE", m => m == "LIVELEVELEDITOR READY", ReplyTimeout);
-                GameBridge.Send(game, "LLE_DEACTIVATE");
-                replies = true;
+                replies = Sequence(game, state =>
+                {
+                    state.Owed.Add(LleOff);
+                    try
+                    {
+                        Ask(game, state, "LLE_TEST_ACTIVE", m => m == Ready, ReplyTimeout);
+                    }
+                    finally
+                    {
+                        // Also after a timeout: the commands reached the game, so the mode is on.
+                        Deactivate(game, state, LleOff);
+                    }
+                    return true;
+                });
             }
             catch (TimeoutException) { problem = "Commands reach the game but no reply came back."; }
         }
@@ -61,13 +96,15 @@ public static class GameLink
     /// The ASI reports the player's position on PlayerTick, but only when it changed since its last report. If Shepard has not
     /// moved since then, fall back to the last report this server saw.
     /// </summary>
-    public static PlayerLocation PlayerLocation(MEGame game)
+    public static PlayerLocation PlayerLocation(MEGame game) => Sequence(game, state =>
     {
         static bool IsGps(string m) => m.StartsWith("PATHFINDING_GPS PLAYERLOC=", StringComparison.Ordinal);
         string? reply;
         var fresh = true;
+        state.Owed.Add(GpsOff);
         try
         {
+            // Not Ask: no reply while Shepard stands still is how the GPS works, and a late report is still where he stood.
             reply = GameBridge.SendAndWait(game, "ACTIVATE_PLAYERGPS", IsGps, TimeSpan.FromSeconds(1.5));
         }
         catch (TimeoutException)
@@ -78,7 +115,7 @@ public static class GameLink
         }
         finally
         {
-            GameBridge.Send(game, "DEACTIVATE_PLAYERGPS");
+            Deactivate(game, state, GpsOff);
         }
 
         // PATHFINDING_GPS PLAYERLOC=x,y,z, PLAYERROT=pitch,yaw,roll
@@ -86,7 +123,7 @@ public static class GameLink
         var loc = parts[1]["PLAYERLOC=".Length..].Split(',', StringSplitOptions.RemoveEmptyEntries);
         var rot = parts.FirstOrDefault(p => p.StartsWith("PLAYERROT=", StringComparison.Ordinal))?["PLAYERROT=".Length..].Split(',') ?? ["0", "0", "0"];
         return new PlayerLocation(F(loc[0]), F(loc[1]), F(loc[2]), I(rot[0]), I(rot[1]), I(rot[2]), fresh);
-    }
+    });
 
     public static LiveActors Actors(MEGame game, string? levelContains, string? nameContains, string? tagContains, int limit)
     {
@@ -111,17 +148,20 @@ public static class GameLink
         return new LiveActors(levels, all.Count, matches.Count, matches.Take(limit).ToList());
     }
 
-    public static ActorState GetActor(MEGame game, string level, string actor)
+    public static ActorState GetActor(MEGame game, string level, string actor) => Sequence(game, state =>
     {
-        Select(game, level, actor);
-        return ReadSelected(game, level, actor);
-    }
+        Select(game, state, level, actor);
+        return ReadSelected(game, state, level, actor);
+    });
 
-    /// <summary>Moves, turns or hides one actor in the running game. Not saved: write the result into the package to keep it.</summary>
-    public static ActorState SetActor(MEGame game, string level, string actor, float? x, float? y, float? z, int? pitch, int? yaw, int? roll, bool? hidden)
+    /// <summary>
+    /// Moves, turns or hides one actor in the running game. Not saved: write the result into the package to keep it. The updates
+    /// go to the selected actor, so select, read and update are one sequence (<see cref="Sequence{T}"/>).
+    /// </summary>
+    public static ActorState SetActor(MEGame game, string level, string actor, float? x, float? y, float? z, int? pitch, int? yaw, int? roll, bool? hidden) => Sequence(game, state =>
     {
-        Select(game, level, actor);
-        var current = ReadSelected(game, level, actor);
+        Select(game, state, level, actor);
+        var current = ReadSelected(game, state, level, actor);
         if (x is not null || y is not null || z is not null)
         {
             GameBridge.Send(game, string.Create(Inv, $"LLE_UPDATE_ACTOR_POS {x ?? current.X} {y ?? current.Y} {z ?? current.Z}"));
@@ -134,8 +174,8 @@ public static class GameLink
 
         // Updates are queued for the game thread while position reads answer at once, so give the game a few frames.
         Thread.Sleep(300);
-        return ReadSelected(game, level, actor);
-    }
+        return ReadSelected(game, state, level, actor);
+    });
 
     /// <summary>
     /// Swaps a streamed level in the running game for a package file (e.g. the mod's library copy, not yet installed).
@@ -179,23 +219,91 @@ public static class GameLink
     }
 
     /// <summary>LLE_TEST_ACTIVE resets the ASI's level list, so its next HUD tick sends every visible level with its actors.</summary>
-    private static string ReadLevelsJson(MEGame game)
+    private static string ReadLevelsJson(MEGame game) => Sequence(game, state =>
     {
+        state.Owed.Add(LleOff);
         try
         {
-            var reply = GameBridge.SendAndWait(game, "LLE_TEST_ACTIVE",
+            var reply = Ask(game, state, "LLE_TEST_ACTIVE",
                 m => m.StartsWith("LIVELEVELEDITOR LEVELSUPDATE ", StringComparison.Ordinal), TimeSpan.FromSeconds(6));
             return reply["LIVELEVELEDITOR LEVELSUPDATE ".Length..];
         }
         finally
         {
-            GameBridge.Send(game, "LLE_DEACTIVATE");
+            Deactivate(game, state, LleOff);
+        }
+    });
+
+    /// <summary>
+    /// Runs requests that belong together (select an actor, then read or move it) with no other call's in between: one lock per
+    /// game, across threads and mele-mcp processes (<see cref="GameLock.ForLexInterop"/>), so another call's LLE_SELECT_ACTOR
+    /// cannot retarget this one's updates. Servers deployed before the lock take none. First sends the deactivates an earlier
+    /// call left owed, then fences when a request timed out.
+    /// </summary>
+    private static T Sequence<T>(MEGame game, Func<LinkState, T> body)
+    {
+        using var held = GameLock.ForLexInterop(game);
+        var state = States.GetOrAdd(game, _ => new LinkState());
+        foreach (var off in state.Owed.ToList()) Deactivate(game, state, off);
+        if (state.Unsettled) Fence(game, state);
+        return body(state);
+    }
+
+    /// <summary>A request whose reply answers it alone: a timeout leaves the link unsettled, so the next sequence fences first.</summary>
+    private static string Ask(MEGame game, LinkState state, string command, Func<string, bool> isReply, TimeSpan timeout)
+    {
+        try
+        {
+            return GameBridge.SendAndWait(game, command, isReply, timeout);
+        }
+        catch (TimeoutException)
+        {
+            state.Unsettled = true;
+            throw;
         }
     }
 
-    private static void Select(MEGame game, string level, string actor)
+    /// <summary>
+    /// After a timeout: LLE_TEST_ACTIVE, and its READY. The ASI runs its queue in order (console commands aside, see
+    /// GameBridge.MinGapMs), so a late reply to the request that timed out comes before this READY, and the requests sent after
+    /// it get their own replies. Not covered: when the READY that ends a fence answers an earlier LLE_TEST_ACTIVE that timed out,
+    /// the fence's own READY is still to come and can end the next fence too early. That takes two stalls in a row.
+    /// </summary>
+    private static void Fence(MEGame game, LinkState state)
     {
-        var reply = GameBridge.SendAndWait(game, $"LLE_SELECT_ACTOR {level} {actor} -1",
+        state.Owed.Add(LleOff);
+        try
+        {
+            GameBridge.SendAndWait(game, "LLE_TEST_ACTIVE", m => m == Ready, ReplyTimeout);
+        }
+        catch (TimeoutException e)
+        {
+            throw new TimeoutException($"An earlier request got no reply, and the game still does not answer. {e.Message}", e);
+        }
+        finally
+        {
+            Deactivate(game, state, LleOff);
+        }
+        state.Unsettled = false;
+    }
+
+    /// <summary>Sends a mode's deactivate; one that does not go out (game gone, pipe busy) stays owed. Never throws: it runs in finally blocks.</summary>
+    private static void Deactivate(MEGame game, LinkState state, string off)
+    {
+        try
+        {
+            GameBridge.Send(game, off);
+            state.Owed.Remove(off);
+        }
+        catch (Exception)
+        {
+            // Owed still: the next sequence sends it first.
+        }
+    }
+
+    private static void Select(MEGame game, LinkState state, string level, string actor)
+    {
+        var reply = Ask(game, state, $"LLE_SELECT_ACTOR {level} {actor} -1",
             m => m.StartsWith("LIVELEVELEDITOR ACTORSELECTED", StringComparison.Ordinal), ReplyTimeout);
         if (reply.EndsWith("NOTFOUND", StringComparison.Ordinal))
         {
@@ -203,10 +311,10 @@ public static class GameLink
         }
     }
 
-    private static ActorState ReadSelected(MEGame game, string level, string actor)
+    private static ActorState ReadSelected(MEGame game, LinkState state, string level, string actor)
     {
         // LIVELEVELEDITOR ACTORLOC x y z ACTORROT p y r ACTORSCALE s sx sy sz HIDDEN 0|1
-        var t = GameBridge.SendAndWait(game, "LLE_GET_ACTOR_POSDATA",
+        var t = Ask(game, state, "LLE_GET_ACTOR_POSDATA",
             m => m.StartsWith("LIVELEVELEDITOR ACTORLOC ", StringComparison.Ordinal), ReplyTimeout).Split(' ');
         int At(string key) => Array.IndexOf(t, key) is var i and >= 0 ? i : throw new FormatException($"'{key}' missing in position reply.");
         var (loc, rot, scale, hid) = (At("ACTORLOC"), At("ACTORROT"), At("ACTORSCALE"), At("HIDDEN"));

@@ -123,7 +123,7 @@ public static class ForkBuilder
         LecHost.EnsureInitialized();
         var name = file + ".pcc";
         bool Ours(string folder) => ownDlc is not null && Path.GetFileName(folder).Equals(ownDlc, StringComparison.OrdinalIgnoreCase);
-        if (MELoadedFiles.GetFilesLoadedInGame(game).TryGetValue(name, out var found) && !(DlcOf(found) is { } dlc && Ours(dlc))) return found;
+        if (GamePaths.LoadedFiles(game).TryGetValue(name, out var found) && !(DlcOf(found) is { } dlc && Ours(dlc))) return found;
         // Our DLC has a copy (it mounts above the others): the next one down, in mount order as the game loads them.
         string? below = null;
         var folders = MELoadedDLC.GetEnabledDLCFolders(game).OrderBy(d => MELoadedDLC.GetMountPriority(d, game)).Prepend(MEDirectories.GetBioGamePath(game));
@@ -145,7 +145,7 @@ public static class ForkBuilder
         LecHost.EnsureInitialized();
         var prefix = file + "_LOC_";
         var found = new List<(string Language, string Source)>();
-        var names = MELoadedFiles.GetFilesLoadedInGame(game).Keys.Select(Path.GetFileNameWithoutExtension).OfType<string>()
+        var names = GamePaths.LoadedFiles(game).Keys.Select(Path.GetFileNameWithoutExtension).OfType<string>()
             .Where(n => n.Length > prefix.Length && n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             .Order(StringComparer.OrdinalIgnoreCase);
         foreach (var name in names)
@@ -239,6 +239,10 @@ public static class ForkBuilder
     }
 
     private static string LocalizedPath(string forkPath, string fork, string language) => Path.Combine(Path.GetDirectoryName(forkPath)!, $"{fork}_LOC_{language}.pcc");
+
+    /// <summary>The files <see cref="Write"/> writes for a prepared fork: the fork, then each localized copy.</summary>
+    internal static IEnumerable<string> Targets(PreparedFork prepared) =>
+        prepared.Localized.Select(l => LocalizedPath(prepared.ForkPath, prepared.Fork, l.Language)).Prepend(prepared.ForkPath);
 
     /// <summary>The localized copies of a fork next to it (&lt;fork&gt;_LOC_*.pcc).</summary>
     private static IEnumerable<string> LocalizedCopies(string forkPath, string fork) =>

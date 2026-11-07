@@ -3,6 +3,7 @@
 #include "MeleBridge/SharedVersion.h"
 #include "Common/Objects.hpp"
 
+#include <format>
 #include <optional>
 
 // The status op (docs/formats.md §3.4): one cheap look at the running game, which an unattended test polls to tell when a load
@@ -123,20 +124,32 @@ namespace MeleBridge
 
         Cached Movie;
         /// After a scan that found no SFXLoadMovieManager: GetTickCount64 before which no scan runs again, so that polls during
-        /// a load don't scan GObjects each time.
+        /// a load don't scan GObjects each time. MovieScanned: when that scan ran.
         ULONGLONG NoMovieUntil = 0;
+        ULONGLONG MovieScanned = 0;
+        constexpr ULONGLONG MovieRescan = 5000;
 
-        json LoadingMovie()
+        /// Null when there is none, with a note that says whether this call looked or kept an earlier miss: a manager that came
+        /// since then shows only at the next scan.
+        json LoadingMovie(json& notes)
         {
             auto movie = Movie.Get();
             if (movie == nullptr)
             {
-                if (GetTickCount64() < NoMovieUntil) return nullptr;
+                auto const now = GetTickCount64();
+                if (now < NoMovieUntil)
+                {
+                    notes.push_back(std::format("loadingMovie: no SFXLoadMovieManager at the last look, {:.1f} s ago; looked for again in {:.1f} s",
+                                                static_cast<double>(now - MovieScanned) / 1000, static_cast<double>(NoMovieUntil - now) / 1000));
+                    return nullptr;
+                }
                 Movie = FindFirst(USFXLoadMovieManager::StaticClass(), L"");
                 movie = Movie.Object;
                 if (movie == nullptr)
                 {
-                    NoMovieUntil = GetTickCount64() + 5000;
+                    MovieScanned = now;
+                    NoMovieUntil = now + MovieRescan;
+                    notes.push_back(std::format("loadingMovie: no SFXLoadMovieManager in memory; looked for again in {:.1f} s", static_cast<double>(MovieRescan) / 1000));
                     return nullptr;
                 }
             }
@@ -245,7 +258,7 @@ namespace MeleBridge
         reply["pc"] = pc ? json(ToUtf8(PathOf(pc))) : json(nullptr);
         reply["pawn"] = pc ? section("pawn", [pc] { return GetProperty(pc, L"Pawn", 0); }) : json(nullptr);
 
-        reply["loadingMovie"] = section("loadingMovie", LoadingMovie);
+        reply["loadingMovie"] = section("loadingMovie", [&notes] { return LoadingMovie(notes); });
 
 #if MELEBRIDGE_PARTY_SELECT
         // The squad screen: GetPanelByTag('PartySelect') on the player's GUI manager (BioPlayerController's returns the

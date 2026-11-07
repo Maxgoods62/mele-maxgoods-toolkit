@@ -37,9 +37,11 @@ public sealed record MergeChange(string Entry, IReadOnlyList<MergeProperty>? Pro
 public sealed record MergeCheck(string File, string Entry, string Kind, string Detail, IReadOnlyList<ScriptMessage> Errors);
 
 /// <param name="Stage">check-failed: nothing written, M3 not involved. written: manifest written, compile not asked. compiled: .m3m written and listed in moddesc.ini.
-/// m3-error: M3 reported a failure. m3-timeout: M3 said nothing in time.</param>
+/// m3-error: M3 reported a failure. m3-timeout: M3 said nothing in time. At written, m3-error and m3-timeout the .m3m is not listed in moddesc.ini: one an earlier
+/// build listed is taken out (ModDescChanged), as this build saw no compile of its manifest and the .m3m on disk may be an earlier one.</param>
 /// <param name="Manifest">The manifest, in the mod's MergeMods folder; null at check-failed.</param>
 /// <param name="M3m">The compiled file; null unless Stage is compiled.</param>
+/// <param name="ModDescChanged">compiled: the .m3m was added to moddesc.ini. Any other stage: an earlier build's listing was taken out.</param>
 /// <param name="FeatureLevel">The mod's cmmver, passed to M3.</param>
 /// <param name="MergeModVersion">The .m3m format version in the file M3 wrote.</param>
 /// <param name="Log">M3 log lines of this compile.</param>
@@ -94,6 +96,22 @@ public static partial class MergeMods
 
     private sealed record Plan(string Stem, JsonObject Manifest, Dictionary<string, byte[]> Sources, bool FromChanges, double CmmVer, List<string> Notes);
 
+    /// <summary>
+    /// A plan <see cref="CheckAll"/> went through, which is what <see cref="Write"/> takes: the check finishes the manifest (entry names
+    /// normalized to instanced full paths, property types filled in, script text on a Class moved to addtoclassorreplace, array
+    /// literals moved into sources), so a manifest written before it would not be the one checked. Only <see cref="Of"/> makes one.
+    /// </summary>
+    private sealed class CheckedPlan
+    {
+        public Plan Plan { get; }
+        public List<MergeCheck> Checks { get; }
+        public bool Passed => Checks.All(c => c.Errors.Count == 0);
+
+        private CheckedPlan(Plan plan, List<MergeCheck> checks) => (Plan, Checks) = (plan, checks);
+
+        public static CheckedPlan Of(MEGame game, Plan plan) => new(plan, CheckAll(game, plan));
+    }
+
     public static MergeBuildResult Build(MEGame game, string modRoot, string? name, string? targetFile, IReadOnlyList<MergeChange>? changes, string? manifestPath,
         bool allLocalizations, bool compile, int timeoutSeconds)
     {
@@ -112,28 +130,64 @@ public static partial class MergeMods
         if (stem is null || !SafeName().IsMatch(stem)) throw new ArgumentException($"Merge mod name '{stem}': letters, digits, _ and - only.");
 
         var plan = manifestPath is null ? FromChanges(game, stem, targetFile, changes!, allLocalizations, cmm) : FromManifest(game, stem, manifestPath, cmm);
-        var checks = CheckAll(game, plan);
-        if (checks.Any(c => c.Errors.Count > 0)) return Result("check-failed");
+        var check = CheckedPlan.Of(game, plan);
+        var checks = check.Checks;
+        if (!check.Passed) return Result("check-failed");
 
         var folder = Path.Combine(root, FolderName);
         var manifest = Path.Combine(folder, stem + ".json");
         var m3m = Path.Combine(folder, stem + ".m3m");
-        Write(folder, manifest, plan);
-        if (!compile)
+        var listing = stem + ".m3m";
+        // Once the new manifest is written, the .m3m on disk is an earlier manifest's compile until M3 writes this one's, so every
+        // way out short of "compiled" takes it out of moddesc.ini: listed, the mod would install the old merge. A failure after a
+        // write names each file it changed (BuildWrites).
+        var writes = new BuildWrites();
+        return writes.Guard(() =>
         {
-            plan.Notes.Add("Not compiled, and not listed in moddesc.ini: M3 refuses a mod that lists a missing .m3m.");
-            return Result("written", manifest);
+            Write(folder, manifest, check, writes);
+            if (!compile) return NotCompiled("written", "Not compiled (compile=false).");
+
+            (string Stage, double Seconds, IReadOnlyList<string> Log) run;
+            try
+            {
+                run = RunM3(manifest, m3m, cmmVer, timeoutSeconds, plan.Notes);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Unlist();
+                throw;
+            }
+            if (run.Stage != "compiled") return NotCompiled(run.Stage, "Not compiled.", run.Seconds, run.Log);
+            var (backup, changed) = ListInModDesc(modDesc, listing);
+            if (changed) writes.Wrote(modDesc, backup);
+            return Result(run.Stage, manifest, m3m, changed, backup, run.Seconds, run.Log);
+        });
+
+        (string? Backup, bool Changed) Unlist()
+        {
+            var (backup, changed) = UnlistInModDesc(modDesc, listing);
+            if (changed) writes.Wrote(modDesc, backup);
+            return (backup, changed);
         }
 
-        var (stage, seconds, log) = RunM3(manifest, m3m, cmmVer, timeoutSeconds, plan.Notes);
-        if (stage != "compiled") return Result(stage, manifest, seconds: seconds, log: log);
-        var (backup, changed) = ListInModDesc(modDesc, stem + ".m3m");
-        return Result(stage, manifest, m3m, changed, backup, seconds, log);
+        MergeBuildResult NotCompiled(string outcome, string why, double seconds = 0, IReadOnlyList<string>? log = null)
+        {
+            var (backup, changed) = Unlist();
+            var onDisk = File.Exists(m3m);
+            plan.Notes.Add(changed
+                ? $"{why} {listing} is taken out of moddesc.ini [BASEGAME] mergemods (backup {backup}): "
+                  + (onDisk ? $"this build saw no compile of this manifest, so the {listing} on disk may be an earlier one, which the mod would install." : "M3 refuses a mod that lists a missing .m3m.")
+                  + " A build that compiles lists it again."
+                : $"{why} {listing} is not listed in moddesc.ini"
+                  + (onDisk ? $", so the mod does not install the {listing} on disk, which may be an earlier compile." : ": M3 refuses a mod that lists a missing .m3m.")
+                  + " A build that compiles lists it.");
+            return Result(outcome, manifest, modDescChanged: changed, modDescBackup: backup, seconds: seconds, log: log);
+        }
 
-        MergeBuildResult Result(string outcome, string? manifestFile = null, string? output = null, bool listed = false, string? modDescBackup = null, double seconds = 0, IReadOnlyList<string>? log = null)
+        MergeBuildResult Result(string outcome, string? manifestFile = null, string? output = null, bool modDescChanged = false, string? modDescBackup = null, double seconds = 0, IReadOnlyList<string>? log = null)
         {
             var (bytes, version) = output is null ? ((long?)null, (int?)null) : ReadHeader(output);
-            return new MergeBuildResult(outcome, root, stem, manifestFile, manifestFile is null ? [] : [.. plan.Sources.Keys], checks, output, bytes, version, cmmVer, listed, modDescBackup,
+            return new MergeBuildResult(outcome, root, stem, manifestFile, manifestFile is null ? [] : [.. plan.Sources.Keys], checks, output, bytes, version, cmmVer, modDescChanged, modDescBackup,
                 seconds, log ?? [], plan.Notes);
         }
     }
@@ -344,7 +398,9 @@ public static partial class MergeMods
     private static List<MergeCheck> CheckAll(MEGame game, Plan plan)
     {
         var checks = new List<MergeCheck>();
-        var loaded = MELoadedFiles.GetFilesLoadedInGame(game, true);
+        // The copy this install loads, through the one fresh-checked list every tool reads: a forced rescan here would change what
+        // the other tools resolve after a merge build.
+        var loaded = GamePaths.LoadedFiles(game);
         var scratch = Path.Combine(Path.GetTempPath(), $"mele-mcp-merge-{Guid.NewGuid():N}");
         try
         {
@@ -630,8 +686,10 @@ public static partial class MergeMods
         _ => "set",
     };
 
-    private static void Write(string folder, string manifest, Plan plan)
+    private static void Write(string folder, string manifest, CheckedPlan check, BuildWrites writes)
     {
+        if (!check.Passed) throw new InvalidOperationException($"{manifest} failed its check: it is not written.");
+        var plan = check.Plan;
         ConfigFiles.EnsureWritable(manifest);
         Directory.CreateDirectory(folder);
         foreach (var (name, bytes) in plan.Sources)
@@ -640,13 +698,15 @@ public static partial class MergeMods
             ConfigFiles.EnsureWritable(path);
             var exists = File.Exists(path);
             if (exists && File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes)) continue;
-            if (exists) PackageWriter.Backup(path);
+            var backup = exists ? PackageWriter.Backup(path) : null;
             File.WriteAllBytes(path, bytes);
+            writes.Wrote(path, backup);
         }
 
-        if (File.Exists(manifest)) PackageWriter.Backup(manifest);
+        var manifestBackup = File.Exists(manifest) ? PackageWriter.Backup(manifest) : null;
         var options = new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
         File.WriteAllText(manifest, plan.Manifest.ToJsonString(options), new UTF8Encoding(false));
+        writes.Wrote(manifest, manifestBackup);
     }
 
     /// <summary>Runs M3 and waits on its log and the output file. A running M3 takes the arguments from this second launch; it is never closed.</summary>
@@ -671,9 +731,10 @@ public static partial class MergeMods
             Thread.Sleep(500);
             log.Append(ModInstaller.ReadNew(offsets));
             var text = log.ToString();
-            // One size twice running: a big file can be seen while M3 writes it.
+            // One size twice running, and no handle left on the file: a big file can be seen while M3 writes it, and a write that
+            // stalls between two polls shows one size twice.
             var now = File.Exists(m3m) && File.GetLastWriteTimeUtc(m3m) > before ? new FileInfo(m3m).Length : 0L;
-            if (now > 0 && now == size)
+            if (now > 0 && now == size && Closed(m3m))
             {
                 stage = "compiled";
                 break;
@@ -703,6 +764,20 @@ public static partial class MergeMods
         return (stage, Math.Round((DateTime.UtcNow - started).TotalSeconds, 1), lines);
     }
 
+    /// <summary>Whether nothing has the file open: opened with no sharing, which fails while M3 (or anything else) still holds it.</summary>
+    private static bool Closed(string path)
+    {
+        try
+        {
+            using var _ = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
     private static (long Bytes, int? Version) ReadHeader(string m3m)
     {
         using var stream = File.OpenRead(m3m);
@@ -716,7 +791,7 @@ public static partial class MergeMods
     /// Adds the file to [BASEGAME] mergemods= with the file's bytes otherwise untouched, read as Latin-1 for that, and only ASCII added. M3 needs moddir in that
     /// section, and '.' when the job has no other files. Returns the backup, and whether the file changed.
     /// </summary>
-    private static (string? Backup, bool Changed) ListInModDesc(string modDesc, string file)
+    internal static (string? Backup, bool Changed) ListInModDesc(string modDesc, string file)
     {
         // Bytes, not ReadAllText, which would follow a BOM and undo the point of Latin-1.
         var text = Encoding.Latin1.GetString(File.ReadAllBytes(modDesc));
@@ -747,6 +822,55 @@ public static partial class MergeMods
                 if (Key("moddir") < 0) lines.Insert(insert++, "moddir = .");
                 else insert = Key("moddir") + 1;
                 lines.Insert(insert, $"mergemods = {file}");
+            }
+        }
+
+        var backup = PackageWriter.Backup(modDesc);
+        File.WriteAllBytes(modDesc, Encoding.Latin1.GetBytes(string.Join(eol, lines)));
+        return (backup, true);
+    }
+
+    /// <summary>
+    /// Takes the file out of [BASEGAME] mergemods=, the other way from <see cref="ListInModDesc"/> and as byte-careful: the line goes
+    /// when nothing is left on it, and the section when nothing but its moddir = . is left, as ListInModDesc writes both for a mod with
+    /// no other base game job. Returns the backup, and whether the file changed.
+    /// </summary>
+    internal static (string? Backup, bool Changed) UnlistInModDesc(string modDesc, string file)
+    {
+        var text = Encoding.Latin1.GetString(File.ReadAllBytes(modDesc));
+        var eol = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
+        var section = lines.FindIndex(l => l.Trim().Equals("[BASEGAME]", StringComparison.OrdinalIgnoreCase));
+        if (section < 0) return (null, false);
+        var end = lines.FindIndex(section + 1, l => l.TrimStart().StartsWith('['));
+        if (end < 0) end = lines.Count;
+        var at = lines.FindIndex(section + 1, end - section - 1, l => l.Split('=')[0].Trim().Equals("mergemods", StringComparison.OrdinalIgnoreCase) && l.Contains('='));
+        if (at < 0) return (null, false);
+        var listed = lines[at][(lines[at].IndexOf('=') + 1)..].Trim().Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (!listed.Contains(file, StringComparer.OrdinalIgnoreCase)) return (null, false);
+
+        var rest = listed.Where(l => !l.Equals(file, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (rest.Count > 0)
+        {
+            lines[at] = $"mergemods = {string.Join(';', rest)}";
+        }
+        else
+        {
+            lines.RemoveAt(at);
+            end--;
+            var body = lines.GetRange(section + 1, end - section - 1).Where(l => l.Trim().Length > 0).ToList();
+            var onlyModDir = body.Count == 0 || (body.Count == 1 && body[0].Contains('=') && body[0].Split('=')[0].Trim().Equals("moddir", StringComparison.OrdinalIgnoreCase)
+                                                  && body[0][(body[0].IndexOf('=') + 1)..].Trim() == ".");
+            if (onlyModDir)
+            {
+                lines.RemoveRange(section, end - section);
+                if (section == lines.Count)
+                {
+                    // The file's last section, where ListInModDesc appends it: the blank line before it goes too, and the file still
+                    // ends with a line break.
+                    while (section > 0 && lines[section - 1].Trim().Length == 0) lines.RemoveAt(--section);
+                    if (lines.Count > 0) lines.Add("");
+                }
             }
         }
 

@@ -26,7 +26,11 @@ internal static class LevelStreams
     /// <param name="others">For a file the level may have streamed under another name, that name: a vanilla file's fork, or a fork's
     /// vanilla file (docs/design/in-game-editor.md §11). Its streaming entry is renamed in place, since entries are only ever added: a second one would
     /// stay in StreamingLevels and stream both.</param>
-    internal static void SetStreaming(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, IReadOnlyDictionary<string, string> others, PackageCache cache, List<string> changes)
+    /// <returns>
+    /// The vanilla files that left <see cref="Spec.Levels"/> while the level streamed their fork: their entries name the vanilla file
+    /// again, so the caller deletes the fork once the level is saved.
+    /// </returns>
+    internal static List<string> SetStreaming(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, IReadOnlyDictionary<string, string> others, PackageCache cache, List<string> changes)
     {
         var world = pcc.FindExport("TheWorld") ?? throw new ArgumentException($"line {spec.Line}: the level has no TheWorld.");
         var worldInfo = WorldInfo(pcc, level);
@@ -34,6 +38,9 @@ internal static class LevelStreams
         var listDirty = false;
         ExportEntry? Streaming(string name) => pcc.Exports.FirstOrDefault(e => e.Parent == world && e.ClassName == "LevelStreamingKismet"
                                                                               && e.GetProperty<NameProperty>("PackageName")?.Value.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase) == true);
+        // Read before the list changes: a volume an earlier build copied shows only names the level lists (a changed 'volume', below).
+        var listedNames = Names(pcc, listed);
+        var builtVolumes = pcc.Exports.Where(e => e.Parent == level && e.ClassName == "BioTriggerStream" && IsBuiltVolume(e, listedNames)).ToList();
         foreach (var name in spec.Levels)
         {
             var streaming = Streaming(name);
@@ -62,6 +69,8 @@ internal static class LevelStreams
             listed.Add(new ObjectProperty(streaming));
             listDirty = true;
         }
+
+        var dropped = DropForks(game, pcc, listed, spec.Levels, Streaming, vanilla => $"{vanilla} left streaming.levels", changes, ref listDirty);
         if (listDirty) worldInfo.WriteProperty(listed);
 
         // Found again by its name: an import keeps the source's.
@@ -74,6 +83,13 @@ internal static class LevelStreams
             if (original.ClassName != "BioTriggerStream") throw new ArgumentException($"line {spec.Line}: {original.InstancedFullPath} is a {original.ClassName}, not a BioTriggerStream.");
             volume = Import(pcc, level, original);
             changes.Add($"stream volume (copy of {spec.Package} {original.ObjectName.Instanced})");
+            // A changed 'volume': the copy an earlier build made would go on showing its levels beside this one, in its own room.
+            foreach (var old in builtVolumes)
+            {
+                changes.Add($"stream volume {old.ObjectName.Instanced} removed (an earlier build's copy: the file's volume is {volume.ObjectName.Instanced} now)");
+                pcc.RemoveFromLevelActors(old);
+                EntryPruner.TrashEntryAndDescendants(old);
+            }
         }
         else if (volume.ClassName != "BioTriggerStream")
         {
@@ -98,6 +114,98 @@ internal static class LevelStreams
         infoProps.AddOrReplaceProp(new BoolProperty(true, "bPathsRebuilt"));
         infoProps.AddOrReplaceProp(new BoolProperty(true, "bHasPathNodes"));
         if (Write(worldInfo, infoProps)) changes.Add("has a path network (bPathsRebuilt, bHasPathNodes)");
+        return dropped;
+    }
+
+    /// <summary>
+    /// A YAML with no 'streaming' section (any more): every fork an earlier build streamed goes back to its vanilla name, as for a file
+    /// that left streaming.levels (<see cref="SetStreaming"/>). The list and the volumes stay as they are. Returns those vanilla files,
+    /// so the caller deletes their forks once the level is saved.
+    /// </summary>
+    internal static List<string> DropAllForks(MEGame game, IMEPackage pcc, ExportEntry level, List<string> changes)
+    {
+        if (pcc.FindExport("TheWorld") is not { } world
+            || pcc.Exports.FirstOrDefault(e => e.Parent == level && e.ClassName == "BioWorldInfo") is not { } worldInfo
+            || worldInfo.GetProperty<ArrayProperty<ObjectProperty>>("StreamingLevels") is not { Count: > 0 } listed) return [];
+        ExportEntry? Streaming(string name) => pcc.Exports.FirstOrDefault(e => e.Parent == world && e.ClassName == "LevelStreamingKismet"
+                                                                              && e.GetProperty<NameProperty>("PackageName")?.Value.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase) == true);
+        var listDirty = false;
+        var dropped = DropForks(game, pcc, listed, [], Streaming, _ => "the YAML has no streaming section", changes, ref listDirty);
+        if (listDirty) worldInfo.WriteProperty(listed);
+        return dropped;
+    }
+
+    /// <summary>
+    /// A file off <paramref name="keep"/> while the level streamed its fork: its entry stays in StreamingLevels, as any file's that left
+    /// (no volume shows it), under the vanilla name again, so the map no longer names the fork and the caller deletes it. Only a name
+    /// that is this map's fork of a file the game loads counts: a sub-level of the mod's own is never taken for one.
+    /// </summary>
+    private static List<string> DropForks(MEGame game, IMEPackage pcc, ArrayProperty<ObjectProperty> listed, IReadOnlyCollection<string> keep,
+        Func<string, ExportEntry?> streaming, Func<string, string> why, List<string> changes, ref bool listDirty)
+    {
+        var map = Path.GetFileNameWithoutExtension(pcc.FilePath);
+        var dropped = new List<string>();
+        foreach (var entry in listed.Select(o => o.ResolveToEntry(pcc)).OfType<ExportEntry>().Where(e => e.ClassName == "LevelStreamingKismet").Distinct().ToList())
+        {
+            if (entry.GetProperty<NameProperty>("PackageName")?.Value.Instanced is not { } name || keep.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+            var vanilla = ForkBuilder.Canonical(map, name);
+            if (vanilla.Equals(name, StringComparison.OrdinalIgnoreCase) || !ForkBuilder.ForkName(map, vanilla).Equals(name, StringComparison.OrdinalIgnoreCase)
+                || !LoadsVanilla(game, vanilla, pcc.FilePath)) continue;
+            if (streaming(vanilla) is { } own)
+            {
+                // Both names have an entry: the fork's leaves the list, and the vanilla file's is on it once.
+                foreach (var stale in listed.Where(o => o.Value == entry.UIndex).ToList()) listed.Remove(stale);
+                if (!listed.Any(o => o.Value == own.UIndex)) listed.Add(new ObjectProperty(own));
+                listDirty = true;
+            }
+            else entry.WriteProperty(new NameProperty(vanilla, "PackageName"));
+            changes.Add($"no longer streams {name} ({why(vanilla)})");
+            dropped.Add(vanilla);
+        }
+        return dropped;
+    }
+
+    /// <summary>
+    /// The names the level streams: the PackageName of each LevelStreamingKismet its StreamingLevels lists. An entry off the list (a
+    /// pair's other name that <see cref="SetStreaming"/> took off it) streams nothing, so it names no file the level needs.
+    /// </summary>
+    internal static HashSet<string> Streamed(IMEPackage pcc, ExportEntry level) =>
+        pcc.Exports.FirstOrDefault(e => e.Parent == level && e.ClassName == "BioWorldInfo")?.GetProperty<ArrayProperty<ObjectProperty>>("StreamingLevels") is { } listed
+            ? Names(pcc, listed)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    private static HashSet<string> Names(IMEPackage pcc, ArrayProperty<ObjectProperty> listed) =>
+        listed.Select(o => o.ResolveToEntry(pcc)).OfType<ExportEntry>().Select(e => e.GetProperty<NameProperty>("PackageName")?.Value.Instanced).OfType<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A stream volume in the shape <see cref="SetStreaming"/> writes: one state, Default, with only its VisibleChunkNames and the first
+    /// of them as InChunkName, each a name the level lists. Only that shape counts as an earlier build's copy, so a changed 'volume'
+    /// never removes a volume the build did not write.
+    /// </summary>
+    internal static bool IsBuiltVolume(ExportEntry volume, IReadOnlySet<string> listed)
+    {
+        if (volume.GetProperty<ArrayProperty<StructProperty>>("StreamingStates") is not { Count: 1 } states) return false;
+        var state = states[0];
+        var visible = state.GetProp<ArrayProperty<NameProperty>>("VisibleChunkNames");
+        return visible is { Count: > 0 } && state.Properties.Count(p => p is not NoneProperty) == 3
+               && state.GetProp<NameProperty>("StateName")?.Value.Instanced == "Default"
+               && state.GetProp<NameProperty>("InChunkName")?.Value.Instanced.Equals(visible[0].Value.Instanced, StringComparison.OrdinalIgnoreCase) == true
+               && visible.All(v => listed.Contains(v.Value.Instanced));
+    }
+
+    /// <summary>A file the game loads outside the level's own DLC folder: the vanilla file a fork of it copies (<see cref="ForkBuilder.VanillaSource"/>).</summary>
+    private static bool LoadsVanilla(MEGame game, string file, string package)
+    {
+        try
+        {
+            ForkBuilder.VanillaSource(game, file, ForkBuilder.DlcOf(package));
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

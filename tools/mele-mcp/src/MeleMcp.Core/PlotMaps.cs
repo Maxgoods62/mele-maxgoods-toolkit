@@ -54,22 +54,38 @@ public static partial class PlotMaps
         PackageWriter.EnsureWritable(game, full);
 
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        MEPackageHandler.CreateAndSavePackage(full, game);
-        using var pcc = MEPackageHandler.OpenMEPackage(full, forceLoadFromDisk: true);
-        var maps = new[] { "ConsequenceMap", "StateTransitionMap" }.Select(name =>
+        try
         {
-            var map = pcc.CreateExport(name, "BioStateEventMap", indexed: false);
-            map.ObjectFlags |= UnrealFlags.EObjectFlags.Public | UnrealFlags.EObjectFlags.Standalone;
-            map.WriteBinary(BioStateEventMap.Create());
-            return map;
-        }).ToList();
-        var referencer = pcc.CreateExport("CombinedStartupReferencer", "ObjectReferencer", indexed: false);
-        referencer.WriteProperty(new ArrayProperty<ObjectProperty>(maps.Select(m => new ObjectProperty(m)), "ReferencedObjects"));
-        pcc.Save();
+            MEPackageHandler.CreateAndSavePackage(full, game);
+            using var pcc = MEPackageHandler.OpenMEPackage(full, forceLoadFromDisk: true);
+            var maps = new[] { "ConsequenceMap", "StateTransitionMap" }.Select(name =>
+            {
+                var map = pcc.CreateExport(name, "BioStateEventMap", indexed: false);
+                map.ObjectFlags |= UnrealFlags.EObjectFlags.Public | UnrealFlags.EObjectFlags.Standalone;
+                map.WriteBinary(BioStateEventMap.Create());
+                return map;
+            }).ToList();
+            var referencer = pcc.CreateExport("CombinedStartupReferencer", "ObjectReferencer", indexed: false);
+            referencer.WriteProperty(new ArrayProperty<ObjectProperty>(maps.Select(m => new ObjectProperty(m)), "ReferencedObjects"));
+            pcc.Save();
 
-        var name = Path.GetFileNameWithoutExtension(full);
-        return new NewPlotMapsResult(full, name, pcc.Exports.Select(ExportInspector.Row).ToList(),
-            [$"PlotManagerStateTransitionMap1={name}.StateTransitionMap", $"PlotManagerConsequenceMap1={name}.ConsequenceMap"]);
+            var name = Path.GetFileNameWithoutExtension(full);
+            return new NewPlotMapsResult(full, name, pcc.Exports.Select(ExportInspector.Row).ToList(),
+                [$"PlotManagerStateTransitionMap1={name}.StateTransitionMap", $"PlotManagerConsequenceMap1={name}.ConsequenceMap"]);
+        }
+        catch (Exception)
+        {
+            // The file did not exist (refused above), so whatever is there now is this call's: an empty package without its
+            // maps would block every rerun (this refuses an existing file, and plot_build finds no map in it).
+            try
+            {
+                File.Delete(full);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+            }
+            throw;
+        }
     }
 
     /// <summary>

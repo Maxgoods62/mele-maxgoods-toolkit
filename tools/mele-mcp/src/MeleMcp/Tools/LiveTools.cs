@@ -15,7 +15,7 @@ public static class LiveTools
     private const string EditorGameParam = "Game: LE1 (the editor is built for LE1 only: LE2 and LE3 refuse).";
     private const string SaveGameParam = "Game: LE1 (the only game this tool handles).";
     private const string ObjectParam = "Object path as live_find returns it, e.g. BIOA_MYM01.TheWorld.PersistentLevel.BioPawn_3.";
-    private const string TimeoutParam = "Seconds to wait for the game thread.";
+    private const string TimeoutParam = "Seconds to wait for the game thread to take the request; one it has started gets 1.5 s more (MeleBridge 5), then the error says it may still complete.";
 
     [McpServerTool(Name = "live_find", ReadOnly = true),
      Description("Lists live objects in the running game (MeleBridge ASI): by class (subclasses too, any package), name and path filters. "
@@ -118,7 +118,8 @@ public static class LiveTools
      Description("One cheap look at the running game (MeleBridge ASI 3 or later): map, its BioWorldInfo (begunPlay, bPlayersOnly, the "
                  + "focus-loss pause flag), player controller and pawn, streaming levels still loading or changing visibility, the "
                  + "loading movie (null when no SFXLoadMovieManager exists; inLoad null on LE2 and LE3), the squad screen (partySelectOpen, "
-                 + "its handler, the movie's member count; null on LE3) and the keep_ticking switch with its counters. Times out while a "
+                 + "its handler, the movie's member count; null on LE3) and the keep_ticking switch with its counters and gameStarted (the "
+                 + "game process's start time, MeleBridge 5: the switch is off at every game start). Times out while a "
                  + "map loads: the game thread runs no script then.")]
     public static JsonObject LiveStatus(
         [Description(GameParam)] string game,
@@ -129,7 +130,7 @@ public static class LiveTools
      Description("Test switch (MeleBridge ASI 3 or later), off by default and again at every game start. While on, the game does not pause its "
                  + "world and Kismet when its window loses focus (BioWorldInfo.Tick's focus pause); real pauses (menus, squad screen, "
                  + "photo mode, the F8 editor) are untouched. Turning it on also ends a focus pause already in place. Omit 'on' to read "
-                 + "it. Returns the switch and its counters. LE2 and LE3 hold m_bAllowBrowserWheel off for each Tick "
+                 + "it. Returns the switch, its counters and gameStarted (the game process's start time, MeleBridge 5). LE2 and LE3 hold m_bAllowBrowserWheel off for each Tick "
                  + "instead of raising LE1's timer.")]
     public static JsonObject LiveKeepTicking(
         [Description(GameParam)] string game,
@@ -184,8 +185,10 @@ public static class LiveTools
 
     [McpServerTool(Name = "live_watch", ReadOnly = true),
      Description("Records ProcessEvent calls of functions for a while (MeleBridge ASI): time, object, class and parameters. Events, "
-                 + "delegates and timers go through ProcessEvent; script-to-script calls and natives called from script do not. E.g. "
-                 + "Engine.SequenceOp.Activated (script Kismet actions), Engine.Actor.Touch, Engine.Actor.Destroyed.")]
+                 + "delegates and timers go through ProcessEvent; script-to-script calls and natives called from script do not. Calls made "
+                 + "while MeleBridge runs a request (live_call's function and what it calls through ProcessEvent before it returns, "
+                 + "live_console's command, live_status's reads) and the F8 editor's own calls are not recorded; what they set off later is "
+                 + "(the result's note says so). E.g. Engine.SequenceOp.Activated (script Kismet actions), Engine.Actor.Touch, Engine.Actor.Destroyed.")]
     public static LiveEvents LiveWatch(
         [Description(GameParam)] string game,
         [Description("Function paths, e.g. [\"Engine.SequenceOp.Activated\"]; \"Class.Function\" matches any package.")] string[] functions,

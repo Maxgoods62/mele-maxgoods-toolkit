@@ -2,7 +2,8 @@
 # Rendered from mele-maxgoods-toolkit tools/release-kit. Change it there; a hand edit here fails kit.sh check.
 # Locks the GitHub repo for releases. Run it once, right after the repo goes public and before the first release tag:
 # GitHub refuses rulesets and Pages on a free account's private repo, and immutability covers only the releases published
-# after it is on. Safe to run again. Needs gh, logged in as the repo's admin.
+# after it is on. A hosted repo's release job publishes nothing until the tag rulesets below exist. Safe to run again.
+# Needs gh, logged in as the repo's admin.
 #   scripts/protect-repo.sh [owner/repo]
 # Repo settings in mele-maxgoods-toolkit's docs/releasing.md says what each setting stops.
 set -euo pipefail
@@ -16,6 +17,8 @@ if [[ "$(gh api "repos/$REPO" --jq .private)" != false ]]; then
     exit 1
 fi
 
+# Before the tag rulesets: the release job's token can't read this setting, so it takes those rulesets as the sign
+# that this line ran.
 gh api -X PUT "repos/$REPO/immutable-releases" > /dev/null
 echo "immutable releases: on"
 

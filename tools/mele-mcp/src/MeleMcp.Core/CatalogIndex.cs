@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Unreal;
 using LegendaryExplorerCore.Unreal.BinaryConverters;
@@ -85,7 +84,9 @@ public sealed class CatalogIndex
     {
         if (!game.IsGame1()) throw new ArgumentException("The prop catalog handles Game 1 (LE1).");
         LecHost.EnsureInitialized();
-        var files = MELoadedFiles.GetFilesLoadedInGame(game)
+        // Checked for freshness first (GamePaths.LoadedFiles): the signature below hashes only the files the list names, so a stale
+        // list would serve the index of the files installed before.
+        var files = GamePaths.LoadedFiles(game)
             .Where(kv => kv.Key.EndsWith(".pcc", StringComparison.OrdinalIgnoreCase))
             .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
             .ToList();

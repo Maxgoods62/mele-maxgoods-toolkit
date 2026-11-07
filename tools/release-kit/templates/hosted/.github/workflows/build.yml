@@ -2,7 +2,8 @@ name: Build
 
 # Rendered from mele-maxgoods-toolkit tools/release-kit. Change it there; a hand edit here fails kit.sh check.
 # A push to main builds the zips and publishes them as "latest" on GitHub Pages. A vN or vN.M tag builds them and
-# publishes that release. Pull requests don't start this workflow, so it never builds outside code.
+# publishes that release, once scripts/protect-repo.sh has locked the repo; on a private repo the tag stops at a draft.
+# Pull requests don't start this workflow, so it never builds outside code.
 # mele-maxgoods-toolkit's docs/releasing.md has the rules.
 on:
   push:
@@ -92,7 +93,43 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
+    # A tag goes: draft, checked, signed, published. A failed run can stop between any two, so each step reads from
+    # GitHub where an earlier run of the tag stopped, and the tag gets one signed set of zips, the one published.
     steps:
+      # The job's token can't read the immutable-releases setting: GitHub shows it to admins only, and a workflow token
+      # can't get admin read. protect-repo.sh writes the tag rulesets only after it has turned immutability on, so here
+      # the rulesets, which the token can read, stand for it. "Check the published release" reads the release's own
+      # immutable flag. protect-repo.sh refuses a private repo, as GitHub refuses rulesets on a free account's private
+      # repo, so there the job stops at a checked draft and publishes nothing.
+      - name: Refuse a public repo that protect-repo.sh has not locked
+        id: repo
+        run: |
+          # Read now, not from the push event: a re-run keeps the event of a tag pushed while the repo was private.
+          private="$(gh api "repos/$GH_REPO" --jq .private)"
+          echo "private repo: $private"
+          [[ "$private" == true || "$private" == false ]]
+          echo "private=$private" >> "$GITHUB_OUTPUT"
+          if [[ "$private" == true ]]; then exit 0; fi
+          # locked <name> <rule types as a JSON array>: the ruleset is on and holds those rules for every v* tag.
+          locked() {
+            local id
+            id="$(gh api "repos/$GH_REPO/rulesets?targets=tag&per_page=100" \
+                --jq "[.[] | select(.name == \"$1\")][0].id // empty")"
+            [[ "$id" =~ ^[0-9]+$ ]] && [[ "$(gh api "repos/$GH_REPO/rulesets/$id" --jq "
+              .enforcement == \"active\" and .target == \"tag\"
+              and (.conditions.ref_name.include | any(. == \"refs/tags/v*\"))
+              and ((.conditions.ref_name.exclude // []) | length) == 0
+              and ($2 - [.rules[].type] | length) == 0")" == true ]]
+          }
+          for set in 'release tags are final|["update", "deletion", "non_fast_forward"]' \
+              'only admins create release tags|["creation"]'; do
+            if ! locked "${set%%|*}" "${set#*|}"; then
+              echo "::error::no ruleset '${set%%|*}' as protect-repo.sh writes it: run it, then re-run"
+              exit 1
+            fi
+          done
+          echo "tag rulesets: on"
+
       # Before anything is signed: a re-run of a released tag would sign rebuilt zips nobody published, and those would
       # pass gh attestation verify. Only a 404 goes on, so a failed lookup stops here too.
       - name: Refuse a tag that already has a release
@@ -110,25 +147,188 @@ jobs:
         working-directory: dist
         run: sha256sum --check --strict SHA256SUMS
 
-      # GitHub offers attestations on a free account's public repos only.
+      # releases/tags/ shows published releases only, so drafts are found in the list. A draft whose zips are signed
+      # was left by a run that failed after signing: it is the tag's signed set, so the job publishes it as it is, not
+      # this run's zips. A draft with no signed zip is a leftover and goes. Only a 404 means "not signed".
+      - name: Make the draft, or take the signed one an earlier run left
+        id: draft
+        env:
+          PRIVATE: ${{ steps.repo.outputs.private }}
+        run: |
+          drafts() {
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+                --jq ".[] | select(.draft and .tag_name == \"$TAG\") | .id"
+          }
+          # signed <digest> prints how many provenance records this repo holds for the file.
+          signed() {
+            local n
+            if n="$(gh api "repos/$GH_REPO/attestations/$1?predicate_type=provenance&per_page=1" \
+                --jq '.attestations | length' 2> err)"; then
+              echo "$n"
+            elif grep -qF '(HTTP 404)' err; then
+              echo 0
+            else
+              cat err >&2
+              return 1
+            fi
+          }
+          # trusted <draft id>: a record for the same bytes is not enough to publish a draft as it is (another tag's
+          # release, a latest build of main, another workflow of the repo). The draft must be this job's own, made with
+          # its token, and each zip must verify as signed by this workflow for this tag, as docs/releasing.md checks it.
+          trusted() {
+            local author assets aid name dir="resume-$1"
+            author="$(gh api "repos/$GH_REPO/releases/$1" --jq .author.login)" || return 1
+            if [[ "$author" != "github-actions[bot]" ]]; then
+              echo "::error::draft $1 of $TAG holds signed zips but $author made it, not this workflow:" \
+                  "check it, delete it, then re-run"
+              return 1
+            fi
+            assets="$(gh api "repos/$GH_REPO/releases/$1" \
+                --jq '.assets[] | select(.name | endswith(".zip")) | "\(.id) \(.name)"')" || return 1
+            [[ -n "$assets" ]] || return 1
+            mkdir "$dir"
+            while read -r aid name; do
+              if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+                echo "::error::draft $1 has a file named '$name'"
+                return 1
+              fi
+              gh api -H 'Accept: application/octet-stream' "repos/$GH_REPO/releases/assets/$aid" > "$dir/$name" \
+                  || return 1
+              if ! gh attestation verify "$dir/$name" --repo "$GH_REPO" --source-ref "refs/tags/$TAG" \
+                  --signer-workflow "$GH_REPO/.github/workflows/build.yml" --deny-self-hosted-runners > /dev/null; then
+                echo "::error::$name in draft $1 is not signed by this workflow for $TAG:" \
+                    "check the draft, delete it, then re-run"
+                return 1
+              fi
+            done <<< "$assets"
+          }
+          ids="$(drafts)"
+          signed_id="" leftovers=""
+          for id in $ids; do
+            zips=0 ok=0
+            # Nothing is signed on a private repo, so each of its drafts is a leftover.
+            if [[ "$PRIVATE" == false ]]; then
+              digests="$(gh api "repos/$GH_REPO/releases/$id" \
+                  --jq '.assets[] | select(.name | endswith(".zip")) | .digest // "none"')"
+              for digest in $digests; do
+                zips=$((zips + 1))
+                if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  echo "::error::draft $id has a zip with no digest"
+                  exit 1
+                fi
+                n="$(signed "$digest")" || exit 1
+                if (( n > 0 )); then ok=$((ok + 1)); fi
+              done
+            fi
+            if (( ok == 0 )); then
+              leftovers="$leftovers $id"
+            elif (( ok < zips )); then
+              echo "::error::only $ok of the $zips zips in draft $id of $TAG are signed: sort it out by hand"
+              exit 1
+            elif [[ -n "$signed_id" ]]; then
+              echo "::error::drafts $signed_id and $id of $TAG both hold signed zips: delete one, then re-run"
+              exit 1
+            else
+              trusted "$id" || exit 1
+              signed_id="$id"
+            fi
+          done
+          for id in $leftovers; do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+            echo "deleted draft $id: a leftover with no signed zip"
+          done
+          if [[ -n "$signed_id" ]]; then
+            echo "::notice::publishing draft $signed_id as it is: an earlier run signed its zips"
+            { echo "id=$signed_id"; echo "resumed=true"; echo "sign=false"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release create "$TAG" dist/*.zip dist/SHA256SUMS --draft --verify-tag \
+              --title "@TITLE@ $TAG" --notes-file dist/release-notes.md
+          ids="$(drafts)"
+          [[ "$ids" =~ ^[0-9]+$ ]] || { echo "::error::expected one draft of $TAG, found: $ids"; exit 1; }
+          if [[ "$PRIVATE" == false ]]; then sign=true; else sign=false; fi
+          { echo "id=$ids"; echo "resumed=false"; echo "sign=$sign"; } >> "$GITHUB_OUTPUT"
+
+      # Before anything is signed or published: what the draft holds now is what gets signed and, once published,
+      # can't change. Its files are downloaded back, not trusted from dist/.
+      - name: Check the draft's files against its SHA256SUMS
+        env:
+          DRAFT: ${{ steps.draft.outputs.id }}
+          RESUMED: ${{ steps.draft.outputs.resumed }}
+        run: |
+          assets="$(gh api "repos/$GH_REPO/releases/$DRAFT" --jq '.assets[] | "\(.id) \(.name)"')"
+          [[ -n "$assets" ]] || { echo "::error::draft $DRAFT holds no files"; exit 1; }
+          mkdir draft
+          while read -r aid name; do
+            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::draft $DRAFT has a file named '$name'"
+              exit 1
+            fi
+            gh api -H 'Accept: application/octet-stream' "repos/$GH_REPO/releases/assets/$aid" > "draft/$name"
+          done <<< "$assets"
+          cd draft
+          [[ -f SHA256SUMS ]] || { echo "::error::draft $DRAFT has no SHA256SUMS"; exit 1; }
+          # The draft holds SHA256SUMS and the files it lists, nothing more and nothing less.
+          diff <(ls | sort) <({ echo SHA256SUMS; sed -E 's/^[0-9a-f]{64} [ *]//' SHA256SUMS; } | sort)
+          sha256sum --check --strict SHA256SUMS
+          # A re-run of only this job takes the same build, so a signed draft can hold this run's files too.
+          if ! cmp -s ../dist/SHA256SUMS SHA256SUMS; then
+            [[ "$RESUMED" == true ]] || { echo "::error::draft $DRAFT does not hold this build's files"; exit 1; }
+            {
+              echo '### SHA-256 of the release'
+              echo "Draft $DRAFT holds the zips an earlier run of $TAG built and signed: they differ from the"
+              echo "hashes above, and this run's pdb artifact doesn't match their ASI."
+              echo '```'
+              cat SHA256SUMS
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # GitHub offers attestations on a free account's public repos only. It signs the files checked on the draft, once
+      # per tag: a draft an earlier run signed is published as it is.
       - name: Sign the zips' provenance
-        if: ${{ !github.event.repository.private }}
+        if: steps.draft.outputs.sign == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: dist/*.zip
+          subject-path: draft/*.zip
 
-      # gh uploads to a draft and publishes it last, as immutable releases need.
-      - name: Publish the release
-        run: >
-          gh release create "$TAG" dist/*.zip dist/SHA256SUMS --verify-tag
-          --title "@TITLE@ $TAG" --notes-file dist/release-notes.md
+      - name: Publish the draft
+        if: steps.repo.outputs.private == 'false'
+        env:
+          DRAFT: ${{ steps.draft.outputs.id }}
+        run: gh api -X PATCH "repos/$GH_REPO/releases/$DRAFT" -F draft=false --silent
 
-      - name: Check what was published against the build's hashes
+      # Too late to change anything: this only tells. It is the first point where the job can read whether
+      # immutability was on, and the files must be the ones checked on the draft.
+      - name: Check the published release
+        if: steps.repo.outputs.private == 'false'
+        env:
+          DRAFT: ${{ steps.draft.outputs.id }}
         run: |
-          gh release download "$TAG" --dir published
-          cmp dist/SHA256SUMS published/SHA256SUMS
-          cd published
-          sha256sum --check --strict SHA256SUMS
+          for try in 1 2 3 4 5 6; do
+            state="$(gh api "repos/$GH_REPO/releases/$DRAFT" --jq '"draft=\(.draft) immutable=\(.immutable)"')"
+            if [[ "$state" == "draft=false immutable=true" ]]; then break; fi
+            sleep 5
+          done
+          echo "$state"
+          [[ "$state" == draft=false* ]] || { echo "::error::$TAG is still a draft"; exit 1; }
+          if [[ "$state" != *immutable=true ]]; then
+            echo "::error::$TAG is published but not immutable, so its files can still change." \
+                "Turn immutable releases back on with scripts/protect-repo.sh before the next tag"
+            exit 1
+          fi
+          gh api "repos/$GH_REPO/releases/$DRAFT" \
+              --jq '.assets[] | "\(.digest | ltrimstr("sha256:"))  \(.name)"' | sort > published.sums
+          (cd draft && sha256sum -- *) | sort > checked.sums
+          diff checked.sums published.sums
+
+      - name: Stop at the draft on a private repo
+        if: steps.repo.outputs.private == 'true'
+        env:
+          DRAFT: ${{ steps.draft.outputs.id }}
+        run: >
+          echo "::notice::private repo: draft $DRAFT of $TAG is checked and stays a draft. Delete it and its tag before
+          the repo goes public: gh release delete $TAG --cleanup-tag"
 
   # Pages, not a release: an immutable release can't take new files, and its tag can't be used twice.
   latest:

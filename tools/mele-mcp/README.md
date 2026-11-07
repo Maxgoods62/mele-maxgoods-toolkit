@@ -55,7 +55,7 @@ tool takes all three with no guard. [docs/games.md](../../docs/games.md) records
 | Tool | Purpose | Games |
 |---|---|---|
 | `le_status` | Reports the LEC version, the LE folder and its source, all three game paths and Oodle. | No `game` parameter |
-| `le_refresh_files` | Forgets the cached file list, for an install that `mod_install` did not run. | No `game` parameter |
+| `le_refresh_files` | Forgets the cached file list. Lookups rescan it themselves when a DLC folder, mount file or cooked folder changes; this covers a file added in a cooked subfolder. | No `game` parameter |
 | `le_find_file` | Names the copy of a file the game loads, and why each other copy loses. | All three |
 
 On LE1, `le_find_file` emulates the installed AutoTOC ASI, which writes the file table the game reads, and compares with
@@ -146,7 +146,7 @@ with `script_compile`.
 | `plot_build` | Builds a DLC plot package from a YAML file, with journal text. | LE1 only |
 | `quest_map_get` | Reads a journal map. LE2 and LE3 also read the codex map, `DataCodexMap`. | All three |
 | `quest_set` | Adds, replaces or removes one journal quest and its evaluations. | LE1 only |
-| `id_alloc` | Finds free plot, quest or string ids, or checks given ones, and names each user. | LE1 only |
+| `id_alloc` | Finds free plot, quest or string ids, or checks given ones, and names each user. Reserves the free ids it returns for its `owner`, so other calls skip them. | LE1 only |
 | `cnd_get` | Reads a `.cnd` conditionals file: its ids, one entry, or all of them. | LE3 only |
 | `cnd_set` | Compiles one conditional into a mod's `.cnd`, with a backup when the file exists. | LE3 only |
 
@@ -169,7 +169,7 @@ Kismet is the engine's visual scripting system, stored in packages as sequences.
 | `mod_check` | Checks a mod's built files in M3's library before an install. | LE1 only |
 | `mod_install` | Installs a mod through M3, then compares its `[CUSTOMDLC]` files with the installed copies. | All three |
 | `dlc_new` | Starts a mod in an empty folder: `moddesc.ini`, DLC folder, `Mount.dlc`, `.tlk` files, config. | LE2, LE3 |
-| `mergemod_build` | Builds an M3 merge mod (`.m3m`), the route to patch core files, and lists it in `moddesc.ini`. | All three |
+| `mergemod_build` | Builds an M3 merge mod (`.m3m`), the route to patch core files, and lists it in `moddesc.ini`. A build that does not compile takes it out. | All three |
 
 - On LE1, M3's DLC Mod Starter Kit starts a mod, and `mod_build` fills it. `dlc_new` starts an LE2 or LE3 mod and
   refuses LE1.
@@ -273,6 +273,11 @@ its other steps differ:
 | Console route | LEX Interop | MeleBridge |
 | Load from the menu | `loadSlot` n, through `BioLoadGame <n>`: `BioSaveGame<n>.sav`, made once in game with the console's `BioSaveGame <n>` | `loadLatest`, the latest save only, through `QuickLoad` |
 | `mod_check` before the install | Yes, unless `check` is false | Skipped |
+| Commands after a map load | Sent once MeleBridge's status says the load ended, then `settleSeconds`. Without MeleBridge, after `settleSeconds` only: LEX Interop drops a command sent during a load and nothing says so | Sent once MeleBridge's status says the load ended, then `settleSeconds`. A command refused during a load goes again once |
+
+The game is booted only once the install is verified. A game that closes after the boot ends the cycle at once, with
+the phase it closed in. `game_cycle`, `game_close` and `mod_install` refuse, after 5 s, while another call runs one of
+them on the same game, from any session's server. Installs and boots through M3 also wait for each other.
 
 On LE1 a career save is not a slot, so it goes through `commands`:
 `nextframedefer loadgame <Career>_QuickSave DevId=-1`, with `waitForMap`. `game_plot` uses MeleBridge when it is there,
@@ -313,16 +318,18 @@ small mod that builds.
 
 ## Write rule
 
-Package writes go through `PackageWriter.Edit`, which guards, changes, backs up and saves. The guard refuses any file
+Package writes go through `PackageWriter.Edit`, which guards, changes, backs up and saves. `level_build` takes the same
+steps itself, so it checks its forks and the level, a new one too, before it saves any of them. The guard refuses any file
 inside the Legendary Edition folder or the game path. It compares spellings, then what the path is on disk, so shares,
 junctions and volume names are caught too. It does not see a hard link to a game file.
 
 A file name can resolve to another mod's installed copy. Edit the mod's copy in M3's library, then run `mod_install`.
-Backups go to `%LOCALAPPDATA%\mele-mcp\backups` as `yyyyMMdd-HHmmss-fff_<file>`, and `MELE_BACKUP_DIR` moves them.
+Backups go to `%LOCALAPPDATA%\mele-mcp\backups` as `yyyyMMdd-HHmmss-fff_<file>` (`-2`, `-3`... after the time when two
+share a millisecond), and `MELE_BACKUP_DIR` moves them.
 
 These writes fall outside that rule, and [getting started](../../docs/getting-started.md) lists every other location:
 
-- `editor_import`, `npc_place` and `live_save` edit the level YAML in place, with no backup and no guard on the YAML.
+- `editor_import`, `npc_place` and `live_save` write the level YAML with no guard on it. Each backs it up first.
 - `game_screenshot` writes to its `path` parameter with no guard.
 - `level_build` makes no backup of the forks it writes beside a level, because each is rebuilt from the vanilla file.
 
@@ -382,8 +389,9 @@ To test a second copy beside the one in use, set `MELE_OUT` to another Windows f
   rules under Status above. `le_find_file` follows the game, and the other tools resolve names through LEC.
 - `MELoadedFiles.GetFilesLoadedInGame` throws when a DLC folder it counts as mounted has no `CookedPCConsole`. Every tool
   given a file name then fails, and `le_find_file` reports it as a folder warning.
-- File lookups are cached in `GamePaths.ResolvePackage`, so code that installs files must call
-  `GamePaths.RefreshLoadedFiles()` afterwards.
+- LEC caches its file list per game, for the whole process. Code reads it only through `GamePaths.LoadedFiles`, which
+  rescans when the DLC folder names, an `AutoLoad.ini` or `Mount.dlc`, or a cooked folder's write time changed, so an
+  install from M3's window is seen. Code that installs files still calls `GamePaths.RefreshLoadedFiles()` afterwards.
 - `CommonStructs.LinearColorProp(r, g, b, a)` writes `r` into all four channels, so `LevelBuilder` builds that struct by
   hand.
 - `DecompileBulkProps` stops at the first export that fails, so `PackageText` builds each block itself.

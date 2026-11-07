@@ -35,7 +35,8 @@ public static class ScaffoldTools
                  + "script_compile's route (errors keep Line and Column), each entry is found and normalized to its instanced full path, each property is checked against the export and its class, "
                  + "and a manifest is checked against M3's schema; on any error Stage is check-failed, nothing is written and M3 is not touched. Then the manifest and sources go in the mod's MergeMods "
                  + "folder, M3 compiles them (--compilemergemod to the running window, waiting on its log and the output) and the .m3m is added to moddesc.ini [BASEGAME] mergemods=. compile=false stops "
-                 + "after the manifest. M3 opens a dialog on a compile failure; that is reported, never clicked. M3 is never closed. Compiling reads no game file. Applied through M3 and proved in LE2 once: M3 patches the core file in place, nothing undoes that but M3's Restore on the file's row, and merges stack on the file on disk.")]
+                 + "after the manifest; a build that does not compile (compile=false, an M3 error or timeout) takes an earlier .m3m out of moddesc.ini, "
+                 + "with a backup, so the mod never installs a merge older than its manifest. M3 opens a dialog on a compile failure; that is reported, never clicked. M3 is never closed. Compiling reads no game file. Applied through M3 and proved in LE2 once: M3 patches the core file in place, nothing undoes that but M3's Restore on the file's row, and merges stack on the file on disk.")]
     public static MergeBuildResult MergeModBuild(
         [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("The mod root holding moddesc.ini (Windows or /mnt/<drive> path).")] string modRoot,
@@ -45,7 +46,7 @@ public static class ScaffoldTools
                      + "(function text; for a Class entry, one var, struct, enum, function or state), assetFile with assetEntry.")] MergeChange[]? changes = null,
         [Description("An existing manifest .json (Windows or /mnt/<drive> path), instead of changes. Its sources are copied in from beside it.")] string? manifest = null,
         [Description("Apply to every localized copy of targetFile. Only the named copy is checked.")] bool applyToAllLocalizations = false,
-        [Description("Run M3. false writes the manifest and its sources only.")] bool compile = true,
+        [Description("Run M3. false writes the manifest and its sources, and takes an earlier .m3m out of moddesc.ini.")] bool compile = true,
         [Description("Seconds to wait for M3.")] int timeoutSeconds = 180)
         => ToolErrors.Run(() => MergeMods.Build(PackageTools.ParseGame(game), modRoot, name, targetFile, changes, manifest, applyToAllLocalizations, compile, timeoutSeconds));
 }

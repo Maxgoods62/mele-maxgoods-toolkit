@@ -3,8 +3,10 @@
 #include <thread>
 
 // \\.\pipe\MeleBridge_LE<n>: newline-delimited JSON, one request line in, one reply line out, any number of clients at once.
-// A client that subscribes gets no more replies: the connection streams one event line per watched call, plus a heartbeat
-// line every 2 s when nothing happens, until the client closes it.
+// Every request gets its reply, with the request's "id" when it has one; a request still running on the game thread 1.5 s
+// after its timeout gets {"ok":false,"running":true} (RunOnGameThread). A client that subscribes gets no more replies: the
+// connection streams one event line per watched call, plus a heartbeat line every 2 s when nothing happens, until the client
+// closes it. The stream leaves out calls made while a request runs and the in-game editor's own calls (docs/formats.md §3.6).
 namespace MeleBridge
 {
     namespace
@@ -73,6 +75,11 @@ namespace MeleBridge
                     catch (std::exception const& e)
                     {
                         reply = json{ { "ok", false }, { "error", e.what() } };
+                    }
+                    catch (...)
+                    {
+                        // One that left this thread would end the game (std::terminate).
+                        reply = json{ { "ok", false }, { "error", "the request threw something that is not a std::exception" } };
                     }
                     if (request.is_object() && request.contains("id")) reply["id"] = request["id"];
                     if (!WriteLine(pipe, reply.dump(-1, ' ', false, json::error_handler_t::replace))) goto done;

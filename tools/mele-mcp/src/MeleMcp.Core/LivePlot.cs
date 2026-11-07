@@ -74,7 +74,8 @@ public static partial class LivePlot
             GameLink.Console(game, $"InitPlotManagerValueByIndex {id} {kind} {number}");
             var set = new Dictionary<int, string>();
             if (!Await(game, log, start, SetAnswer(), set, 1, timeoutSeconds))
-                return new PlotValues([new PlotValue(kind, id, names.GetValueOrDefault(id), answers[id])], [id], $"The game did not confirm the set within {timeoutSeconds} s.");
+                return new PlotValues([new PlotValue(kind, id, names.GetValueOrDefault(id), answers[id])], [id],
+                    $"The game did not confirm the set within {timeoutSeconds} s: the command was sent, so it may still apply once the game runs it. Read the id again before you set it again.");
             return new PlotValues([new PlotValue(kind, id, names.GetValueOrDefault(id), set[id], answers[id])], [], null);
         }
 

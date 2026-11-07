@@ -8,7 +8,7 @@ namespace MeleMcp.Core;
 /// An NPC's ambient pose in Kismet, as vanilla NPCs have it: a copy of an action-station prefab (a SequenceReference to
 /// BioWare's BIOG_ActionStations_Q sequence: enter the pose, then random fidgets with random delays between them), run on
 /// her pawn. It starts when the level is loaded and visible; when Shepard uses her she leaves it (BioSeqAct_LeaveActionStation,
-/// as Chakwas does), and the end of her conversation starts it again.
+/// as Chakwas does), and the end of her conversation starts it again. With no conversation linked, using her does not take her out of it.
 /// </summary>
 internal static class IdleStations
 {
@@ -49,6 +49,8 @@ internal static class IdleStations
         SetVariables(sequence, station, pawnVar, idle, cache, changes);
 
         KismetPrefabs.Link(KismetPrefabs.LevelLoaded(sequence, cache), "Loaded and Visible", station, changes, "Kismet: level loaded → idle");
+        // Link only adds: the end of a conversation the file no longer starts (renamed, or gone) would still start the pose.
+        CutConversationEnds(objects, station, pawn, keep: start, changes);
         if (use is not null && start is not null)
         {
             var leave = objects.FirstOrDefault(o => o.ClassName == "BioSeqAct_LeaveActionStation" && Holds(o, "Pawn", pawn));
@@ -60,7 +62,61 @@ internal static class IdleStations
             KismetPrefabs.Link(use, "Out", leave, changes, "Kismet: use → leave idle");
             KismetPrefabs.Link(start, "Out", station, changes, "Kismet: conversation end → idle");
         }
+        // No conversation brings her back to the pose, so using her must not take her out of it.
+        else CutLeave(objects, pawn, changes);
     }
+
+    /// <summary>
+    /// An NPC whose YAML has no 'idle' (any more): the station <see cref="Set"/> built for her pawn loses its edges from the level loaded
+    /// event and from her conversation's end, and her use no longer leaves it, so she stands in no pose. The prefab copy stays in
+    /// Main_Sequence, unlinked; an 'idle' with the same pose links it again. Only the links Set makes are cut: the station is the
+    /// SequenceReference whose Pawn slot holds her pawn, as Set finds it.
+    /// </summary>
+    internal static void Remove(ExportEntry sequence, ExportEntry pawn, string name, List<string> changes, List<string> notes)
+    {
+        var objects = KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().ToList();
+        if (objects.FirstOrDefault(o => o.ClassName == "SequenceReference" && Holds(o, "Pawn", pawn)) is not { } station) return;
+        var cut = false;
+        if (KismetPrefabs.FindLevelLoaded(sequence) is { } loaded && KismetPrefabs.Unlink(loaded, "Loaded and Visible", o => o == station).Count > 0)
+        {
+            changes.Add("Kismet: level loaded → idle unlinked");
+            cut = true;
+        }
+        cut |= CutConversationEnds(objects, station, pawn, keep: null, changes);
+        cut |= CutLeave(objects, pawn, changes);
+        if (cut) notes.Add($"{name}: the file has no 'idle', so her {PoseOf(station) ?? "idle"} station no longer starts. Its Kismet stays in Main_Sequence, unlinked.");
+    }
+
+    /// <summary>Cuts conversation end → station for each of her conversation starts but <paramref name="keep"/> (Owner = her pawn, as LevelBuilder builds them).</summary>
+    private static bool CutConversationEnds(List<ExportEntry> objects, ExportEntry station, ExportEntry pawn, ExportEntry? keep, List<string> changes)
+    {
+        var cut = false;
+        foreach (var start in objects.Where(o => o.ClassName == "BioSeqAct_StartConversation" && o != keep && Holds(o, "Owner", pawn)))
+        {
+            if (KismetPrefabs.Unlink(start, "Out", o => o == station).Count == 0) continue;
+            changes.Add($"Kismet: conversation {Conversation(start)} end → idle unlinked");
+            cut = true;
+        }
+        return cut;
+    }
+
+    /// <summary>Cuts use → leave idle on her use events (Originator = her pawn) for her leave action (Pawn = her pawn).</summary>
+    private static bool CutLeave(List<ExportEntry> objects, ExportEntry pawn, List<string> changes)
+    {
+        var leaves = objects.Where(o => o.ClassName == "BioSeqAct_LeaveActionStation" && Holds(o, "Pawn", pawn)).ToHashSet();
+        if (leaves.Count == 0) return false;
+        var cut = false;
+        foreach (var use in objects.Where(o => o.ClassName == "BioSeqEvt_OnPlayerActivate" && o.GetProperty<ObjectProperty>("Originator")?.Value == pawn.UIndex))
+        {
+            if (KismetPrefabs.Unlink(use, "Out", leaves.Contains).Count == 0) continue;
+            changes.Add("Kismet: use → leave idle unlinked");
+            cut = true;
+        }
+        return cut;
+    }
+
+    private static string Conversation(ExportEntry start) =>
+        start.GetProperty<ObjectProperty>("Conv")?.ResolveToEntry(start.FileRef)?.ObjectName.Instanced ?? $"#{start.UIndex}";
 
     /// <summary>The first prefab of the source whose station enters <see cref="Spec.Pose"/>.</summary>
     private static ExportEntry Prefab(IMEPackage source, Spec idle)

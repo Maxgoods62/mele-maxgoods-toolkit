@@ -9,7 +9,7 @@ of a hosted repo. Each mod's README links to it; no mod has a releasing page of 
 
 | Command | What it does |
 |---|---|
-| `kit.sh apply <folder>\|all` | Writes the files into a checkout. It tests every file first and refuses uncommitted changes in them, a token left in a render, or a private string. |
+| `kit.sh apply <folder>\|all` | Writes the files into a checkout. It renders and tests every file first and refuses uncommitted changes in them, a token left in a render, or a private string. A file that already holds its render doesn't count as changed, so a run that stopped partway can run again. |
 | `kit.sh check [<folder>\|all]` | Compares the render with the repo's `KIT_REF`. It reports missing files, differences, wrong file modes and rendered files whose template is gone. |
 | `kit.sh scan [<folder>\|all]` | Looks for game files in every commit, and for private strings in `KIT_REF`'s files. Run it before a repo goes public. |
 

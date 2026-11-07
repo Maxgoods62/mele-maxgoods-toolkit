@@ -69,16 +69,39 @@ public static partial class DebugLog
         line.Contains("appLogErrorf: ", StringComparison.Ordinal)
         && (line.EndsWith(".bHasPathNodes = True", StringComparison.Ordinal) || line.EndsWith(".bHasPathNodes = False", StringComparison.Ordinal));
 
-    /// <summary>The log's size now: where the next lines will start.</summary>
+    /// <summary>The log's size now: where the next lines will start (a line half written at this point counts as before it, see <see cref="LinesAfter"/>).</summary>
     internal static long Length(string path) => new FileInfo(path).Length;
 
-    /// <summary>The whole lines written after <paramref name="offset"/>.</summary>
+    /// <summary>
+    /// The whole lines written after <paramref name="offset"/>. The DebugLogger flushes its buffer wherever it is full, so the log
+    /// can end inside a line: that line is left out until its newline is written, and a caller polling from the same offset reads
+    /// it whole next time (a cut "Loading package synchronously: BIOA_NO" would pass for a map). An offset from
+    /// <see cref="Length"/> can fall inside a line too: that line began before it, so its rest is skipped.
+    /// </summary>
     internal static List<string> LinesAfter(string path, long offset)
     {
         using var stream = Open(path);
-        stream.Seek(Math.Min(offset, stream.Length), SeekOrigin.Begin);
-        using var reader = new StreamReader(stream);
+        var start = Math.Clamp(offset, 0, stream.Length);
+        // One byte before the offset, to see whether a line starts there.
+        var from = start > 0 ? start - 1 : 0;
+        stream.Seek(from, SeekOrigin.Begin);
+        var bytes = new byte[stream.Length - from];
+        var read = 0;
+        // The game may rewrite the log meanwhile (a new start): read what is there.
+        while (read < bytes.Length && stream.Read(bytes, read, bytes.Length - read) is var n and > 0) read += n;
+
+        var begin = 0;
+        if (start > 0)
+        {
+            if (read == 0) return [];
+            var lineEnd = bytes[0] == (byte)'\n' ? 0 : Array.IndexOf(bytes, (byte)'\n', 1, read - 1);
+            if (lineEnd < 0) return [];
+            begin = lineEnd + 1;
+        }
+        var end = read == 0 ? 0 : Array.LastIndexOf(bytes, (byte)'\n', read - 1) + 1;
         var lines = new List<string>();
+        if (end <= begin) return lines;
+        using var reader = new StreamReader(new MemoryStream(bytes, begin, end - begin));
         while (reader.ReadLine() is { } line) lines.Add(line);
         return lines;
     }

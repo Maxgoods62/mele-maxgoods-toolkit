@@ -86,9 +86,11 @@ public static class GameTools
 
     [McpServerTool(Name = "game_cycle", Destructive = true),
      Description("The whole test loop in one call: closes the running game WITHOUT SAVING (console exit; force kills it), runs mod_check "
-                 + "(LE1, stops on errors) and mod_install with boot (or only boots, with no mod), waits for the main menu in the DebugLogger "
-                 + "log, loads a save, runs console commands (e.g. 'at BIOA_MYM01 start_mym01'), waits for the map and takes a screenshot "
-                 + "to Read. Takes 1 to 3 minutes. LE1 loads a developer save slot (BioLoadGame <n> loads "
+                 + "(LE1, stops on errors) and mod_install, then boots the game once the install is verified (or only boots, with no mod), "
+                 + "waits for the main menu in the DebugLogger log, loads a save, runs console commands (e.g. 'at BIOA_MYM01 start_mym01'), "
+                 + "waits for the map and takes a screenshot to Read. Commands after a map load wait for MeleBridge's status to show the load "
+                 + "ended (LE1 without MeleBridge: settleSeconds only). Takes 1 to 3 minutes. Refuses after 5 s while another mele-mcp call "
+                 + "closes, cycles or installs this game. LE1 loads a developer save slot (BioLoadGame <n> loads "
                  + "Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's BioSaveGame <n> writes where Shepard stands; career "
                  + "saves can't be loaded this way (load one with commands: [\"nextframedefer loadgame <Career>_QuickSave DevId=-1\"] and "
                  + "waitForMap)), and needs the LEX Interop ASI. LE2 and LE3 need MeleBridge and the DebugLogger ASI, and load only the latest "
@@ -112,7 +114,8 @@ public static class GameTools
 
     [McpServerTool(Name = "game_close", Destructive = true),
      Description("Closes the running game WITHOUT SAVING: console exit (LEX Interop on LE1, MeleBridge on LE2 and LE3), waits for the process "
-                 + "to end, and with force kills it after 30 s. Does nothing when the game is closed. game_cycle starts it again.")]
+                 + "to end, and with force kills it after 30 s. Does nothing when the game is closed. game_cycle starts it again. Refuses "
+                 + "after 5 s while another mele-mcp call closes, cycles or installs this game.")]
     public static GameCloseResult GameClose(
         [Description(GameParam)] string game,
         [Description("Kill the game if it does not close within 30 s of exit.")] bool force = false)

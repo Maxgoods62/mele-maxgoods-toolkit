@@ -10,7 +10,7 @@ It fills gaps in the LEX Interop ASI. LEX Interop sends its replies to a window 
 handles whole classes (`getall`), and commands queued together run in reverse order. MeleBridge answers each request
 on the same connection and works on one object at a time.
 
-This is MeleBridge 4 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1.
+This is MeleBridge 5 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1.
 
 ## What it does on each game
 
@@ -128,7 +128,7 @@ event stream and version check are in section 3 of [formats.md](../../docs/forma
 
 ```json
 {"op": "ping"}
-{"bridge":"4","map":"BIOA_NOR00","objects":512345,"ok":true,"protocol":1}
+{"bridge":"5","map":"BIOA_NOR00","objects":512345,"ok":true,"protocol":1}
 ```
 
 | Op | What it does | Waits for the game thread |
@@ -164,8 +164,11 @@ Each game pauses its world and Kismet when its window loses focus, so a test dri
 
 - Requests run on the game thread, inside a `UObject::ProcessEvent` hook, before the original call. A thread-local
   flag stops one request from starting inside another, because requests call `ProcessEvent` themselves.
-- A request that has not started when its timeout ends never runs. One that has started runs to the end.
-- An access violation inside a request fails that request and leaves the game running. The work runs inside `__try`.
+- A request that has not started when its timeout ends never runs. One that has started runs to the end. If it is
+  still running 1.5 s after the timeout, the reply says so (`"running": true`) and the result that comes later is
+  dropped.
+- An access violation, in-page error, integer division by zero or integer overflow inside a request fails that request
+  and leaves the game running. The work runs inside `__try`. A stack overflow still ends the game.
 - The loader makes a hook live before it hands back the original function. A call that arrives in that gap waits for
   the pointer and does not call address 0.
 - `Reflection.cpp` converts values itself, using the layouts the engine's reflection reports. Strings and arrays live
@@ -176,7 +179,8 @@ Each game pauses its world and Kismet when its window loses focus, so a test dri
 These facts matter if you write your own ASI or drive the pipe by hand.
 
 - A `subscribe` stream sees only calls that go through `ProcessEvent`. Script-to-script calls and natives called from
-  script never show up.
+  script never show up. Nor do calls made while a request runs (a `call`'s own function, `status`'s reads) or the F8
+  editor's: the bridge would otherwise stream its own reads as the game's.
 - A `stringref` is its TLK id as a plain int, read and written like an `int` (`12345`, not `$12345`).
 - The SDK's generated function wrappers run `FunctionFlags |= ~0x400`, which leaves every flag bit set. LEX Interop
   calls `ConsoleCommand` through one, so that function's flags read `0xFFFFFFFF`. So `call` also checks a list of

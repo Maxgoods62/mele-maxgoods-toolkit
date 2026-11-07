@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using LegendaryExplorerCore.Packages;
@@ -13,7 +14,8 @@ namespace MeleMcp.Core;
 /// <param name="Functions">The functions watched, as the game names them.</param>
 /// <param name="Dropped">Events the bridge dropped because more than 10000 were waiting.</param>
 /// <param name="Truncated">Stopped at maxEvents before the time was up.</param>
-public sealed record LiveEvents(IReadOnlyList<string> Functions, IReadOnlyList<JsonNode> Events, long Dropped, bool Truncated);
+/// <param name="Note">What the stream leaves out.</param>
+public sealed record LiveEvents(IReadOnlyList<string> Functions, IReadOnlyList<JsonNode> Events, long Dropped, bool Truncated, string? Note = null);
 
 /// <param name="Lines">What the command printed or logged, from the DebugLogger log, timestamps removed.</param>
 public sealed record ConsoleOutput(string Command, IReadOnlyList<string> Lines, string? Note);
@@ -33,6 +35,24 @@ public static partial class LiveBridge
     /// </summary>
     private static readonly ConcurrentDictionary<(uint Id, DateTime Started), string?> Checked = new();
 
+    /// <summary>
+    /// How much longer than a request's timeoutMs a reply line is waited for. MeleBridge 5 answers every request within timeoutMs
+    /// plus 1.5 s: one the game thread had not taken is refused, and one it is still running then gets "running": true (RunningGrace
+    /// in tools/mele-bridge/src/GameThread.cpp). The rest is margin for the pipe thread. MeleBridge 4 and older wait for a running
+    /// request without a limit, so there no reply means the same: it started, and may still complete.
+    /// </summary>
+    private const double ReplyMarginSeconds = 4;
+
+    /// <summary>The last request id sent: each request of this server gets the next one.</summary>
+    private static long lastId;
+
+    internal static TimeSpan ReplyWait(double timeoutSeconds) => TimeSpan.FromSeconds(timeoutSeconds + ReplyMarginSeconds);
+
+    /// <summary>What live_watch never records (the ProcessEvent hook in tools/mele-bridge/src/GameThread.cpp says why); every bridge.</summary>
+    private const string Unrecorded = "Calls made while MeleBridge runs a request are not recorded: live_call's function and what it calls through "
+                                      + "ProcessEvent before it returns, live_console's command, live_status's reads; nor are the F8 editor's own calls. "
+                                      + "What they set off later (Kismet on the next tick) is.";
+
     public static string PipeName(MEGame game) => $"MeleBridge_{game}";
 
     /// <summary>Enumerating \\.\pipe\ does not connect.</summary>
@@ -40,7 +60,10 @@ public static partial class LiveBridge
         GameBridge.IsGameRunning(game)
         && Directory.EnumerateFiles(@"\\.\pipe\").Any(p => p.EndsWith(@"\" + PipeName(game), StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>One request; the reply without its "ok". A refused request throws with the bridge's message.</summary>
+    /// <summary>
+    /// One request; the reply without its "ok". A refused request throws InvalidOperationException with the bridge's message; one
+    /// that may or may not have taken effect (no reply in time, or still running when the bridge stopped waiting) IOException.
+    /// </summary>
     public static JsonObject Request(MEGame game, JsonObject request, double timeoutSeconds = 5) => RequestAll(game, [request], timeoutSeconds)[0];
 
     /// <summary>
@@ -52,20 +75,102 @@ public static partial class LiveBridge
     {
         var check = !requests.All(OffGameThread);
         using var pipe = Connect(game, timeoutSeconds, check);
+        return Exchange(pipe, requests, timeoutSeconds, ReplyWait(timeoutSeconds));
+    }
+
+    /// <summary>
+    /// Sends the requests over an open connection one at a time, each with an id of its own, and reads each one's reply. A request
+    /// with no definite outcome (no reply within <paramref name="wait"/>, or "running": true) throws IOException, a refused one
+    /// InvalidOperationException; with several, the message also names the requests answered before it and those never sent.
+    /// </summary>
+    internal static List<JsonObject> Exchange(Stream pipe, IReadOnlyList<JsonObject> requests, double timeoutSeconds, TimeSpan wait)
+    {
         var writer = new StreamWriter(pipe, Utf8) { AutoFlush = true, NewLine = "\n" };
         var reader = new StreamReader(pipe, Utf8);
         var replies = new List<JsonObject>();
-        foreach (var request in requests)
+        for (var i = 0; i < requests.Count; i++)
         {
+            var request = requests[i];
             // An absent key takes the bridge's default; a null one would be refused as the wrong type. A set's value can be null (None).
             foreach (var key in request.Where(kv => kv.Value is null && kv.Key != "value").Select(kv => kv.Key).ToList()) request.Remove(key);
             request["timeoutMs"] = (int)(timeoutSeconds * 1000);
-            writer.WriteLine(request.ToJsonString());
-            var line = ReadLine(reader, TimeSpan.FromSeconds(timeoutSeconds + 2))
-                       ?? throw new IOException($"MeleBridge did not answer '{request["op"]}' within {timeoutSeconds + 2} s.");
-            replies.Add(Check(line));
+            var id = Interlocked.Increment(ref lastId);
+            request["id"] = id;
+            try
+            {
+                writer.WriteLine(request.ToJsonString());
+                var line = ReadReply(reader, id, wait)
+                           ?? throw new IOException($"MeleBridge did not answer {Label(request)} within {wait.TotalSeconds:0.#} s: it may have started "
+                                                    + "in the game, and may still complete. Check its effect before sending it again.");
+                replies.Add(Check(line, request));
+            }
+            catch (Exception e) when (requests.Count > 1 && e is IOException or InvalidOperationException)
+            {
+                throw InBatch(e, requests, i);
+            }
         }
         return replies;
+    }
+
+    /// <summary>The failure of request <paramref name="at"/> of several, with the requests answered before it and those never sent.</summary>
+    private static Exception InBatch(Exception e, IReadOnlyList<JsonObject> requests, int at)
+    {
+        static string List(IEnumerable<JsonObject> some)
+        {
+            var labels = some.Select(Label).ToList();
+            return labels.Count == 0 ? "none" : labels.Count <= 5 ? string.Join(", ", labels) : $"{string.Join(", ", labels.Take(5))} and {labels.Count - 5} more";
+        }
+
+        var message = $"{e.Message.TrimEnd('.')}. That was request {at + 1} of {requests.Count} ({Label(requests[at])}); answered before it: "
+                      + $"{List(requests.Take(at))}; never sent: {List(requests.Skip(at + 1))}.";
+        return e is IOException ? new IOException(message, e) : new InvalidOperationException(message, e);
+    }
+
+    /// <summary>A request as errors name it: 'set BioPawn_3.Location', 'call BioGlobalVariableTable_0.SetBool [8421,true,false]', 'console stat fps'.</summary>
+    internal static string Label(JsonObject request)
+    {
+        string? Text(string key) => request[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+        var op = Text("op") ?? "?";
+        var target = Text("object") is { } path ? path.Split('.', ':')[^1] + "." : "";
+        var detail = op switch
+        {
+            "console" => Text("command"),
+            "call" => target + Text("function") + (request["args"] is JsonArray { Count: > 0 } args ? " " + args.ToJsonString() : ""),
+            // A get of every property names the object alone.
+            "get" or "set" => (target + Text("property")).TrimEnd('.'),
+            _ => null,
+        };
+        var label = string.IsNullOrEmpty(detail) ? op : $"{op} {detail}";
+        return $"'{(label.Length > 100 ? label[..97] + "..." : label)}'";
+    }
+
+    /// <summary>
+    /// The reply line to request <paramref name="id"/>, or null when none came within the time. A line with another id answers an
+    /// earlier request and is skipped. A line without one is taken: every MeleBridge echoes the id of a request that parsed as an
+    /// object, so only the error reply to a line it could not parse comes without.
+    /// </summary>
+    internal static string? ReadReply(StreamReader reader, long id, TimeSpan timeout)
+    {
+        var clock = Stopwatch.StartNew();
+        while (true)
+        {
+            var left = timeout - clock.Elapsed;
+            if (left <= TimeSpan.Zero) return null;
+            var line = ReadLine(reader, left);
+            if (line is null || ReplyId(line) is not { } other || other == id) return line;
+        }
+    }
+
+    private static long? ReplyId(string line)
+    {
+        try
+        {
+            return JsonNode.Parse(line) is JsonObject reply && reply["id"] is JsonValue v && v.TryGetValue<long>(out var id) ? id : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -119,15 +224,19 @@ public static partial class LiveBridge
         using var pipe = Connect(game);
         var writer = new StreamWriter(pipe, Utf8) { AutoFlush = true, NewLine = "\n" };
         var reader = new StreamReader(pipe, Utf8);
+        var id = Interlocked.Increment(ref lastId);
         var request = new JsonObject
         {
             ["op"] = "subscribe",
+            ["id"] = id,
             ["functions"] = new JsonArray(functions.Select(f => (JsonNode)f).ToArray()),
             ["objectContains"] = objectContains ?? "",
             ["params"] = withParams,
         };
         writer.WriteLine(request.ToJsonString());
-        var ack = Check(ReadLine(reader, TimeSpan.FromSeconds(7)) ?? throw new IOException("MeleBridge did not answer the subscription."));
+        // No timeoutMs: the bridge's default, 5 s.
+        var wait = ReplyWait(5);
+        var ack = Check(ReadReply(reader, id, wait) ?? throw new IOException($"MeleBridge did not answer the subscription within {wait.TotalSeconds:0.#} s."), request);
         var watched = ack["functions"]!.AsArray().Select(f => f!.GetValue<string>()).ToList();
 
         var events = new List<JsonNode>();
@@ -148,7 +257,7 @@ public static partial class LiveBridge
             }
             events.Add(node);
         }
-        return new LiveEvents(watched, events, dropped, events.Count >= maxEvents);
+        return new LiveEvents(watched, events, dropped, events.Count >= maxEvents, Unrecorded);
     }
 
     /// <summary>The bridge answers 'editor', and 'keep_ticking' without "on": true, from atomics, without the game thread.</summary>
@@ -158,10 +267,22 @@ public static partial class LiveBridge
         return op == "editor" || (op == "keep_ticking" && !(request["on"] is JsonValue on && on.TryGetValue<bool>(out var value) && value));
     }
 
-    private static JsonObject Check(string line)
+    /// <summary>
+    /// The reply without "ok" and "id". A refusal throws InvalidOperationException with the bridge's message; a request the bridge
+    /// stopped waiting for while the game thread still ran it ("running": true, MeleBridge 5 and later) throws IOException, as a
+    /// missing reply does: neither says whether it took effect.
+    /// </summary>
+    private static JsonObject Check(string line, JsonObject request)
     {
         var reply = JsonNode.Parse(line)?.AsObject() ?? throw new IOException($"Bad reply from MeleBridge: {line}");
-        if (reply["ok"]?.GetValue<bool>() != true) throw new InvalidOperationException(reply["error"]?.GetValue<string>() ?? line);
+        if (reply["ok"]?.GetValue<bool>() != true)
+        {
+            // "did not answer", as a missing reply: scenario.py takes either for a reply lost to a load.
+            if (reply["running"] is JsonValue r && r.TryGetValue<bool>(out var running) && running)
+                throw new IOException($"MeleBridge did not answer {Label(request)} in time: it started in the game and was still running when the "
+                                      + "bridge stopped waiting for it, so it may still complete. Check its effect before sending it again.");
+            throw new InvalidOperationException(reply["error"]?.GetValue<string>() ?? line);
+        }
         reply.Remove("ok");
         reply.Remove("id");
         return reply;
@@ -228,13 +349,16 @@ public static partial class LiveBridge
         using (var reader = new StreamReader(pipe, Utf8, false, 1024, leaveOpen: true))
         {
             // Nothing else is on the pipe until the next request, so this reader buffers no more than the ping's reply.
-            writer.WriteLine(new JsonObject { ["op"] = "ping", ["timeoutMs"] = (int)(timeoutSeconds * 1000) }.ToJsonString());
-            var line = ReadLine(reader, TimeSpan.FromSeconds(timeoutSeconds + 2))
-                       ?? throw new IOException($"MeleBridge did not answer the protocol check within {timeoutSeconds + 2} s. {PingNote}");
+            var pingId = Interlocked.Increment(ref lastId);
+            var ping = new JsonObject { ["op"] = "ping", ["id"] = pingId, ["timeoutMs"] = (int)(timeoutSeconds * 1000) };
+            writer.WriteLine(ping.ToJsonString());
+            var wait = ReplyWait(timeoutSeconds);
+            var line = ReadReply(reader, pingId, wait)
+                       ?? throw new IOException($"MeleBridge did not answer the protocol check within {wait.TotalSeconds:0.#} s. {PingNote}");
             JsonObject reply;
             try
             {
-                reply = Check(line);
+                reply = Check(line, ping);
             }
             catch (InvalidOperationException e)
             {

@@ -53,6 +53,7 @@ static_assert(sizeof(FMatrix) == 0x40);
 namespace MeleBridge::Editor
 {
     std::atomic<bool> Open{ false };
+    std::atomic<unsigned> Sessions{ 0 };
     std::atomic<bool> WantMouse{ false };
     std::atomic<bool> WantKeyboard{ false };
     std::atomic<bool> Looking{ false };
@@ -108,6 +109,14 @@ namespace MeleBridge::Editor
         /// It also waits for a level being added to the world or taken from it, but not longer than this: a level that stays half
         /// added would keep the session from ever being re-applied.
         constexpr ULONGLONG UnsettledMs = 5000;
+        /// A pass that faulted runs again this long after, on its own while fewer than MaxPassFaults faulted in a row; after
+        /// that only when asked (an edit of an actor a waiting entry names, a new levels.json), at most this often too, or when
+        /// the loaded levels change. In a map that never streams, the entries would otherwise never be applied.
+        constexpr ULONGLONG PassRetryMs = 5000;
+        constexpr int MaxPassFaults = 3;
+        /// A map change's setup of the new world (ChangeWorld) is tried this many times at most for one world, one a tick: a
+        /// fault in it runs it again at the next tick.
+        constexpr int MaxSetupTries = 3;
 
         /// FLightingChannelContainer's bits (Engine_structs.hpp): bInitialized, BSP, Static, Dynamic, CompositeDynamic, then the
         /// named channels; Gameplay_4 (the SDK's Gameplay03) is free in every scanned level (docs/design/in-game-editor.md §11).
@@ -285,10 +294,12 @@ namespace MeleBridge::Editor
             bool Pending = false;
             std::string PendingWhy;
             /// A spawn a pass spawned again, or a deleted spawn without an actor: a built copy with its tag that appears later takes
-            /// the edit over.
+            /// the edit over. Only a spawn is rebindable, and an actor-less one only when deleted (Unbind).
             bool Rebindable = false;
-            /// On a built copy of the spawn: when the copy's level leaves, the edit waits for it instead of spawning again.
-            bool OnCopy = false;
+            /// On a built copy of the spawn: the copy's level (its package), empty otherwise. While that level is not loaded, the
+            /// edit waits for it instead of spawning again; loaded again with no actor of its tag, the copy is gone and the edit
+            /// spawns again (Pass).
+            std::string CopyLevel;
             /// A light Auto light made for a fresh spawn: that prop's edit (docs/design/in-game-editor.md §11's link). It holds while both were never saved
             /// and the light is unedited (a tuned light is the user's own and never goes with a prop); meanwhile a drag of the prop
             /// takes the light along (Follow).
@@ -495,23 +506,35 @@ namespace MeleBridge::Editor
             std::array<int, 3> Color{ 255, 255, 255 };
         };
 
+        /// The editor's own release of the pause it holds (Release): none, one world tick (TickOnce), or until a deadline
+        /// (TickFor).
+        enum class PauseRelease { None, Once, Until };
+
         /// Game thread only.
         struct
         {
             bool Open = false;
             bool F8Down = false;
-            /// The world we paused, until its pause is given back (also after a failure closed the editor).
+            /// F8 was refused once since the overlay failed (the log says it once).
+            bool OverlayFailedSaid = false;
+            /// The world pause the editor holds (docs/design/in-game-editor.md §3.2), changed only by HoldPause, Release, KeepPause and
+            /// RestorePause. PausedWorld: the world we paused, until its pause is given back (also after a failure closed the
+            /// editor: the next tick gives it back). WasPlayersOnly: the game had its own pause when F8 opened and has not ended
+            /// it since; given back on close, and no release meanwhile. Released: our release, which the tick after its end takes
+            /// back without counting it as the game's; RunUntil its deadline (GetTickCount64 time) while Until.
             AWorldInfo* PausedWorld = nullptr;
             int PausedIndex = -1;
             bool WasPlayersOnly = false;
-            /// We let the paused world tick once (TickOnce): the next tick takes the pause back without counting it as the game's.
-            bool TickingOnce = false;
-            /// We let the paused world run until then (TickFor, GetTickCount64 time; 0: not running): the pause is taken back once
-            /// it is over, not counted as the game's either.
+            PauseRelease Released = PauseRelease::None;
             ULONGLONG RunUntil = 0;
-            /// The player's world at the last tick: a new one means a map change or a load.
+            /// The player's world at the last tick once its setup ran to the end (ChangeWorld): a new one means a map change or
+            /// a load. Null while a setup that faulted waits to run again.
             AWorldInfo* World = nullptr;
             int WorldIndex = -1;
+            /// The world ChangeWorld last started to set up, and how many times it started for it.
+            AWorldInfo* SetupWorld = nullptr;
+            int SetupIndex = -1;
+            int SetupTries = 0;
 
             bool FreeCam = false;
             ACamera* Camera = nullptr;
@@ -566,8 +589,10 @@ namespace MeleBridge::Editor
             bool PassNow = false;
             bool PassWanted = false;
             ULONGLONG LevelsChangedAt = 0;
-            /// The last pass faulted: not tried again until the loaded levels change.
-            bool PassFaulted = false;
+            /// The passes that faulted in a row (0: the last one ran to its end), and when the last one did: run again
+            /// PassRetryMs later, on its own up to MaxPassFaults in a row, then when asked or the loaded levels change.
+            int PassFaults = 0;
+            ULONGLONG PassFaultedAt = 0;
             /// The SessionState the snapshot shares, rebuilt when it is stale.
             std::shared_ptr<SessionState const> Summary;
             bool SummaryStale = true;
@@ -630,6 +655,9 @@ namespace MeleBridge::Editor
             int ViewYaw = 0;
             /// The props switch faulted: not tried again until the loaded levels change.
             bool ReswitchFaulted = false;
+            /// Our spawns a built copy replaced that the engine would not destroy (DestroySpawn hid them), by slot: they keep their
+            /// tag, so no pass may take one for the copy (ReadLoadedActors leaves them out). Gone with their world.
+            std::vector<std::pair<AActor*, int>> Leftovers;
         } G;
 
         FVector Add(FVector a, FVector b) { return { a.X + b.X, a.Y + b.Y, a.Z + b.Z }; }
@@ -698,6 +726,14 @@ namespace MeleBridge::Editor
         {
             return Alive(G.Selected, G.SelectedIndex) && G.Selected->Class == G.SelectedClass
                 && (G.SelectedComp == nullptr || (Alive(G.SelectedComp, G.SelectedCompIndex) && G.SelectedComp->Class == G.SelectedCompClass));
+        }
+
+        /// The selection's path as Publish gives it to the snapshot (Snapshot::SelectedPath): a selected level light's own, else
+        /// the actor's. Empty when nothing is selected or the selection is gone. A drag command names the one it was built for.
+        std::string PathOfSelection()
+        {
+            if (!SelectionAlive()) return {};
+            return ToUtf8(PathOf(G.SelectedComp != nullptr ? static_cast<UObject*>(G.SelectedComp) : G.Selected));
         }
 
         void Select(AActor* actor)
@@ -1485,6 +1521,18 @@ namespace MeleBridge::Editor
             e.CompClass = nullptr;
         }
 
+        /// An edit without its actor until a pass finds one (docs/design/in-game-editor.md §10): a deleted spawn is a tombstone (Rebindable: a built copy
+        /// with its tag that shows takes it over, and nothing spawns it again), anything else waits for its actor (Pending, with
+        /// why). The one place an actor-less edit gets either: a pending spawn is never a deleted one (Respawn shows what it
+        /// spawns), and only a spawn is rebindable.
+        void Unbind(Edit& e, std::string why)
+        {
+            Detach(e);
+            e.Rebindable = e.Spawned && e.Deleted;
+            e.Pending = !e.Rebindable;
+            e.PendingWhy = e.Pending ? std::move(why) : std::string{};
+        }
+
         float ExtentOf(AActor* actor);
         LightSource SourceOf(AActor* actor);
 
@@ -1750,7 +1798,8 @@ namespace MeleBridge::Editor
         std::string Awaiting(AActor* actor);
 
         /// The edit for an actor, made on first touch (Move, Rotate, Scale and Delete only touch a shown actor). Null, said with
-        /// say, while a session entry or an edit waiting for its actor names it (Awaiting): the next tick's pass applies it.
+        /// say, while a session entry or an edit waiting for its actor names it (Awaiting): it asks for a pass, which applies it
+        /// at the next tick, or once PassRetryMs has passed when the last pass faulted.
         Edit* Touch(AActor* actor, char const* verb, void (*say)(std::string) = SayOnce)
         {
             if (auto const found = EditOf(actor)) return found;
@@ -2022,8 +2071,9 @@ namespace MeleBridge::Editor
             if (SameStep(step.Before, step.After) && !step.Also) return;
             NoteChanged(step.Target);
             if (step.Also) NoteChanged(*step.Also);
-            // A prop's drag: the reswitch says so when it leaves the prop under half its target (docs/design/in-game-editor.md §11).
-            if (share >= 0) G.DragWarn = { step.Target, share };
+            // A prop's drag: the reswitch says so when it leaves the prop under half its target (docs/design/in-game-editor.md §11). Not while the switch
+            // is off (ReswitchFaulted): the warning would wait for the loaded levels to change, and be stale by then.
+            if (share >= 0 && !G.ReswitchFaulted) G.DragWarn = { step.Target, share };
             PushStep(std::move(step));
         }
 
@@ -2072,8 +2122,9 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// Gives the paused world its own bPlayersOnly back, if that world still exists. Called on close and after a failure, so
-        /// it guards itself. No C++ object may live in this frame.
+        /// Gives the paused world its own bPlayersOnly back, if that world still exists, and forgets the pause: nothing of it
+        /// outlives the editor's hold. Called on close, on open before the new hold, and at the tick after a failure closed the
+        /// editor, so it guards itself. No C++ object may live in this frame.
         void RestorePause()
         {
             __try
@@ -2085,34 +2136,87 @@ namespace MeleBridge::Editor
             }
             G.PausedWorld = nullptr;
             G.PausedIndex = -1;
-            G.TickingOnce = false;
+            G.WasPlayersOnly = false;
+            G.Released = PauseRelease::None;
             G.RunUntil = 0;
         }
 
-        /// Lets the paused world tick once. A DynamicLightEnvironment only updates in Tick: a prop spawned while paused renders
-        /// black, and a moved one keeps the light of where it was, until the world ticks. The next editor tick takes the pause
-        /// back (seen in game: one tick lights it).
-        void TickOnce()
+        /// On open: pauses the world as photo mode does (only players tick; their input is held back by Input.cpp), keeping
+        /// what the game had, to give it back on close.
+        void HoldPause(AWorldInfo* world)
         {
-            if (!G.Open || !Alive(G.PausedWorld, G.PausedIndex) || !G.PausedWorld->bPlayersOnly) return;
-            G.PausedWorld->bPlayersOnly = 0;
-            G.TickingOnce = true;
+            RestorePause();
+            if (world == nullptr) return;
+            G.PausedWorld = world;
+            G.PausedIndex = world->ObjectInternalInteger;
+            G.WasPlayersOnly = world->bPlayersOnly;
+            world->bPlayersOnly = 1;
+            LEASI_INFO("editor: paused {} (bPlayersOnly was {}{})", ToUtf8(PathOf(world)), G.WasPlayersOnly,
+                       G.WasPlayersOnly ? ": the game's own pause, given back on close unless the game ends it meanwhile" : "");
         }
 
-        /// Lets the paused world run for a while (docs/design/in-game-editor.md §12): an effect's particles only move in Tick, so a moved or restarted
-        /// effect shows where it is now only once the world has run. The editor's own release, beside TickOnce: the editor
-        /// sets bPlayersOnly again at every tick, so an outside write would last one frame. The takeback in Tick waits for the
-        /// deadline (a later call only moves it on), then takes the pause back without counting it as the game's. Returns
-        /// whether the world runs. Never while the game had its own pause when the editor opened: for the whole release the
-        /// takeback can't tell a 0 the game writes (its pause over) from ours, so closing would give back a pause it ended.
-        bool TickFor(ULONGLONG ms)
+        /// The editor's own release of its pause: for one world tick (ms 0) or for ms, a later call only moving the deadline on.
+        /// The editor sets bPlayersOnly again at every tick (KeepPause), which waits for the release to end, then takes the
+        /// pause back without counting the 0 as the game's. Returns whether the world runs. Never while the game had its own
+        /// pause when the editor opened (Pause Anytime, photo mode, the pause menu): the world the game paused stays paused,
+        /// and the takeback couldn't tell a 0 the game writes meanwhile (its pause over) from ours, so closing would give back
+        /// a pause the game ended.
+        bool Release(ULONGLONG ms)
         {
-            if (!G.Open || !Alive(G.PausedWorld, G.PausedIndex)) return false;
-            if (G.WasPlayersOnly) return false;
+            if (!G.Open || G.WasPlayersOnly || !Alive(G.PausedWorld, G.PausedIndex)) return false;
+            if (ms == 0)
+            {
+                // Running already (our timed release, or a 0 the game wrote this tick, which stays the game's): it ticks.
+                if (!G.PausedWorld->bPlayersOnly) return true;
+                G.PausedWorld->bPlayersOnly = 0;
+                if (G.Released == PauseRelease::None) G.Released = PauseRelease::Once;
+                return true;
+            }
             G.PausedWorld->bPlayersOnly = 0;
+            G.Released = PauseRelease::Until;
             G.RunUntil = std::max(G.RunUntil, GetTickCount64() + ms);
             return true;
         }
+
+        /// At every tick while open: the game pauses this way too (seen while it was unfocused) and unpauses when it is done,
+        /// and the editor keeps its pause. Our own release that is over (one tick, or past its deadline) is not the game's
+        /// doing; a 0 the game wrote is: whatever pause it had when the editor opened is over, so closing gives back 0.
+        void KeepPause(AWorldInfo* world)
+        {
+            if (!G.Open || G.PausedWorld == nullptr || G.PausedWorld != world) return;
+            auto const released = std::exchange(G.Released, PauseRelease::None);
+            if (released == PauseRelease::Until && GetTickCount64() < G.RunUntil)
+            {
+                G.Released = PauseRelease::Until;
+                return;
+            }
+            G.RunUntil = 0;
+            if (G.PausedWorld->bPlayersOnly) return;
+            G.PausedWorld->bPlayersOnly = 1;
+            if (released != PauseRelease::None) return;
+            if (G.WasPlayersOnly) LEASI_INFO("editor: the game ended its own pause while the editor was open; closing will give back 0");
+            G.WasPlayersOnly = false;
+            if (G.PauseRetaken++ == 0) LEASI_INFO("editor: the game cleared bPlayersOnly while the editor was open; set again");
+        }
+
+        void SayAfter(std::string what);
+
+        /// Lets the paused world tick once (Release). A DynamicLightEnvironment only updates in Tick: a prop spawned while paused
+        /// renders black, and a moved one keeps the light of where it was, until the world ticks. The next editor tick takes the
+        /// pause back (seen in game: one tick lights it). While the game had its own pause when the editor opened, the world
+        /// stays paused, and the status line of this tick says so, once: callers say their own line first.
+        void TickOnce()
+        {
+            if (Release(0) || !G.Open || !G.WasPlayersOnly) return;
+            constexpr char const held[] = "lighting not updated: the game had paused the world when F8 opened (it updates once the world runs)";
+            if (G.StatusFrame == G.Frame && G.Status.find(held) != std::string::npos) return;
+            SayAfter(held);
+        }
+
+        /// Lets the paused world run for a while (docs/design/in-game-editor.md §12, Release): an effect's particles only move in Tick, so a moved or
+        /// restarted effect shows where it is now only once the world has run. Returns whether the world runs; never while the
+        /// game had its own pause when the editor opened.
+        bool TickFor(ULONGLONG ms) { return Release(ms); }
 
         /// Once, at the first tick: the re-apply pass needs them whether the editor was opened or not. Each is looked up on its
         /// own, so a missing one turns off only what needs it.
@@ -2179,43 +2283,47 @@ namespace MeleBridge::Editor
 
         void CheckLevels(bool now);
 
+        /// The one way the editor closes: F8, the toolbar's Close, a map change, an overlay failure, or an access violation
+        /// (fault, from Fail). The drag step closes from the edit's stored state, the free cam goes off and the cursor gets its
+        /// clip back. The pause is given back now; after a fault, at the next tick from a known world (game memory may not be
+        /// touched now), G.PausedWorld staying set for it. Nothing to do when the editor is closed already: the cursor's clip is
+        /// the game's then, not ours to give back.
+        void Close(bool fault)
+        {
+            if (!G.Open) return;
+            CloseDrag();
+            // Off reads no game memory.
+            SetFreeCam(nullptr, false);
+            Looking.store(false);
+            // After a map change the old WorldInfo is gone: RestorePause only writes to the one we paused if it is still there.
+            if (G.PausedWorld != nullptr)
+                LEASI_INFO("editor: bPlayersOnly back to {}{}; the game took the pause back {} times", G.WasPlayersOnly, fault ? " at the next tick" : "",
+                           G.PauseRetaken);
+            if (!fault) RestorePause();
+            G.PauseRetaken = 0;
+            G.Open = false;
+            Open.store(false, std::memory_order_release);
+            HoldCursor(false);
+            LEASI_INFO("editor closed");
+        }
+
         void SetOpen(APlayerController* pc, bool open)
         {
-            if (open == G.Open) return;
-            if (open)
-            {
-                ResolveFunctions();
-                // npc_place and mod_build rewrite it while the map runs (docs/design/in-game-editor.md §12).
-                CheckLevels(true);
-                // Pause as photo mode does: only players tick. Their input is held back by Input.cpp.
-                RestorePause();
-                auto const world = pc->WorldInfo;
-                if (world != nullptr)
-                {
-                    G.PausedWorld = world;
-                    G.PausedIndex = world->ObjectInternalInteger;
-                    G.WasPlayersOnly = world->bPlayersOnly;
-                    world->bPlayersOnly = 1;
-                    LEASI_INFO("editor: paused {} (bPlayersOnly was {}{})", ToUtf8(PathOf(world)), G.WasPlayersOnly,
-                               G.WasPlayersOnly ? ": the game's own pause, given back on close unless the game ends it meanwhile" : "");
-                }
-                // Until then the editor can't tell our levels from vanilla ones: every actor keeps Phase 3's rules.
-                if (!G.Ours.Read && !G.Ours.Problem.empty()) Say(G.Ours.Problem);
-            }
-            else
-            {
-                CloseDrag();
-                SetFreeCam(pc, false);
-                // After a map change the old WorldInfo is gone: RestorePause only writes to the one we paused if it is still there.
-                if (G.PausedWorld != nullptr) LEASI_INFO("editor: bPlayersOnly back to {}; the game took the pause back {} times", G.WasPlayersOnly, G.PauseRetaken);
-                RestorePause();
-                G.PauseRetaken = 0;
-                Looking.store(false);
-            }
-            G.Open = open;
-            Open.store(open, std::memory_order_release);
-            HoldCursor(open);
-            LEASI_INFO("editor {}", open ? "opened" : "closed");
+            if (!open) return Close(false);
+            if (G.Open) return;
+            ResolveFunctions();
+            // npc_place and mod_build rewrite it while the map runs (docs/design/in-game-editor.md §12).
+            CheckLevels(true);
+            HoldPause(pc->WorldInfo);
+            // Until then the editor can't tell our levels from vanilla ones: every actor keeps Phase 3's rules.
+            if (!G.Ours.Read && !G.Ours.Problem.empty()) Say(G.Ours.Problem);
+            G.Open = true;
+            // Before Open: the overlay frame that sees the editor open sees this session's number, so it lets go of the last
+            // session's drags even when it saw no close in between (Overlay.cpp).
+            Sessions.fetch_add(1, std::memory_order_relaxed);
+            Open.store(true, std::memory_order_release);
+            HoldCursor(true);
+            LEASI_INFO("editor opened");
         }
 
         bool Pickable(AActor* actor, APlayerController* pc)
@@ -2447,9 +2555,10 @@ namespace MeleBridge::Editor
         }
 
         /// levels.json again when its write time changed since it was read (docs/design/in-game-editor.md §12): npc_place builds, which rewrites it,
-        /// and moves the pawn and its lights live, so the NPCs' built poses must follow. On F8 open (now) and once a second while
-        /// the editor is open; the map change reads it anyway. The lights, props, effects and NPCs are tracked again, and a pass
-        /// tries the NPC light entries that waited for their NPC's pose (the pose check) again.
+        /// and moves the pawn and its lights live, so the NPCs' built poses must follow. On F8 open (now), before each pass (now:
+        /// passes run with the editor closed too), and once a second while the editor is open; the map change reads it anyway.
+        /// The lights, props, effects and NPCs are tracked again, and a pass tries the NPC light entries that waited for their
+        /// NPC's pose (the pose check) again.
         void CheckLevels(bool now)
         {
             auto const tick = GetTickCount64();
@@ -3413,25 +3522,25 @@ namespace MeleBridge::Editor
             {
                 if (SwitchProp(actor, lights)) switched++;
             }
-            if (switched > 0)
-            {
-                LEASI_INFO("editor: {} prop{} switched between prop lights and their light environment", switched, switched == 1 ? "" : "s");
-                // Paused, a light environment turned on keeps its old light until the world ticks.
-                TickOnce();
-            }
+            if (switched > 0) LEASI_INFO("editor: {} prop{} switched between prop lights and their light environment", switched, switched == 1 ? "" : "s");
             auto const warn = std::exchange(G.DragWarn, std::nullopt);
-            if (!warn || warn->first >= G.Edits.size() || !Bound(G.Edits[warn->first])) return;
-            auto const& e = G.Edits[warn->first];
-            if (auto const lighting = LightingOf(e.Actor, lights))
+            if (warn && warn->first < G.Edits.size() && Bound(G.Edits[warn->first]))
             {
-                auto const share = ShareOf(lighting->Received, lighting->Target);
-                if (share < DragWarnShare && warn->second >= DragWarnShare)
-                    Say(std::format("{} gets {:.0f}% of its target from prop lights here: L adds one", Called(e), share * 100));
+                auto const& e = G.Edits[warn->first];
+                if (auto const lighting = LightingOf(e.Actor, lights))
+                {
+                    auto const share = ShareOf(lighting->Received, lighting->Target);
+                    if (share < DragWarnShare && warn->second >= DragWarnShare)
+                        Say(std::format("{} gets {:.0f}% of its target from prop lights here: L adds one", Called(e), share * 100));
+                }
             }
+            // Paused, a light environment turned on keeps its old light until the world ticks. After the warning: TickOnce adds
+            // to the line when the world can't run.
+            if (switched > 0) TickOnce();
         }
 
-        /// Reswitch, guarded on its own: a fault leaves it off until the loaded levels change, as a pass's does. No C++ object may
-        /// live in Guarded's frame, so the work is here.
+        /// Reswitch, guarded on its own: a fault leaves it off until the loaded levels change. No C++ object may live in Guarded's
+        /// frame, so the work is here.
         void ReswitchEntry(UObject*)
         {
             try
@@ -3501,7 +3610,8 @@ namespace MeleBridge::Editor
                     count++;
                 }
             }
-            if (count == 0) return;
+            // Closed (a pass restarted them), the world runs as the game has it: nothing to add, as in Reset.
+            if (count == 0 || !G.Open) return;
             // TickFor refuses while the game had its own pause when F8 opened: the particles show once the editor closes.
             SayAfter(TickFor(EffectRunMs) ? "effects run 1.5 s"
                      : G.WasPlayersOnly   ? "effects not run: the game had paused the world when F8 opened"
@@ -4127,8 +4237,8 @@ namespace MeleBridge::Editor
             // A level light is switched off, never hidden: it stays selectable.
             if (edit.Component) SelectLight(edit.Actor, edit.Comp);
             else Select(state.Shown ? edit.Actor : nullptr);
-            TickOnce();
             Say(std::format("{} {}", redo ? "redid" : "undid", label));
+            TickOnce();
             to.push_back(std::move(step));
         }
 
@@ -4506,9 +4616,9 @@ namespace MeleBridge::Editor
             auto const& edit = G.Edits[*index];
             PushStep(SpawnStep(edit));
             Select(edit.Actor);
-            TickOnce();
             Say(std::format("added {} light {} (radius {:.0f}, brightness {:.2f}): the panel tunes it", room ? "a room" : "a prop", Called(edit), light.Radius,
                             light.Brightness));
+            TickOnce();
         }
 
         /// L: a prop light for the selected prop, whatever it gets already, unless it is too big for one (LightFor). The new light is
@@ -4536,8 +4646,8 @@ namespace MeleBridge::Editor
             auto const& edit = G.Edits[*index];
             PushStep(SpawnStep(edit));
             Select(edit.Actor);
-            TickOnce();
             Say(std::format("added prop light {} for {} (radius {:.0f}, brightness {:.2f})", Called(edit), NameFor(prop), edit.Light->Radius, edit.Light->Brightness));
+            TickOnce();
         }
 
         /// Add light (docs/design/in-game-editor.md §12): a light for one of our NPCs, the one an NPC section of the Lights tab names (tag), or the
@@ -4746,10 +4856,10 @@ namespace MeleBridge::Editor
             }
             PushStep(std::move(step));
             Select(actor);
-            // Paused, the new actor has no light yet: it would render black.
-            TickOnce();
             auto const loaded = loadMs >= 0 ? std::format(" (loaded from the catalog in {:.0f} ms)", loadMs) : std::string{};
             Say(std::format("spawned {} as {}{}{}", c.Text, tag, loaded, lit));
+            // Paused, the new actor has no light yet: it would render black.
+            TickOnce();
         }
 
         // ! Save
@@ -5134,9 +5244,9 @@ namespace MeleBridge::Editor
                 text += std::format(" ({} took values an import wrote into the file, where they hadn't changed since)", result.TookFileValues);
             for (auto const& p : result.Problems) text += "; " + p;
             if (result.Count > 0 && result.Problems.empty()) text += ". Next: editor_import in mele-mcp (level YAML, then build)";
+            Say(text);
             // Paused, an actor that took a location from the file keeps the light of where it was.
             if (result.TookFileValues > 0) TickOnce();
-            Say(text);
         }
 
         // ! Re-apply
@@ -5224,12 +5334,7 @@ namespace MeleBridge::Editor
             {
                 if (e.Map != map) continue;
                 kept.insert(KeyOf(e));
-                if (e.Spawned && e.Deleted) e.Rebindable = true;
-                else
-                {
-                    e.Pending = true;
-                    e.PendingWhy = "kept from a save that failed, waiting for its actor";
-                }
+                Unbind(e, "kept from a save that failed, waiting for its actor");
             }
             try
             {
@@ -5264,7 +5369,7 @@ namespace MeleBridge::Editor
             auto const before = std::exchange(G.Levels, std::move(levels));
             G.LevelsChangedAt = GetTickCount64();
             G.PassWanted = true;
-            G.PassFaulted = false;
+            G.PassFaults = 0;
             G.ReswitchFaulted = false;
             G.SummaryStale = true;
             G.TrackedStale = true;
@@ -5282,14 +5387,10 @@ namespace MeleBridge::Editor
                     if (G.Selected == e.Actor) Select(nullptr);
                     std::erase_if(G.Undo, [i](Step const& s) { return s.Target == i; });
                     std::erase_if(G.Redo, [i](Step const& s) { return s.Target == i; });
-                    LEASI_INFO("editor: {} left with {}; its edit waits for the level to come back", Called(e), e.Level);
-                    Detach(e);
-                    if (e.Spawned && e.Deleted) e.Rebindable = true;
-                    else
-                    {
-                        e.Pending = true;
-                        e.PendingWhy = std::format("{} is not loaded", e.Level);
-                    }
+                    // A spawn on its built copy left with the copy's level, not with its own.
+                    auto const& level = e.CopyLevel.empty() ? e.Level : e.CopyLevel;
+                    LEASI_INFO("editor: {} left with {}; its edit waits for the level to come back", Called(e), level);
+                    Unbind(e, std::format("{} is not loaded", level));
                 }
             }
             // A level that turned visible: its actors' components were attached over several frames, some maybe before an edit
@@ -5364,15 +5465,20 @@ namespace MeleBridge::Editor
             }
         };
 
+        /// The loaded actors, our leftover spawns left out (G.Leftovers): one has the tag of the spawn it was, and would pass for
+        /// its built copy.
         LoadedActors ReadLoadedActors()
         {
             LoadedActors loaded;
+            auto const leftover = [](AActor* actor) {
+                return std::any_of(G.Leftovers.begin(), G.Leftovers.end(), [&](auto const& l) { return l.first == actor && l.second == actor->ObjectInternalInteger; });
+            };
             for (auto const& level : G.Levels)
             {
                 loaded.Levels.insert(Lower(LevelOf(level.Level)));
                 for (auto const actor : static_cast<ULevelBase*>(level.Level)->Actors)
                 {
-                    if (!Real(actor) || actor->bDeleteMe) continue;
+                    if (!Real(actor) || actor->bDeleteMe || leftover(actor)) continue;
                     loaded.All.push_back(actor);
                     loaded.ByTag[Lower(NameText(actor->Tag))].push_back(actor);
                 }
@@ -5470,6 +5576,22 @@ namespace MeleBridge::Editor
             return entry.is_object() && !Text(entry, "path").empty() && Numbers(entry, "location", v) && Numbers(entry, "rotation", v);
         }
 
+        /// When a pass that faulted runs again (PassFaults), for the status line and the log.
+        std::string PassRetryText()
+        {
+            if (G.PassFaults < MaxPassFaults) return std::format("tried again in {} s", PassRetryMs / 1000);
+            return std::format("failed {} times in a row: tried again when an edit needs it, at most every {} s, or when the loaded levels change", G.PassFaults,
+                               PassRetryMs / 1000);
+        }
+
+        /// Awaiting's refusal of an object a waiting entry or edit names: being applied, or not while the passes fault, and when
+        /// one runs again (the refused edit asks for it: Touch).
+        std::string NotApplied(std::string const& name)
+        {
+            if (G.PassFaults == 0) return std::format("{}'s session entry is still being applied, try again in a moment", name);
+            return std::format("{}'s session entry is not applied yet: the last re-apply pass failed ({})", name, PassRetryText());
+        }
+
         /// Why no edit may be made of this actor yet, or empty: a session entry still waiting names it (the first pass waits for
         /// the loaded levels to settle, a level that streams in for half a second), or an edit waiting for its actor (its level
         /// came back) or for its built copy (a spawn spawned again) does. An edit made of the actor as it stands would replace
@@ -5505,9 +5627,7 @@ namespace MeleBridge::Editor
                 // As the pass will match it: an entry that names it only as one of two actors with its tag waits anyway.
                 std::string why;
                 if (Match(loaded, n.Spawned, n.Tag, n.Path, n.ClassName, why) != actor) continue;
-                auto const name = ToUtf8(NameOf(actor));
-                return G.PassFaulted ? std::format("{}'s session entry is not applied yet, and the last re-apply pass failed (tried again when the loaded levels change)", name)
-                                     : std::format("{}'s session entry is still being applied, try again in a moment", name);
+                return NotApplied(ToUtf8(NameOf(actor)));
             }
             return {};
         }
@@ -5522,9 +5642,7 @@ namespace MeleBridge::Editor
                 return !entry.Done && Valid(entry.Data) && LevelLightEntry(entry.Data) && names(Text(entry.Data, "path"));
             }) || std::any_of(G.Edits.begin(), G.Edits.end(), [&](Edit const& e) { return e.Map == G.SessionMap && e.Pending && e.Component && names(e.Path); });
             if (!waits) return {};
-            auto const name = ToUtf8(NameOf(light));
-            return G.PassFaulted ? std::format("{}'s session entry is not applied yet, and the last re-apply pass failed (tried again when the loaded levels change)", name)
-                                 : std::format("{}'s session entry is still being applied, try again in a moment", name);
+            return NotApplied(ToUtf8(NameOf(light)));
         }
 
         enum class Verdict { Apply, Drop };
@@ -5692,7 +5810,8 @@ namespace MeleBridge::Editor
         }
 
         /// An edit's own spawn, replaced by the built copy: destroyed, or hidden if the engine refuses (a light switched off: it is
-        /// never hidden; through the writer its kind takes, docs/design/in-game-editor.md §12).
+        /// never hidden; through the writer its kind takes, docs/design/in-game-editor.md §12). A hidden one keeps its tag, so it goes in G.Leftovers:
+        /// no later pass takes it for the built copy.
         void DestroySpawn(Edit const& e)
         {
             auto const actor = e.Actor;
@@ -5702,6 +5821,8 @@ namespace MeleBridge::Editor
                 CallProcessEvent(actor, Fn.Destroy, &destroy);
                 if (destroy.ReturnValue) return;
             }
+            G.Leftovers.emplace_back(actor, actor->ObjectInternalInteger);
+            LEASI_WARN("editor: {} was not destroyed: {}, and left out of the passes", ToUtf8(PathOf(actor)), IsLight(actor) ? "switched off" : "hidden");
             if (IsLight(actor)) ApplyLight(actor, LightOf(actor, e.Light ? SourceOf(e.Light->Kind) : SourceOf(actor)), true);
             else WriteFlags(actor, { true, false, false }, Visible(actor));
             UpdateComponents(actor);
@@ -5729,10 +5850,12 @@ namespace MeleBridge::Editor
                     e.PendingWhy = Fn.Spawn == nullptr ? "spawning is off: Actor.Spawn was not found" : "the engine refused to spawn it again";
                     continue;
                 }
+                // Bind clears Deleted; Unbind never leaves a deleted spawn pending, and the Put keeps whatever it is anyway.
                 auto const pose = e.Now;
+                auto const deleted = e.Deleted;
                 Bind(e, actor);
                 e.Rebindable = true;
-                Put(e, pose, false);
+                Put(e, pose, deleted);
                 count++;
                 LEASI_INFO("editor: spawned {} again as {}", e.Tag, ToUtf8(PathOf(actor)));
             }
@@ -5786,10 +5909,11 @@ namespace MeleBridge::Editor
                     continue;
                 }
                 auto const pose = e.Now;
+                auto const deleted = e.Deleted;
                 Bind(e, actor);
                 // Before anything else touches it: a built copy must still take over if the Put faults.
                 e.Rebindable = true;
-                Put(e, pose, false);
+                Put(e, pose, deleted);
                 count++;
                 LEASI_INFO("editor: spawned {} again as {}", e.Tag, ToUtf8(PathOf(actor)));
             }
@@ -5834,7 +5958,7 @@ namespace MeleBridge::Editor
             Bind(e, actor);
             loaded.Taken.insert(actor);
             e.Rebindable = false;
-            if (e.Spawned) e.OnCopy = true;
+            if (e.Spawned) e.CopyLevel = LevelOf(actor);
             if (verdict == Verdict::Drop)
             {
                 LEASI_INFO("editor: session entry {} dropped on {}: {}", KeyOf(e), ToUtf8(PathOf(actor)), why);
@@ -6040,13 +6164,20 @@ namespace MeleBridge::Editor
                     continue;
                 }
                 auto const actor = Match(loaded, e.Spawned, e.Tag, e.Path, e.ClassName, why);
+                // A spawn on its built copy waits for the copy's level. Once that level is loaded again with no actor of its tag in
+                // any loaded level, the copy is gone, and the edit spawns again as one never on a copy.
+                if (actor == nullptr && !e.CopyLevel.empty() && loaded.Levels.contains(Lower(e.CopyLevel)) && loaded.Tagged(e.Tag).empty())
+                {
+                    LEASI_INFO("editor: {}'s built copy is not in {} any more: its edit spawns it again", Called(e), e.CopyLevel);
+                    e.CopyLevel.clear();
+                }
                 auto const wait = e.Npc ? PoseRefusal(e.Npc->Tag) : std::string{};
                 if (actor == nullptr && e.Spawned && !loaded.Tagged(e.Tag).empty())
                 {
                     // Two built copies, or a copy another edit has: which one is ours is not for a pass to guess.
                     e.PendingWhy = why;
                 }
-                else if (!wait.empty() && (actor != nullptr || (e.Spawned && !e.OnCopy)))
+                else if (!wait.empty() && (actor != nullptr || (e.Spawned && e.CopyLevel.empty())))
                 {
                     e.PendingWhy = wait;
                 }
@@ -6058,11 +6189,12 @@ namespace MeleBridge::Editor
                     NoteChanged(i);
                     carrier(actor);
                 }
-                else if (e.Spawned && !e.OnCopy)
+                else if (e.Spawned && e.CopyLevel.empty())
                 {
                     if (NpcPlace(e, e.Now.Location)) e.Saved = false;
                     respawn.push_back(i);
                 }
+                else if (e.Spawned) e.PendingWhy = std::format("waiting for its built copy: {} is not loaded", e.CopyLevel);
                 else e.PendingWhy = why;
             }
 
@@ -6149,7 +6281,7 @@ namespace MeleBridge::Editor
                     e.Source = nullptr;
                     Bind(e, actor);
                     loaded.Taken.insert(actor);
-                    e.OnCopy = spawned;
+                    if (spawned) e.CopyLevel = LevelOf(actor);
                     if (builtHidden) TakeBuiltHidden(e);
                     Put(e, place, deleted);
                     applied++;
@@ -6157,17 +6289,13 @@ namespace MeleBridge::Editor
                     carrier(actor);
                     LEASI_INFO("editor: re-applied {} to {}", entry.Key, ToUtf8(PathOf(actor)));
                 }
-                else if (deleted)
-                {
-                    // A deleted spawn with no actor: kept as a tombstone (written again as deleted if saved), until a built copy shows.
-                    e.Deleted = true;
-                    e.Rebindable = true;
-                }
                 else
                 {
-                    e.Pending = true;
-                    e.PendingWhy = "to be spawned again";
-                    respawn.push_back(G.Edits.size() - 1);
+                    // A spawn with no actor (a level actor not loaded waited above). Deleted, it is kept as a tombstone (written
+                    // again as deleted if saved) until a built copy shows; else it is spawned again.
+                    e.Deleted = deleted;
+                    Unbind(e, "to be spawned again");
+                    if (e.Pending) respawn.push_back(G.Edits.size() - 1);
                 }
             }
             std::erase_if(G.Entries, [](Entry const& entry) { return entry.Done; });
@@ -6182,8 +6310,6 @@ namespace MeleBridge::Editor
             if (!dropped.empty()) DropEntries(G.SessionMap, dropped);
             G.Applied += applied + spawned + rebound;
             G.Dropped += static_cast<int>(dropped.size());
-            // Paused, a prop spawned again has no light yet, and one moved keeps the light of where it was.
-            if (applied + spawned + rebound > 0) TickOnce();
 
             auto const waitingCount = G.Entries.size()
                 + static_cast<size_t>(std::count_if(G.Edits.begin(), G.Edits.end(), [](Edit const& e) { return e.Map == G.SessionMap && e.Pending; }));
@@ -6200,6 +6326,15 @@ namespace MeleBridge::Editor
             {
                 LEASI_INFO("editor: re-apply pass over {} levels: nothing applied, {} waiting", G.Levels.size(), waitingCount);
             }
+            // Paused, a prop spawned again has no light yet, and one moved keeps the light of where it was.
+            if (applied + spawned + rebound > 0) TickOnce();
+        }
+
+        /// A pass that faulted: the next waits PassRetryMs (Tick).
+        void PassFailed()
+        {
+            G.PassFaults++;
+            G.PassFaultedAt = GetTickCount64();
         }
 
         void PassEntry(UObject* pc)
@@ -6207,12 +6342,13 @@ namespace MeleBridge::Editor
             try
             {
                 Pass(static_cast<APlayerController*>(pc));
+                G.PassFaults = 0;
             }
             catch (std::exception const& e)
             {
-                G.PassFaulted = true;
-                LEASI_ERROR("editor: re-apply pass: {}", e.what());
-                Say(std::format("the session was not re-applied: {} (tried again when the loaded levels change)", e.what()));
+                PassFailed();
+                LEASI_ERROR("editor: re-apply pass: {}; {}", e.what(), PassRetryText());
+                Say(std::format("the session was not re-applied: {} ({})", e.what(), PassRetryText()));
             }
         }
 
@@ -6223,14 +6359,14 @@ namespace MeleBridge::Editor
             return std::any_of(G.Edits.begin(), G.Edits.end(), [](Edit const& e) { return e.Map == G.SessionMap && (e.Pending || e.Rebindable); });
         }
 
-        /// A pass that faults is not retried until the loaded levels change again.
+        /// A pass that faults runs again PassRetryMs later (PassFailed, Tick).
         void RunPass(APlayerController* pc)
         {
             if (!Guarded(PassEntry, pc))
             {
-                G.PassFaulted = true;
-                LEASI_ERROR("editor: access violation in a re-apply pass ({}); not tried again until the loaded levels change", FaultText());
-                Say("the session was not re-applied: access violation (tried again when the loaded levels change)");
+                PassFailed();
+                LEASI_ERROR("editor: access violation in a re-apply pass ({}); {}", FaultText(), PassRetryText());
+                Say(std::format("the session was not re-applied: access violation ({})", PassRetryText()));
             }
             G.SummaryStale = true;
         }
@@ -6238,8 +6374,12 @@ namespace MeleBridge::Editor
         /// A map change or a load (docs/design/in-game-editor.md §10). Every edit lets go of its actor (the old world's actors are gone, and a new actor
         /// in a reused slot would take its moves); the unsaved ones are saved from their stored state; the edits of each map
         /// written are cleared, those of a map whose file could not be written stay, detached and unsaved, for the next Save to
-        /// retry; undo starts empty; and the new map's session waits for the first pass.
-        void ChangeWorld(APlayerController* pc)
+        /// retry; undo starts empty; and the new map's session waits for the first pass. The old world is let go of once; the
+        /// new one's setup (its levels, levels.json, its session) is committed to G.World only once it ran to the end. A fault in
+        /// it (an access violation or a C++ exception, either of which ends the tick) leaves G.World unset, so the next tick sets
+        /// the world up again, at most MaxSetupTries times for one world. Returns false once those ran out: the editor and the
+        /// passes are off in that world, said once in the log.
+        bool ChangeWorld(APlayerController* pc)
         {
             if (G.World != nullptr)
             {
@@ -6269,6 +6409,7 @@ namespace MeleBridge::Editor
                 G.ChannelsOf = nullptr;
                 G.DragWarn.reset();
                 G.DragShare = -1;
+                G.Leftovers.clear();
                 if (!saved.Problems.empty())
                 {
                     std::string text = "the map changed: ";
@@ -6280,12 +6421,30 @@ namespace MeleBridge::Editor
                 {
                     Say(std::format("the map changed: saved {} edit{} to {}", saved.Count, saved.Count == 1 ? "" : "s", saved.Written.front()));
                 }
+                // Let go of: a setup that faults below runs again without doing this twice.
+                G.World = nullptr;
+                G.WorldIndex = -1;
             }
-            G.World = pc->WorldInfo;
-            G.WorldIndex = pc->WorldInfo->ObjectInternalInteger;
-            G.Levels = ScanLevels(pc->WorldInfo);
+            auto const world = pc->WorldInfo;
+            auto const index = world->ObjectInternalInteger;
+            if (G.SetupWorld != world || G.SetupIndex != index)
+            {
+                G.SetupWorld = world;
+                G.SetupIndex = index;
+                G.SetupTries = 0;
+            }
+            if (G.SetupTries == MaxSetupTries)
+            {
+                G.SetupTries++;
+                LEASI_ERROR("editor: setting up the new world faulted {} times (see the lines above): the editor and the session's re-apply are off "
+                            "until the next map change or load",
+                            MaxSetupTries);
+            }
+            if (G.SetupTries > MaxSetupTries) return false;
+            if (G.SetupTries++ > 0) LEASI_WARN("editor: setting up the new world again ({} of {}): the last try faulted", G.SetupTries, MaxSetupTries);
+            G.Levels = ScanLevels(world);
             G.LevelsChangedAt = GetTickCount64();
-            G.PassFaulted = false;
+            G.PassFaults = 0;
             G.PassWanted = false;
             G.PassNow = true;
             // The props, lights and effects of the old world are gone, and a new prop light's seed is this map's (docs/design/in-game-editor.md §11). So is
@@ -6304,12 +6463,25 @@ namespace MeleBridge::Editor
             // A build since the last map may have added a level of ours, or a stream.
             ReadLevels();
             ReadSession(ToUtf8(MapName()));
+            // Set up: from now on a tick in this world is not a map change.
+            G.World = world;
+            G.WorldIndex = index;
+            G.SetupTries = 0;
+            return true;
         }
 
         void Run(APlayerController* pc, UCanvas* canvas, Command const& c)
         {
             // A drag's step closes before anything else runs: an undo or a delete mid-drag acts on the drag as a whole.
             auto const drag = c.Type == Command::Kind::Move || c.Type == Command::Kind::Rotate || c.Type == Command::Kind::Scale || c.Type == Command::Kind::Light;
+            // A drag command acts on the selection, and the overlay built it from a snapshot a tick old: a pick or an undo
+            // that ran before it in this tick may have selected another actor. That one must not take the old one's move, nor
+            // the old panel's settings (every field of them differs from its own, so Held would pass them all).
+            if (drag && c.Text != PathOfSelection())
+            {
+                LEASI_INFO("editor: a drag command for {} dropped: the selection changed before it ran", c.Text);
+                return;
+            }
             if (!drag) CloseDrag();
             switch (c.Type)
             {
@@ -6626,7 +6798,11 @@ namespace MeleBridge::Editor
             if (!G.Open && G.PausedWorld != nullptr) RestorePause();
 
             // A map change or a load: the camera, the selection, the paused world and every edit's actor belonged to the old one.
-            if (pc->WorldInfo != G.World || pc->WorldInfo->ObjectInternalInteger != G.WorldIndex) ChangeWorld(pc);
+            // A world whose setup kept faulting gets nothing more from the editor.
+            if (pc->WorldInfo != G.World || pc->WorldInfo->ObjectInternalInteger != G.WorldIndex)
+            {
+                if (!ChangeWorld(pc)) return;
+            }
             else if (auto levels = ScanLevels(pc->WorldInfo); levels != G.Levels) LevelsChanged(std::move(levels));
             // The free cam writes the camera's cache: the view Auto light places toward.
             if (pc->PlayerCamera != nullptr)
@@ -6640,55 +6816,57 @@ namespace MeleBridge::Editor
                 G.ViewYaw = pc->Rotation.Yaw;
             }
 
-            // The game pauses this way too (seen while it was unfocused) and unpauses when it is done: the editor keeps its pause.
-            if (G.Open && G.PausedWorld != nullptr && G.PausedWorld == pc->WorldInfo)
-            {
-                // Our own one-tick release (a spawn, the end of a drag, an undo, a pass) is over: not the game's doing. Our timed
-                // release (TickFor, an effect step) runs until its deadline, then is over the same way.
-                auto const ownTick = std::exchange(G.TickingOnce, false);
-                auto const ownRun = G.RunUntil != 0;
-                auto const running = ownRun && GetTickCount64() < G.RunUntil;
-                if (ownRun && !running) G.RunUntil = 0;
-                if (!G.PausedWorld->bPlayersOnly && !running)
-                {
-                    G.PausedWorld->bPlayersOnly = 1;
-                    if (!ownTick && !ownRun)
-                    {
-                        // The game wrote 0: whatever pause it had when the editor opened is over, so closing gives back 0.
-                        if (G.WasPlayersOnly) LEASI_INFO("editor: the game ended its own pause while the editor was open; closing will give back 0");
-                        G.WasPlayersOnly = false;
-                        if (G.PauseRetaken++ == 0) LEASI_INFO("editor: the game cleared bPlayersOnly while the editor was open; set again");
-                    }
-                }
-            }
+            // Our release over (a spawn, the end of a drag, an undo, a pass; an effect step's run past its deadline), the pause is
+            // taken back; a 0 the game wrote is the game's.
+            KeepPause(pc->WorldInfo);
 
             // Once on the first tick after a load, then when the loaded levels changed and stayed the same a moment, open or not;
             // not while a level is still being added to the world or taken from it, unless it stays so. After the pause is taken
-            // back above: the world tick a pass lets through (TickOnce) is taken back at the next tick, not this one.
-            auto const quiet = GetTickCount64() - G.LevelsChangedAt;
+            // back above: the world tick a pass lets through (TickOnce) is taken back at the next tick, not this one. After a
+            // pass faulted, the next waits PassRetryMs: it runs on its own while fewer than MaxPassFaults faulted in a row, then
+            // only when asked (an edit Awaiting refused, a new levels.json), or once the loaded levels change (LevelsChanged).
+            auto const now = GetTickCount64();
+            auto const quiet = now - G.LevelsChangedAt;
             auto const steady = quiet >= UnsettledMs || std::all_of(G.Levels.begin(), G.Levels.end(), [](LevelSeen const& l) { return l.Settled; });
-            if (steady && (G.PassNow || (G.PassWanted && quiet >= SettleMs)))
+            auto const asked = G.PassNow || (G.PassWanted && quiet >= SettleMs);
+            auto const waited = G.PassFaults == 0 || now - G.PassFaultedAt >= PassRetryMs;
+            auto const retry = G.PassFaults > 0 && G.PassFaults < MaxPassFaults;
+            if (steady && waited && (asked || retry))
             {
+                // npc_place may have rebuilt it while the editor was closed: a pass judges NPC lights by its poses (docs/design/in-game-editor.md §12).
+                CheckLevels(true);
                 G.PassNow = G.PassWanted = false;
-                if (!G.PassFaulted && PassNeeded()) RunPass(pc);
+                if (PassNeeded()) RunPass(pc);
+                // Nothing left to apply: the fault holds nothing back any more.
+                else G.PassFaults = 0;
                 // After each pass, and each time the loaded levels settle: every switched prop, for the props and lights that came,
                 // went or were re-applied (docs/design/in-game-editor.md §11).
                 G.TrackedStale = true;
                 G.ReswitchAll = true;
             }
 
+            // While the overlay has failed (Diag.Overlay, which Overlay.cpp alone writes), F8 would open and close the editor in
+            // the same tick, pause and cursor clip included: refused, said once per failure.
+            auto const overlay = Diag.Overlay.load(std::memory_order_acquire);
+            auto const overlayFailed = overlay == OverlayState::Failed;
+            if (!overlayFailed) G.OverlayFailedSaid = false;
             auto const f8 = Focused() && Down(VK_F8);
             if (f8 && !G.F8Down)
             {
                 // Without the overlay the editor would hold input back with nothing on screen to close it.
-                if (!G.Open && !Diag.OverlayReady.load()) LEASI_WARN("editor: the overlay is not running (see the swap chain lines above), F8 ignored");
-                else SetOpen(pc, !G.Open);
+                if (G.Open) Close(false);
+                else if (overlayFailed)
+                {
+                    if (!std::exchange(G.OverlayFailedSaid, true)) LEASI_WARN("editor: the overlay failed (see the lines above), F8 ignored");
+                }
+                else if (overlay != OverlayState::Ready) LEASI_WARN("editor: the overlay is not running (see the swap chain lines above), F8 ignored");
+                else SetOpen(pc, true);
             }
             G.F8Down = f8;
-            if (G.Open && Diag.OverlayFailed.load())
+            if (G.Open && overlayFailed)
             {
                 LEASI_ERROR("editor: the overlay failed, editor closed");
-                SetOpen(pc, false);
+                Close(false);
             }
             // npc_place may have rebuilt it meanwhile (docs/design/in-game-editor.md §12).
             if (G.Open) CheckLevels(false);
@@ -6801,19 +6979,13 @@ namespace MeleBridge::Editor
             }
         }
 
-        /// After an access violation: close without touching game memory. The drag step closes from the edit's stored state; the
-        /// pause is given back at the next tick (G.PausedWorld stays set for it), the cursor right away.
+        /// After an access violation, open or not: close without touching game memory (Close: the pause is given back at the
+        /// next tick, the cursor's clip right away), and drop the selection and the commands queued.
         void Fail()
         {
-            LEASI_ERROR("editor: access violation on the game thread ({}), editor closed", FaultText());
-            CloseDrag();
-            G.Open = false;
-            G.FreeCam = false;
-            G.Camera = nullptr;
+            LEASI_ERROR("editor: access violation on the game thread ({}){}", FaultText(), G.Open ? ", editor closed" : "");
+            Close(true);
             Select(nullptr);
-            Open.store(false);
-            Looking.store(false);
-            HoldCursor(false);
             std::scoped_lock lock{ SharedLock };
             Commands.clear();
         }
@@ -6891,6 +7063,8 @@ namespace MeleBridge::Editor
         }
         auto vector = [](FVector v) { return json::array({ v.X, v.Y, v.Z }); };
         auto orNull = [](std::string const& text) { return text.empty() ? json(nullptr) : json(text); };
+        // Read once: ready and failed are never both true.
+        auto const overlay = Diag.Overlay.load();
         json state{
             { "open", Open.load() },
             { "freeCam", s.FreeCam },
@@ -6921,7 +7095,7 @@ namespace MeleBridge::Editor
             { "hooks", { { "present", Diag.PresentHooked.load() }, { "present1", Diag.Present1Hooked.load() },
                          { "resizeBuffers", Diag.ResizeHooked.load() }, { "directInput", Diag.DirectInputHooked.load() },
                          { "cursor", Diag.CursorHooked.load() }, { "window", Diag.WindowHooked.load() },
-                         { "overlayReady", Diag.OverlayReady.load() }, { "overlayFailed", Diag.OverlayFailed.load() } } },
+                         { "overlayReady", overlay == OverlayState::Ready }, { "overlayFailed", overlay == OverlayState::Failed } } },
             { "counters", { { "presents", Diag.Presents.load() }, { "overlayFrames", Diag.OverlayFrames.load() },
                             { "swallowedMessages", Diag.SwallowedMessages.load() },
                             { "zeroedDeviceStates", Diag.ZeroedDeviceStates.load() },

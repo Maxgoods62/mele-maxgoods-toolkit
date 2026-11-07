@@ -53,8 +53,9 @@ public sealed record LevelBuildResult(string Path, bool CreatedLevel, IReadOnlyL
 /// moved, turned, scaled or hidden in a fork of the file, which the level streams instead (<see cref="ForkBuilder"/>); an effect (an emitter)
 /// is moved, turned or hidden only; a light of a light collection gets its brightness, colour, radius, falloff, on/off and place
 /// (docs/design/in-game-editor.md §12.4), in a fork for a file it streams, in the map for its characterLights copies. A missing level is created, and the
-/// LE1CP Sideloader config that loads it is written. Last, its key of levels.json, which tells MeleBridge which levels are ours, where
-/// its NPCs stand and their lights, and its character lights.
+/// LE1CP Sideloader config that loads it is written. Right after the level, its key of levels.json, which tells MeleBridge which levels are ours, where
+/// its NPCs stand and their lights, and its character lights. Every check runs on the forks and the level in memory before any file
+/// is written (<see cref="BuildLevel"/>).
 /// </summary>
 public static class LevelBuilder
 {
@@ -195,7 +196,12 @@ public static class LevelBuilder
     }
 
     /// <param name="outRoot">mod_build out=: the mod root to build into instead (see <see cref="YamlFiles.Target"/>).</param>
-    public static LevelBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null)
+    /// <param name="writes">
+    /// The files written so far, each with its backup: an out= copy of the DLC folder, the forks, the level, its .m3cd, levels.json,
+    /// each GlobalTlk. They are saved one after the other with no rollback, so a failure after the first becomes a
+    /// <see cref="PartialBuildException"/> naming them. mod_build may pass one for all its files; null: this build's own.
+    /// </param>
+    public static LevelBuildResult Build(MEGame game, string yamlPath, string? packageOverride, string? outRoot = null, BuildWrites? writes = null)
     {
         if (!game.IsGame1()) throw new ArgumentException("level_build handles Game 1 (LE1) levels.");
         LecHost.EnsureInitialized();
@@ -206,7 +212,26 @@ public static class LevelBuilder
 
         // A missing level is created from a full path or one under the mod root, never from a bare name: it could resolve into the game install.
         var notes = new List<string>();
+        var written = writes ?? new BuildWrites();
+        var before = written.Written.Count;
+        var folders = OutFolders(outRoot);
         var (package, create) = Target(game, packageOverride ?? spec.Package ?? throw new ArgumentException("The file has no 'package'."), dir, outRoot, notes);
+        // With out=, Target may have just copied the DLC folder: a write, which every later error names.
+        if (CopiedNow(folders, package) is { } copy) written.Wrote(copy);
+        // Only the YAML's own package is the level the game loads (not another package, nor an out= copy): levels.json describes it.
+        var describe = packageOverride is null && outRoot is null;
+        return written.Guard(() => BuildLevel(game, spec, dir, package, create, describe, outRoot, notes, written, before));
+    }
+
+    /// <summary>
+    /// <see cref="Build"/> once the level's path is known. The order is the state. First every fork and the level itself are made in
+    /// memory, and every check of the file runs: a refusal or an error writes nothing. Then the forks (the map never names a file not
+    /// written yet), the level, what describes it (its .m3cd, levels.json), the forks it no longer streams go, and last the names.
+    /// <paramref name="written"/> records each write; <paramref name="before"/> is how many it held when this build started.
+    /// </summary>
+    private static LevelBuildResult BuildLevel(MEGame game, Spec spec, string dir, string package, bool create, bool describe, string? outRoot, List<string> notes,
+        BuildWrites written, int before)
+    {
         var globals = spec.GlobalTlk.Select(g => InOut(Locate(game, g, Path.GetDirectoryName(package)!, dir), outRoot, "globalTlk")).ToList();
         if (spec.Strings.Count > 0 && globals.Count == 0) throw new ArgumentException("The file gives a name text but no 'globalTlk' to write it to (actor names are read from the GlobalTlk).");
         foreach (var target in globals.Prepend(package)) PackageWriter.EnsureWritable(game, target);
@@ -215,10 +240,12 @@ public static class LevelBuilder
         if (spec.PropTemplate is { Package: { } standIn }) spec.PropTemplate = spec.PropTemplate with { Package = Source(game, standIn, dir, outRoot) };
         foreach (var prop in spec.Props.Where(p => p.Mesh is not null)) prop.Mesh = prop.Mesh! with { Package = Source(game, prop.Mesh.Package, dir, outRoot) };
 
-        if (create)
+        // This build's backups, for its result; written may hold an earlier build's files too (mod_build).
+        var backups = new List<string>();
+        void Wrote(string path, string? backup)
         {
-            LevelCreator.Create(game, package);
-            notes.Add($"Created the level {Path.GetFileName(package)}.");
+            if (backup is not null) backups.Add(backup);
+            written.Wrote(path, backup);
         }
 
         // Forks before the map (docs/design/in-game-editor.md §11): the map never names a file not written yet. Every file's fork is made in memory first,
@@ -232,29 +259,36 @@ public static class LevelBuilder
             .ToList();
         if (prepared.SelectMany(p => p.Refusals).ToList() is { Count: > 0 } refusals)
         {
-            throw new ArgumentException($"vanilla actors the build won't change (nothing written): {string.Join("; ", refusals)}.");
+            // Before the level is created too. An out= copy this build made is named by the PartialBuildException instead.
+            var nothing = written.Written.Count == before ? " (nothing written)" : "";
+            throw new ArgumentException($"vanilla actors the build won't change{nothing}: {string.Join("; ", refusals)}.");
         }
-        var forks = prepared.Select(p => ForkBuilder.Write(p, notes)).ToList();
-        prepared.Clear();
-        var forked = forks.Select(f => f.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var forked = prepared.Select(p => p.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var streams = levels.Select(l => forked.Contains(l) ? ForkBuilder.ForkName(map, l) : l).ToList();
         var others = levels.Zip(streams).DistinctBy(p => p.Second, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(p => p.Second, p => forked.Contains(p.First) ? p.First : ForkBuilder.ForkName(map, p.First), StringComparer.OrdinalIgnoreCase);
 
-        var backups = new List<string>();
+        // The level is built in memory, a missing one too, before any file is written: every check of the file against it (a tag,
+        // a template, a light, a Kismet sequence...) throws while the disk is as it was. A fork written first would load with the
+        // old map, which may stream it already.
         var missing = new List<string>();
         var levelChanges = new List<string>();
         var poses = new List<BuiltPose>();
-        var ((npcs, usables, props, lights, named), backup) = PackageWriter.Edit(game, package, pcc =>
+        using var pcc = create ? LevelCreator.CreateInMemory(game, package) : PackageInspector.Open(game, package);
+        PackageWriter.EnsureWritable(pcc.Game, pcc.FilePath);
+        (List<BuiltNpc>, List<BuiltUsable>, List<BuiltProp>, List<BuiltLight>, HashSet<string>, List<string>) Fill()
         {
             var level = pcc.FindExport(LevelPath) ?? throw new ArgumentException($"{Path.GetFileName(pcc.FilePath)} has no {LevelPath}; is it a level?");
             using var cache = new PackageCache();
+            List<string> left = [];
             if (spec.Streaming is { } streaming)
             {
-                LevelStreams.SetStreaming(game, pcc, level, streaming with { Levels = streams }, others, cache, levelChanges);
+                left = LevelStreams.SetStreaming(game, pcc, level, streaming with { Levels = streams }, others, cache, levelChanges);
                 // With 'squad' or not: a wait still naming the other name of a pair would wait for a file the level no longer streams.
                 LevelStreams.RenameWaits(pcc, others, levelChanges);
             }
+            // No 'streaming' (any more): the forks an earlier build streamed name their vanilla files again, and are deleted below.
+            else left = LevelStreams.DropAllForks(game, pcc, level, levelChanges);
             if (spec.PostProcess is { } post) LevelStreams.SetPostProcess(game, pcc, level, post.Package, post.Line, levelChanges);
             // The first copy of a name is the one the build keeps (levels.json names it): its lights take the vanilla: entries keyed by its
             // source file, and the source's own values where they have none (docs/design/in-game-editor.md §12.4).
@@ -275,8 +309,10 @@ public static class LevelBuilder
                 var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {squad.Line}: the level has no {MainSequence}.");
                 SquadSpawns.Set(game, pcc, sequence, squad.Package, streams, squad.Line, cache, levelChanges);
             }
-            // Read once, and only when a found NPC light leaves its colour or falloff out.
-            var templateLook = new Lazy<(StructProperty?, FloatProperty?)>(() => TemplateLook(game, pcc, spec.LightTemplate ?? DefaultLightTemplate));
+            // No 'squad' (any more): the chain an earlier build linked stops firing; its Kismet stays, unlinked.
+            else if (pcc.FindExport(MainSequence) is { } main) SquadSpawns.Remove(main, levelChanges, notes);
+            // Read once, and only when a found NPC light needs its template's values back.
+            var templateLook = new Lazy<PropertyCollection?>(() => TemplateLook(game, pcc, spec.LightTemplate ?? DefaultLightTemplate));
             var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, templateLook, poses, missing, notes)).ToList();
             var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList();
             var builtLights = spec.Lights.Select(l => BuildLight(game, pcc, level, spec, l, cache)).ToList();
@@ -284,18 +320,42 @@ public static class LevelBuilder
             // Each prop is lit by prop lights or by its light environment, from the lights: entries (docs/design/in-game-editor.md §11).
             var looks = new Dictionary<(string?, string), (bool Static, StructProperty? Channels)>();
             var builtProps = spec.Props.Select(p => BuildProp(game, pcc, level, spec, p, cache, looks, notes)).ToList();
-            var streamed = pcc.Exports.Where(e => e.ClassName == "LevelStreamingKismet").Select(e => e.GetProperty<NameProperty>("PackageName")?.Value.Instanced)
-                .OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
-            return (builtNpcs, builtUsables, builtProps, builtLights, streamed);
-        });
-        backups.Add(backup);
+            // What StreamingLevels lists, not every entry: one off the list (a pair's other name) streams nothing.
+            return (builtNpcs, builtUsables, builtProps, builtLights, LevelStreams.Streamed(pcc, level), left);
+        }
+        var (npcs, usables, props, lights, named, dropped) = Fill();
 
-        // A file with no vanilla entry left streams under its own name again: its fork goes now that the saved map no longer names it.
-        foreach (var vanilla in levels.Where(l => !forked.Contains(l)))
+        // No backup: a fork is made again from the vanilla file. One that was on disk before (an earlier build's) is named as rebuilt,
+        // not created. Each fork is recorded as soon as it is written, so a later one that fails still names it.
+        var had = prepared.SelectMany(ForkBuilder.Targets).Where(File.Exists).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var forks = new List<BuiltFork>();
+        foreach (var fork in prepared.Select(p => ForkBuilder.Write(p, notes)))
+        {
+            forks.Add(fork);
+            if (fork.Action == "written") written.Wrote(fork.ForkPath, null, had.Contains(fork.ForkPath));
+            foreach (var copy in fork.Localized.Where(l => l.Action == "written")) written.Wrote(copy.Path, null, had.Contains(copy.Path));
+        }
+        prepared.Clear();
+
+        if (create) Directory.CreateDirectory(Path.GetDirectoryName(pcc.FilePath)!);
+        var backup = create ? null : PackageWriter.Backup(pcc.FilePath);
+        // With its path: a level created in memory has no file of its own to save to.
+        pcc.Save(pcc.FilePath);
+        Wrote(pcc.FilePath, backup);
+        if (create) notes.Add($"Created the level {Path.GetFileName(package)}.");
+
+        // What describes the level right after it, before anything that may still fail: a GlobalTlk refused below leaves the
+        // Sideloader config and levels.json describing the level on disk (MeleBridge measures NPC light offsets from its poses).
+        var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, Wrote, notes) : null;
+        var levelsFile = describe ? WriteLevelsFile(package, spec, levels, poses, Wrote) : null;
+
+        // A file with no vanilla entry left, or that left streaming.levels, streams under its own name again: its fork goes now that
+        // the saved map no longer names it.
+        foreach (var vanilla in levels.Where(l => !forked.Contains(l)).Concat(dropped).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (named.Contains(ForkBuilder.ForkName(map, vanilla)))
             {
-                notes.Add($"{ForkBuilder.ForkName(map, vanilla)} is kept: a streaming entry of the level still names it.");
+                notes.Add($"{ForkBuilder.ForkName(map, vanilla)} is kept: the level's StreamingLevels still lists it.");
                 continue;
             }
             if (ForkBuilder.Delete(game, package, vanilla) is { } gone) forks.Add(gone);
@@ -308,15 +368,31 @@ public static class LevelBuilder
             {
                 var language = LanguageOfFile(Path.GetFileNameWithoutExtension(globalPath));
                 var edit = TalkFiles.Set(game, globalPath, StringsFor(spec.Strings, language, spec.DefaultLanguage), null);
-                backups.Add(edit.BackupPath);
+                Wrote(edit.Path, edit.BackupPath);
                 tlkFiles.Add($"{Path.GetFileName(globalPath)} ({language})");
             }
         }
 
-        var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, backups, notes) : null;
-        // Last: it describes the build, and only the YAML's own package is the level the game loads (not another package, nor an out= copy).
-        var levelsFile = packageOverride is null && outRoot is null ? WriteLevelsFile(package, spec, levels, poses) : null;
         return new LevelBuildResult(package, create, levelChanges, npcs, usables, props, lights, spec.Strings.Count, tlkFiles, config, missing, notes, backups, forks, levelsFile);
+    }
+
+    /// <summary>The folders under mod_build out= before the build; null without out=.</summary>
+    private static HashSet<string>? OutFolders(string? outRoot)
+    {
+        if (outRoot is null) return null;
+        var into = Path.GetFullPath(GamePaths.ToWindowsPath(outRoot));
+        return Directory.Exists(into) ? Directory.GetDirectories(into).ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The package's DLC folder when <see cref="YamlFiles.Target"/> just copied it into out= (it is there now and was not in <paramref name="had"/>); else null.</summary>
+    private static string? CopiedNow(HashSet<string>? had, string package)
+    {
+        if (had is null) return null;
+        for (var folder = Path.GetDirectoryName(package); !string.IsNullOrEmpty(folder); folder = Path.GetDirectoryName(folder))
+        {
+            if (Path.GetFileName(folder).StartsWith("DLC_", StringComparison.OrdinalIgnoreCase)) return !had.Contains(folder) && Directory.Exists(folder) ? folder : null;
+        }
+        return null;
     }
 
     /// <summary>The vanilla: light entries of a characterLights copy: keyed by its source file and the copy's name, of a file the map does not stream.</summary>
@@ -363,8 +439,9 @@ public static class LevelBuilder
     /// her pose as built and her lights' offsets (none too: the editor lists her NPC lights and edits them as offsets); the
     /// characterLights copies, by the collection's name in the level, with the file each is copied from; 'dlc', the DLC folder it lies
     /// in (at the top for MeleBridge, the last level built; in the level's key too, which catalog_index reads). Other keys stay. Unreadable, the file is kept aside (.bad-&lt;ticks&gt;) and a new one started. Written beside it, then moved over it.
+    /// Backed up first, as the level is: putting a build's backups back gives the level and its description from before it together.
     /// </summary>
-    private static string WriteLevelsFile(string package, Spec spec, IReadOnlyList<string> streams, IReadOnlyList<BuiltPose> poses)
+    private static string WriteLevelsFile(string package, Spec spec, IReadOnlyList<string> streams, IReadOnlyList<BuiltPose> poses, Action<string, string?> wrote)
     {
         var path = LevelsFilePath();
         JsonObject doc;
@@ -404,7 +481,9 @@ public static class LevelBuilder
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + ".build.tmp";
         File.WriteAllText(temporary, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+        var backup = File.Exists(path) ? PackageWriter.Backup(path) : null;
         File.Move(temporary, path, overwrite: true);
+        wrote(path, backup);
         return path;
     }
 
@@ -413,7 +492,7 @@ public static class LevelBuilder
         new(values.Select(f => (JsonNode?)JsonValue.Create(double.Parse(f.ToString("R", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture))).ToArray());
 
     private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache,
-        Lazy<(StructProperty?, FloatProperty?)> templateLook, List<BuiltPose> poses, List<string> missing, List<string> notes)
+        Lazy<PropertyCollection?> templateLook, List<BuiltPose> poses, List<string> missing, List<string> notes)
     {
         var changes = new List<string>();
         var tag = npc.Tag ?? throw new ArgumentException($"line {npc.Line}: '{npc.Name}' needs a 'tag' (how the build finds her again).");
@@ -461,11 +540,19 @@ public static class LevelBuilder
             notes.Add($"{npc.Name}: the level has no BioConversation '{npc.Conversation}' yet. Build it (conv_build; 'from' copies a template), then this file again to start it when Shepard uses her.");
         }
 
+        // What the file no longer asks for stops firing (KismetPrefabs.Link only adds): the edges an earlier build linked for her
+        // conversation or her idle are cut, and their objects stay in Main_Sequence, unlinked.
+        var sequence = pcc.FindExport(MainSequence);
+        if (npc.Conversation is null && sequence is not null && UnlinkConversations(sequence, pawn, null, changes) is { Count: > 0 } gone)
+        {
+            notes.Add($"{npc.Name}: the file has no conversation, so using her no longer starts {string.Join(", ", gone)}. Its Kismet stays in Main_Sequence, unlinked.");
+        }
         if (npc.Idle is { } idle)
         {
-            var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {npc.Line}: the level has no {MainSequence}.");
-            IdleStations.Set(game, pcc, sequence, pawn, idle, talk?.Use, talk?.Start, cache, changes);
+            IdleStations.Set(game, pcc, sequence ?? throw new ArgumentException($"line {npc.Line}: the level has no {MainSequence}."), pawn, idle,
+                talk?.Use, talk?.Start, cache, changes);
         }
+        else if (sequence is not null) IdleStations.Remove(sequence, pawn, npc.Name, changes, notes);
 
         return new BuiltNpc(npc.Name, ExportInspector.Row(pawn), action, changes);
     }
@@ -1115,7 +1202,7 @@ public static class LevelBuilder
 
     /// <summary>A fill light kept at <see cref="LightSpec.Offset"/> from the NPC, lighting only dynamic objects (see docs/le1-lighting.md §A.8–A.9).</summary>
     private static void SetLight(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, LightSpec light, NpcPose pose, PackageCache cache,
-        Lazy<(StructProperty?, FloatProperty?)> templateLook, List<string> changes)
+        Lazy<PropertyCollection?> templateLook, List<string> changes)
     {
         var at = NpcLightAt([pose.Origin.X, pose.Origin.Y, pose.Origin.Z], pose.Yaw, [light.Offset.X, light.Offset.Y, light.Offset.Z]);
         var settings = new LightSettings(light.Tag, new Vector3((float)at[0], (float)at[1], (float)at[2]), light.Line, light.Radius, light.Brightness, light.Enabled,
@@ -1168,12 +1255,15 @@ public static class LevelBuilder
     /// its colour, falloff, no shadows, dynamic light, its kind's channels in full and no OtherLevelsToAffect (the template's level
     /// list, which the filter left off ignores); an NPC light keeps its template's (the medic's: Dynamic only), and gets the colour
     /// (alpha kept) and falloff its item gives, else its template's again (<paramref name="templateLook"/>), and the actor's bEnabled
-    /// when off (or when an earlier build switched it off). An NPC light's receipt names a move as an offset change, measured from
-    /// the pose its NPC had before this build; a move of its NPC alone stays a location change.
+    /// when off (or when an earlier build switched it off). A found NPC light still on a kind's channels in full was a lights: entry
+    /// (its tag moved to an NPC): it takes its template's channels, shadows, dynamic light and level list back (<see cref="TakeTemplateKind"/>).
+    /// An NPC light's receipt names a move as an offset change, measured from the pose its NPC had before this build; a move of its
+    /// NPC alone stays a location change.
     /// </summary>
+    /// <param name="templateLook">An NPC light's template's component values (<see cref="TemplateLook"/>); null for a lights: entry.</param>
     /// <returns>The light, found, imported or cloned, and what the build changed on a found one, each value old → new.</returns>
     private static (ExportEntry Actor, string Action, List<string> Changed) ApplyLight(MEGame game, IMEPackage pcc, ExportEntry level, LightSettings light, Source? template,
-        PackageCache cache, Lazy<(StructProperty? Color, FloatProperty? Falloff)>? templateLook = null)
+        PackageCache cache, Lazy<PropertyCollection?>? templateLook = null)
     {
         var actor = FindActor(pcc, level, light.Tag, e => e.IsA("Light"));
         var isNew = actor is null;
@@ -1244,6 +1334,11 @@ public static class LevelBuilder
         }
         else
         {
+            // Its tag was a lights: entry's: on Gameplay_4 alone it would light props and not her. A new copy has the template's already.
+            if (!isNew && KindOf(c.GetProp<StructProperty>("LightingChannels")) is { } wasKind && templateLook is { Value: { } own })
+            {
+                edited |= Changed(changed, $"kind {wasKind} → NPC light (the template's channels, shadows, dynamic light and level list)", TakeTemplateKind(c, own));
+            }
             if (light.Color is { } rgb)
             {
                 // The light's own alpha kept: LE1CP's template has no colour of its own, so the class default's 0.
@@ -1253,15 +1348,17 @@ public static class LevelBuilder
             }
             if (light.Falloff is { } falloff) edited |= PutNumber(c, "FalloffExponent", falloff, "falloff", changed);
             // A key the item leaves out is the template's: deleting it gives the template's back. A new copy has the template's already.
-            if (!isNew && (light.Color is null || light.Falloff is null) && templateLook is { Value: var (ownColour, ownFalloff) })
+            if (!isNew && (light.Color is null || light.Falloff is null) && templateLook is { Value: { } look })
             {
                 if (light.Color is null)
                 {
+                    var ownColour = look.GetProp<StructProperty>("LightColor");
                     edited |= Changed(changed, $"colour {Colour(c.GetProp<StructProperty>("LightColor"))} → {Colour(ownColour)} (the template's)", TakeOwn(c, "LightColor", ownColour));
                 }
                 if (light.Falloff is null)
                 {
                     static string Falloff(FloatProperty? f) => f is null ? "default" : ForkBuilder.Number(f.Value);
+                    var ownFalloff = look.GetProp<FloatProperty>("FalloffExponent");
                     edited |= Changed(changed, $"falloff {Falloff(c.GetProp<FloatProperty>("FalloffExponent"))} → {Falloff(ownFalloff)} (the template's)",
                         TakeOwn(c, "FalloffExponent", ownFalloff));
                 }
@@ -1298,9 +1395,33 @@ public static class LevelBuilder
     /// <summary>"kind props → room" when the old channels are a kind's in full, else the kind with the channels it replaced.</summary>
     private static string KindChange(StructProperty? old, string kind)
     {
-        if (old is not null && KindChannels.Keys.FirstOrDefault(k => SameExactly(old, Channels(KindChannels[k]))) is { } was) return $"kind {was} → {kind}";
+        if (KindOf(old) is { } was) return $"kind {was} → {kind}";
         var on = old?.Properties.OfType<BoolProperty>().Where(b => b.Value && b.Name.Instanced != "bInitialized").Select(b => b.Name.Instanced).ToList();
         return $"kind {kind} (channels were {(on is null ? "the template's" : on.Count == 0 ? "none" : string.Join(", ", on))})";
+    }
+
+    /// <summary>
+    /// The kind (props, room) whose channels these are, in full as a lights: entry writes them (<see cref="Channels"/>); null for any
+    /// other channels, a template's as an NPC light keeps them.
+    /// </summary>
+    internal static string? KindOf(StructProperty? channels) =>
+        channels is null ? null : KindChannels.Keys.FirstOrDefault(k => SameExactly(channels, Channels(KindChannels[k])));
+
+    /// <summary>
+    /// What a lights: entry writes on a light's component and an NPC light leaves to its template, back to the template's own
+    /// (<paramref name="template"/>, its flattened component): its channels, shadows and dynamic light, none where it has none, and its
+    /// level list when the light has none (the entry cleared it), as <see cref="TakeTemplateLight"/> does for a new clone. True when
+    /// that changed the component.
+    /// </summary>
+    internal static bool TakeTemplateKind(PropertyCollection component, PropertyCollection template)
+    {
+        var taken = new[] { "LightingChannels", "CastShadows", "bForceDynamicLight" }.Aggregate(false, (any, name) => TakeOwn(component, name, template.GetProp<Property>(name)) | any);
+        if (component.GetProp<ArrayPropertyBase>("OtherLevelsToAffect") is null && template.GetProp<ArrayPropertyBase>("OtherLevelsToAffect") is { } levels)
+        {
+            component.AddOrReplaceProp(levels);
+            taken = true;
+        }
+        return taken;
     }
 
     /// <summary>LE1CP's fill light for Chakwas in the medbay: a point light any level can copy (what level.yaml names as its lightTemplate).</summary>
@@ -1350,20 +1471,18 @@ public static class LevelBuilder
     }
 
     /// <summary>
-    /// The colour and falloff of the NPC lights' template (the file's lightTemplate, else LE1CP's), its component's own values
-    /// (flattened, as an import of it has them), null where it has none: what an NPC light whose item leaves them out goes back to
-    /// (LE1CP's has neither, the class defaults).
+    /// The component of the NPC lights' template (the file's lightTemplate, else LE1CP's): its own values (flattened, as an import of
+    /// it has them), null without one. What an NPC light goes back to: its colour and falloff when its item leaves them out (LE1CP's
+    /// has neither, the class defaults), its channels, shadows, dynamic light and level list when it was a lights: entry.
     /// </summary>
-    private static (StructProperty? Color, FloatProperty? Falloff) TemplateLook(MEGame game, IMEPackage pcc, Source template)
+    private static PropertyCollection? TemplateLook(MEGame game, IMEPackage pcc, Source template)
     {
         using var source = template.Package is null ? null : PackageInspector.Open(game, template.Package);
         var original = ResolveActor(source ?? pcc, template.Actor, template.Line);
         // As AddActor imports it: what a prefab's archetype gives its component is the copy's own (only changes the template's file in
         // memory). The level's own template stays as is: its clones keep their archetype, and the level being built is never flattened.
         if (source is not null) Flatten(original);
-        if (Object(original.FileRef, original.GetProperties(), "LightComponent") is not { } component) return (null, null);
-        var c = component.GetProperties();
-        return (c.GetProp<StructProperty>("LightColor"), c.GetProp<FloatProperty>("FalloffExponent"));
+        return Object(original.FileRef, original.GetProperties(), "LightComponent")?.GetProperties();
     }
 
     /// <summary>
@@ -1403,19 +1522,20 @@ public static class LevelBuilder
 
     /// <summary>
     /// Main_Sequence: Shepard uses the pawn (BioSeqEvt_OnPlayerActivate) → BioSeqAct_StartConversation, Owner = the pawn.
-    /// Returns the use event and the start action; null when the level has no conversation of that name.
+    /// Returns the use event and the start action; null when the level has no conversation of that name. Her use no longer starts
+    /// any other conversation an earlier build linked (a renamed one), also while the new one is not built yet.
     /// </summary>
-    private static (ExportEntry Use, ExportEntry Start)? LinkConversation(IMEPackage pcc, ExportEntry pawn, string name, int line, PackageCache cache, List<string> changes)
+    internal static (ExportEntry Use, ExportEntry Start)? LinkConversation(IMEPackage pcc, ExportEntry pawn, string name, int line, PackageCache cache, List<string> changes)
     {
         var sequence = pcc.FindExport(MainSequence) ?? throw new ArgumentException($"line {line}: the level has no {MainSequence}.");
         var conversation = pcc.Exports.FirstOrDefault(e => e.ClassName == "BioConversation" && e.ObjectName.Instanced.Equals(name, StringComparison.OrdinalIgnoreCase));
-        if (conversation is null) return null;
         var objects = KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>().ToList();
 
-        bool Holds(IEntry? variable) => variable is ExportEntry { ClassName: "SeqVar_Object" } v && v.GetProperty<ObjectProperty>("ObjValue")?.Value == pawn.UIndex;
-        var start = objects.FirstOrDefault(o => o.ClassName == "BioSeqAct_StartConversation"
-                                                && o.GetProperty<ObjectProperty>("Conv")?.Value == conversation.UIndex
-                                                && KismetHelper.GetVariableLinksOfNode(o).Any(v => v.LinkDesc == "Owner" && v.LinkedNodes.Any(Holds)));
+        var start = conversation is null ? null : objects.FirstOrDefault(o => o.ClassName == "BioSeqAct_StartConversation"
+                                                                             && o.GetProperty<ObjectProperty>("Conv")?.Value == conversation.UIndex && OwnedBy(o, pawn));
+        // Link only adds: without this cut a renamed conversation would start beside the old one on use.
+        UnlinkConversations(sequence, pawn, start, changes);
+        if (conversation is null) return null;
         if (start is null)
         {
             start = SequenceObjectCreator.CreateSequenceObject(sequence, "BioSeqAct_StartConversation", cache);
@@ -1443,8 +1563,34 @@ public static class LevelBuilder
         return (use, start);
     }
 
+    /// <summary>
+    /// Cuts use → start on her use events (BioSeqEvt_OnPlayerActivate, Originator = the pawn) for each conversation start of hers
+    /// (Owner = the pawn) but <paramref name="keep"/>: the objects <see cref="LinkConversation"/> builds and finds again, never other
+    /// Kismet. The starts stay in Main_Sequence, unlinked. Returns the conversations her use no longer starts.
+    /// </summary>
+    internal static List<string> UnlinkConversations(ExportEntry sequence, ExportEntry pawn, ExportEntry? keep, List<string> changes)
+    {
+        var cut = new List<string>();
+        foreach (var use in KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>()
+                     .Where(o => o.ClassName == "BioSeqEvt_OnPlayerActivate" && o.GetProperty<ObjectProperty>("Originator")?.Value == pawn.UIndex))
+        {
+            foreach (var start in KismetPrefabs.Unlink(use, "Out", o => o != keep && o.ClassName == "BioSeqAct_StartConversation" && OwnedBy(o, pawn)))
+            {
+                var conversation = start.GetProperty<ObjectProperty>("Conv")?.ResolveToEntry(start.FileRef)?.ObjectName.Instanced ?? $"#{start.UIndex}";
+                changes.Add($"Kismet: use → start {conversation} unlinked");
+                cut.Add(conversation);
+            }
+        }
+        return cut;
+    }
+
+    /// <summary>A conversation start whose Owner slot holds the pawn, as <see cref="LinkConversation"/> builds it.</summary>
+    private static bool OwnedBy(ExportEntry start, ExportEntry pawn) =>
+        KismetHelper.GetVariableLinksOfNode(start).Any(v => v.LinkDesc == "Owner" && v.LinkedNodes.Any(n =>
+            n is ExportEntry { ClassName: "SeqVar_Object" } o && o.GetProperty<ObjectProperty>("ObjValue")?.Value == pawn.UIndex));
+
     /// <summary>ConfigDelta .m3cd next to the level: LE1CP's Sideloader loads it with the files whose names start with a prefix. M3 merges it at install.</summary>
-    private static string EnsureSideloader(string package, List<string> prefixes, List<string> backups, List<string> notes)
+    private static string EnsureSideloader(string package, List<string> prefixes, Action<string, string?> wrote, List<string> notes)
     {
         var dir = Path.GetDirectoryName(package)!;
         var name = Path.GetFileNameWithoutExtension(package);
@@ -1458,14 +1604,16 @@ public static class LevelBuilder
             var index = Array.FindIndex(lines, l => l.Contains(marker, StringComparison.OrdinalIgnoreCase));
             if (index < 0) continue;
             if (lines[index].Trim() == wanted) return config;
-            backups.Add(PackageWriter.Backup(config));
+            var backup = PackageWriter.Backup(config);
             lines[index] = wanted;
             File.WriteAllText(config, string.Join(newline, lines));
+            wrote(config, backup);
             notes.Add($"Updated {Path.GetFileName(config)}: reinstall the mod with M3 (it merges ConfigDelta files into Coalesced at install).");
             return config;
         }
         var path = Path.Combine(dir, $"ConfigDelta-{name}.m3cd");
         File.WriteAllText(path, $"[BioGame.ini SFXGame.SideloaderFramework]\n{wanted}\n");
+        wrote(path, null);
         notes.Add($"Wrote {Path.GetFileName(path)}: install the mod with M3 (it merges ConfigDelta files into Coalesced at install).");
         return path;
     }

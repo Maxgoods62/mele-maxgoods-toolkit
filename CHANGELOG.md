@@ -115,7 +115,7 @@ Set-up and settings:
 - `.mcp.json.example`: an example entry that registers the server with an MCP client.
 - `package.sh` builds the release zip `dist/mele-mcp-v<version>-win-x64.zip`, with its license texts and no Oodle.
 
-MeleBridge 4, pipe protocol 1:
+MeleBridge 5, pipe protocol 1:
 
 - `MeleBridge.asi` serves `\\.\pipe\MeleBridge_LE1`: one JSON request per line, with the ops `ping`, `console`,
   `find`, `get`, `set`, `call`, `describe`, `subscribe`, `editor`, `status` and `keep_ticking`.
@@ -126,6 +126,12 @@ MeleBridge 4, pipe protocol 1:
   `scenario.py`.
 - MeleBridge 4 reads and writes `stringref` properties and parameters, as ints. `live_get` used to show
   `<StringRefProperty>`, and `live_set` and `live_call` refused them.
+- MeleBridge 5 answers a request still running 1.5 s after its timeout with `"running": true` (it may still complete)
+  instead of leaving the client to time out; fails a request on an integer division by zero, integer overflow or
+  in-page error as it does on an access violation; reports `gameStarted` in `status` and `keep_ticking`; notes when
+  `loadingMovie: null` comes from its 5 s cache; says in `subscribe`'s `skipped` what the stream leaves out; and
+  watches functions declared in a state. mele-mcp sends an `id` with each request, skips replies with another one,
+  waits 4 s past the timeout, and names the answered and never-sent requests when one of several fails.
 - `build.sh` builds in its own LExASIs checkout (default `%LOCALAPPDATA%\mele-asi-build\MeleBridge\LExASIs`), stages
   in `dist/` (`MELE_STAGE`), finds Visual Studio 18 with vswhere and the game in the registry, and runs one build of a
   checkout at a time.
