@@ -1,13 +1,13 @@
 name: Build
 
 # Rendered from mele-maxgoods-toolkit tools/release-kit. Change it there; a hand edit here fails kit.sh check.
-# A push to main builds the zips and publishes them as "latest" on GitHub Pages. A vN tag builds them and publishes
-# release vN. Pull requests don't start this workflow, so it never builds outside code.
+# A push to main builds the zips and publishes them as "latest" on GitHub Pages. A vN or vN.M tag builds them and
+# publishes that release. Pull requests don't start this workflow, so it never builds outside code.
 # mele-maxgoods-toolkit's docs/releasing.md has the rules.
 on:
   push:
     branches: [main]
-    tags: ['v[0-9]+']
+    tags: ['v[0-9]+', 'v[0-9]+.[0-9]+']
 
 permissions:
   contents: read

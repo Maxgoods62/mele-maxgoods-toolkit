@@ -51,13 +51,14 @@ signed record, and a push to `main` publishes no latest page. I delete each test
 
 ## Publish a version
 
-These are my steps for a mod built on GitHub. `<N>` is the mod's version number, the value of `ASI_VERSION` in its
-`src/SharedVersion.h`. If a mod needs more for a release, its `BUILDING.md` says so.
+These are my steps for a mod built on GitHub. `<N>` is the mod's version as its `src/SharedVersion.h` sets it: a
+number such as `9`, or a number and a minor number such as `1.0`. If a mod needs more for a release, its `BUILDING.md`
+says so.
 
 1. In the toolkit, run `tools/release-kit/kit.sh check`. It checks that each mod's release files on `main` match the
    release kit.
-2. Set `ASI_VERSION`, `VERSION_STRING_A` and `VERSION_STRING_W` in `src/SharedVersion.h` to the new number, and date
-   the version's entry in `CHANGELOG.md`: `## v<N> (YYYY-MM-DD)`.
+2. Set the version in `src/SharedVersion.h`, its number and both `VERSION_STRING` lines, and date the version's entry
+   in `CHANGELOG.md`: `## v<N> (YYYY-MM-DD)`.
 3. Push `main`. Download the zip from the latest page and test it in the game. While the repo is private, take the zip
    from the run's `dist` artifact instead.
 4. Check the `CHANGELOG.md` entry, then tag that commit and push the tag:
@@ -71,9 +72,10 @@ These are my steps for a mod built on GitHub. `<N>` is the mod's version number,
 The workflow then builds the zip from the tag and publishes the release. Each run's summary shows the hashes. The run
 also keeps the `.pdb` files for 90 days, as its `pdb` artifact. A `.pdb` matches only the ASI built in the same run.
 
-The workflow refuses the tag, and publishes nothing, when the tag differs from `ASI_VERSION`, its commit is not on
-`main`, `CHANGELOG.md` has no dated entry for it, or it already has a release. Once `protect-repo.sh` has run, a pushed
-tag can't be moved or deleted, even one the workflow refused. To fix a bad tag, I release the next version number.
+The workflow refuses the tag, and publishes nothing, when the tag differs from the version in `src/SharedVersion.h`,
+its commit is not on `main`, `CHANGELOG.md` has no dated entry for it, or it already has a release. Once
+`protect-repo.sh` has run, a pushed tag can't be moved or deleted, even one the workflow refused. To fix a bad tag, I
+release the next version number.
 
 ## How the GitHub build is protected
 

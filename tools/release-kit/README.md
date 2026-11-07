@@ -41,7 +41,7 @@ hash and an immutable release show only that a file stayed the same after publis
    holds one `README.txt`, a `LICENSE` folder with the license texts, and the mod's files. Those sit in game folders
    (`LE1/`, `LE2/`, `LE3/`) for a multi-game mod, and at the root otherwise.
 3. It stops before building when a `v<N>` label differs from the version or leaves out a released game.
-4. Tags are `v<N>`, with N equal to `ASI_VERSION` in `src/SharedVersion.h`.
+4. Tags are `v<N>` or `v<N>.<M>`, equal to `v` and the version in `src/SharedVersion.h`.
 5. `CHANGELOG.md` has exactly one `## v<N> (YYYY-MM-DD)` heading per tag, with text under it.
 6. Scripts are LF and executable. `dist/` and `*.zip` are ignored.
 
