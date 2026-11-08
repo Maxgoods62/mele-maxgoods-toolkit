@@ -229,7 +229,7 @@ public class YamlBuildStateTests
         var c = Choose(ledger, 8421, 1, null, now, used);
         CollectionAssert.AreEqual(new[] { 8428 }, c.Free);
         CollectionAssert.AreEqual(new[] { 8429 }, Choose(ledger, 8421, 1, null, now, used).Free);
-        Assert.IsFalse(File.Exists(ledger + ".tmp"), "the ledger is written beside, then moved over");
+        Assert.IsEmpty(Directory.GetFiles(Path.GetDirectoryName(ledger)!, Path.GetFileName(ledger) + ".*tmp"), "the ledger is written beside, then moved over");
     }
 
     /// <summary>

@@ -232,9 +232,7 @@ public static class ForkBuilder
     private static string WriteIfChanged(string path, byte[] bytes, string md5)
     {
         if (File.Exists(path) && Md5(File.ReadAllBytes(path)) == md5) return "unchanged";
-        var temporary = path + ".build.tmp";
-        File.WriteAllBytes(temporary, bytes);
-        File.Move(temporary, path, overwrite: true);
+        AtomicFile.WriteAllBytes(path, bytes);
         return "written";
     }
 

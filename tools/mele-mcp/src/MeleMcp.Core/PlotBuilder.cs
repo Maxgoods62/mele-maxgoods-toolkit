@@ -234,7 +234,7 @@ public static partial class PlotBuilder
         if (added.Count == 0) return added;
 
         var backup = PackageWriter.Backup(ini);
-        File.WriteAllText(ini, string.Join(newline, lines), new UTF8Encoding(bom));
+        AtomicFile.WriteAllText(ini, string.Join(newline, lines), new UTF8Encoding(bom));
         wrote(ini, backup);
         return added;
     }

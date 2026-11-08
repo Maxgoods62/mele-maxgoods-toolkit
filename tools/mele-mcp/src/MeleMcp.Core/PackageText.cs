@@ -212,7 +212,7 @@ public static class PackageText
                 : $"Refusing to overwrite {full}: it is not a pkg_to_text file (its first line is not '{ours}...').");
         }
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        File.WriteAllText(full, text, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        AtomicFile.WriteAllText(full, text, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         return full;
     }
 }

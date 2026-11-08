@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.RegularExpressions;
 using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Packages;
@@ -64,6 +65,7 @@ public static partial class GamePaths
     /// Forgets the cached file lists, so files installed since the last lookup are found, a change <see cref="FolderSignature"/>
     /// cannot see included (a file added in a subfolder of a cooked folder).
     /// </summary>
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place LEC's file list is invalidated.")]
     public static void RefreshLoadedFiles()
     {
         lock (LoadedGate)
@@ -85,6 +87,7 @@ public static partial class GamePaths
         LoadedFiles(game, FolderSignature(MEDirectories.GetBioGamePath(game), MEDirectories.GetDLCPath(game), game.CookedDirName()), rescan);
 
     /// <summary><see cref="LoadedFiles(MEGame, bool)"/> with the folders' signature given, so a test can change it without writing in the install.</summary>
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place LEC's cached file list is read.")]
     internal static IReadOnlyDictionary<string, string> LoadedFiles(MEGame game, long signature, bool rescan)
     {
         lock (LoadedGate)
@@ -96,6 +99,14 @@ public static partial class GamePaths
             return files;
         }
     }
+
+    /// <summary>
+    /// The files the game loads with more extensions than LEC's list has (.cnd), from a scan of their own: the root override keeps
+    /// them out of LEC's cached list, which other tools read as packages. Nothing is cached, so nothing can go stale.
+    /// </summary>
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "A scan that bypasses LEC's cache, kept beside the cached one.")]
+    internal static IReadOnlyDictionary<string, string> LoadedFilesWith(MEGame game, params string[] extensions) =>
+        MELoadedFiles.GetFilesLoadedInGame(game, gameRootOverride: MEDirectories.GetDefaultGamePath(game), additionalExtensions: extensions);
 
     /// <summary>
     /// What LEC's file list hangs on, hashed, read without listing a single file, so <see cref="LoadedFiles(MEGame, bool)"/> can check it on every

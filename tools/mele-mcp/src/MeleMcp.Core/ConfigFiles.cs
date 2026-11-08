@@ -460,7 +460,7 @@ public static class ConfigFiles
             coal.Serialize(output);
             Directory.CreateDirectory(cooked);
             if (existed) backups.Add(PackageWriter.Backup(path));
-            File.WriteAllBytes(path, output.ToArray());
+            AtomicFile.WriteAllBytes(path, output.ToArray());
             written.Add(path);
         }
         return new ConfigSetResult(game.ToString(), "bin", cooked, results, written, backups, []);
@@ -560,7 +560,7 @@ public static class ConfigFiles
         public static TextConfig New(string path, bool delta)
             => new(path, [""], delta ? new UTF8Encoding(false) : Encoding.Latin1, [], !delta);
 
-        public void Save() => File.WriteAllBytes(Path, [.. preamble, .. encoding.GetBytes(string.Join('\n', lines))]);
+        public void Save() => AtomicFile.WriteAllBytes(Path, [.. preamble, .. encoding.GetBytes(string.Join('\n', lines))]);
 
         public IEnumerable<TextRow> Rows()
         {

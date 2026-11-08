@@ -183,7 +183,7 @@ public static class TalkTables
 
         var backup = created ? null : PackageWriter.Backup(full);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        HuffmanCompression.SaveToTlkFile(full, refs);
+        AtomicFile.Write(full, temporary => HuffmanCompression.SaveToTlkFile(temporary, refs));
         return new TlkTableEdit(full, created, count, changes, NameNotes(game, full), backup);
     }
 

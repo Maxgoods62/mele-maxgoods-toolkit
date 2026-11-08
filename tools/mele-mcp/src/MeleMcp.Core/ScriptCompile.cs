@@ -61,8 +61,7 @@ public static partial class ScriptCompile
         var saved = run.Compiled && !dryRun;
         if (saved)
         {
-            backup = PackageWriter.Backup(pcc.FilePath);
-            pcc.Save();
+            backup = PackageWriter.Save(pcc);
         }
 
         return new ScriptCompileResult(pcc.FilePath, ExportInspector.Row(target), run.How, run.Compiled, saved, dryRun,

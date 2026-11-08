@@ -338,9 +338,8 @@ public static class LevelBuilder
         prepared.Clear();
 
         if (create) Directory.CreateDirectory(Path.GetDirectoryName(pcc.FilePath)!);
-        var backup = create ? null : PackageWriter.Backup(pcc.FilePath);
         // With its path: a level created in memory has no file of its own to save to.
-        pcc.Save(pcc.FilePath);
+        var backup = PackageWriter.Save(pcc, backup: !create, path: pcc.FilePath);
         Wrote(pcc.FilePath, backup);
         if (create) notes.Add($"Created the level {Path.GetFileName(package)}.");
 
@@ -479,10 +478,9 @@ public static class LevelBuilder
                 .Select(c => KeyValuePair.Create(LevelStreams.CopyName(c.Actor), (JsonNode?)JsonValue.Create(FileOf(c.Package!))))),
         };
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temporary = path + ".build.tmp";
-        File.WriteAllText(temporary, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+        var json = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var backup = File.Exists(path) ? PackageWriter.Backup(path) : null;
-        File.Move(temporary, path, overwrite: true);
+        AtomicFile.WriteAllText(path, json, new UTF8Encoding(false));
         wrote(path, backup);
         return path;
     }
@@ -1606,13 +1604,13 @@ public static class LevelBuilder
             if (lines[index].Trim() == wanted) return config;
             var backup = PackageWriter.Backup(config);
             lines[index] = wanted;
-            File.WriteAllText(config, string.Join(newline, lines));
+            AtomicFile.WriteAllText(config, string.Join(newline, lines));
             wrote(config, backup);
             notes.Add($"Updated {Path.GetFileName(config)}: reinstall the mod with M3 (it merges ConfigDelta files into Coalesced at install).");
             return config;
         }
         var path = Path.Combine(dir, $"ConfigDelta-{name}.m3cd");
-        File.WriteAllText(path, $"[BioGame.ini SFXGame.SideloaderFramework]\n{wanted}\n");
+        AtomicFile.WriteAllText(path, $"[BioGame.ini SFXGame.SideloaderFramework]\n{wanted}\n");
         wrote(path, null);
         notes.Add($"Wrote {Path.GetFileName(path)}: install the mod with M3 (it merges ConfigDelta files into Coalesced at install).");
         return path;

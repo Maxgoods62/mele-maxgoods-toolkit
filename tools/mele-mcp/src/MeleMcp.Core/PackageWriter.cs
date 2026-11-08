@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using LegendaryExplorerCore;
 using LegendaryExplorerCore.GameFilesystem;
 using LegendaryExplorerCore.Packages;
@@ -5,7 +6,8 @@ using LegendaryExplorerCore.Packages;
 namespace MeleMcp.Core;
 
 /// <summary>
-/// The only way tools modify packages: open, refuse game-install files, back up, mutate, save.
+/// The only way tools modify packages: open, refuse game-install files, back up, mutate, save. src/BannedSymbols.txt keeps LEC's
+/// package Save and CreateAndSavePackage to this class.
 /// </summary>
 public static class PackageWriter
 {
@@ -15,6 +17,7 @@ public static class PackageWriter
     /// <summary>%LOCALAPPDATA%\mele-mcp\backups, when <see cref="BackupDirEnvVar"/> is not set.</summary>
     private static string DefaultBackupDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "mele-mcp", "backups");
 
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place packages are saved.")]
     public static (T Result, string BackupPath) Edit<T>(MEGame game, string fileOrPath, Func<IMEPackage, T> mutate)
     {
         using var pcc = PackageInspector.Open(game, fileOrPath);
@@ -23,6 +26,30 @@ public static class PackageWriter
         var backup = Backup(pcc.FilePath);
         pcc.Save();
         return (result, backup);
+    }
+
+    /// <summary>
+    /// Saves a package a tool opened and changed itself: refuses a path in the game install, backs up the file already there unless
+    /// <paramref name="backup"/> is false (a file the tool made new, or one any build makes again), then saves. Returns the backup.
+    /// </summary>
+    /// <param name="path">Where to save; by default the package's own file. A level created in memory has none and passes its path.</param>
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place packages are saved.")]
+    public static string? Save(IMEPackage pcc, bool backup = true, string? path = null)
+    {
+        var target = path ?? pcc.FilePath;
+        EnsureWritable(pcc.Game, target);
+        var copy = backup && File.Exists(target) ? Backup(target) : null;
+        if (path is null) pcc.Save();
+        else pcc.Save(path);
+        return copy;
+    }
+
+    /// <summary>A new empty package file at <paramref name="path"/> (LEC's CreateAndSavePackage), refused in the game install.</summary>
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place packages are created on disk.")]
+    public static void Create(string path, MEGame game)
+    {
+        EnsureWritable(game, path);
+        MEPackageHandler.CreateAndSavePackage(path, game);
     }
 
     /// <summary>

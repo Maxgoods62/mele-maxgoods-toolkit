@@ -56,7 +56,7 @@ public static partial class PlotMaps
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         try
         {
-            MEPackageHandler.CreateAndSavePackage(full, game);
+            PackageWriter.Create(full, game);
             using var pcc = MEPackageHandler.OpenMEPackage(full, forceLoadFromDisk: true);
             var maps = new[] { "ConsequenceMap", "StateTransitionMap" }.Select(name =>
             {
@@ -67,7 +67,7 @@ public static partial class PlotMaps
             }).ToList();
             var referencer = pcc.CreateExport("CombinedStartupReferencer", "ObjectReferencer", indexed: false);
             referencer.WriteProperty(new ArrayProperty<ObjectProperty>(maps.Select(m => new ObjectProperty(m)), "ReferencedObjects"));
-            pcc.Save();
+            PackageWriter.Save(pcc, backup: false);
 
             var name = Path.GetFileNameWithoutExtension(full);
             return new NewPlotMapsResult(full, name, pcc.Exports.Select(ExportInspector.Row).ToList(),

@@ -463,9 +463,7 @@ internal sealed class IdReservations : IDisposable
     internal void Save()
     {
         if (!changed) return;
-        var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(entries.OrderBy(e => e.Kind, StringComparer.Ordinal).ThenBy(e => e.First).ToList(), Json), new UTF8Encoding(false));
-        File.Move(temporary, path, overwrite: true);
+        AtomicFile.WriteAllText(path, JsonSerializer.Serialize(entries.OrderBy(e => e.Kind, StringComparer.Ordinal).ThenBy(e => e.First).ToList(), Json), new UTF8Encoding(false));
         changed = false;
     }
 

@@ -143,12 +143,10 @@ public static class GameDump
         var path = Path.Combine(dir, ImageFile);
         var sidecar = Path.Combine(dir, SidecarName);
         File.Delete(sidecar);
-        var temp = path + ".tmp";
-        File.WriteAllBytes(temp, image.Bytes);
-        File.Move(temp, path, overwrite: true);
+        AtomicFile.WriteAllBytes(path, image.Bytes);
         var info = new DumpSidecar(game, Path.GetFileName(image.ExePath), Sha256(image.ExePath), new FileInfo(image.ExePath).Length, $"0x{image.Base:x}",
                                    image.Bytes.Length, image.UnreadablePages, DateTime.UtcNow);
-        File.WriteAllText(sidecar, JsonSerializer.Serialize(info, Json));
+        AtomicFile.WriteAllText(sidecar, JsonSerializer.Serialize(info, Json));
         return new ExeDumpResult(path, sidecar, false, TextMatchesFile(image.Bytes, image.ExePath), info);
     }
 
@@ -170,9 +168,7 @@ public static class GameDump
         PeImage.RequireMapped(mapped, source);
         var image = PeImage.ToFileLayout(mapped);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        var temp = target + ".tmp";
-        File.WriteAllBytes(temp, image);
-        File.Move(temp, target, overwrite: true);
+        AtomicFile.WriteAllBytes(target, image);
         var imageBase = BitConverter.ToUInt64(image, PeImage.OptionalHeader(image) + PeImage.ImageBaseField);
         return new FileLayoutResult(target, source, image.Length, $"0x{imageBase:x}");
     }

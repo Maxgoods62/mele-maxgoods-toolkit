@@ -699,13 +699,13 @@ public static partial class MergeMods
             var exists = File.Exists(path);
             if (exists && File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes)) continue;
             var backup = exists ? PackageWriter.Backup(path) : null;
-            File.WriteAllBytes(path, bytes);
+            AtomicFile.WriteAllBytes(path, bytes);
             writes.Wrote(path, backup);
         }
 
         var manifestBackup = File.Exists(manifest) ? PackageWriter.Backup(manifest) : null;
         var options = new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-        File.WriteAllText(manifest, plan.Manifest.ToJsonString(options), new UTF8Encoding(false));
+        AtomicFile.WriteAllText(manifest, plan.Manifest.ToJsonString(options), new UTF8Encoding(false));
         writes.Wrote(manifest, manifestBackup);
     }
 
@@ -826,7 +826,7 @@ public static partial class MergeMods
         }
 
         var backup = PackageWriter.Backup(modDesc);
-        File.WriteAllBytes(modDesc, Encoding.Latin1.GetBytes(string.Join(eol, lines)));
+        AtomicFile.WriteAllBytes(modDesc, Encoding.Latin1.GetBytes(string.Join(eol, lines)));
         return (backup, true);
     }
 
@@ -875,7 +875,7 @@ public static partial class MergeMods
         }
 
         var backup = PackageWriter.Backup(modDesc);
-        File.WriteAllBytes(modDesc, Encoding.Latin1.GetBytes(string.Join(eol, lines)));
+        AtomicFile.WriteAllBytes(modDesc, Encoding.Latin1.GetBytes(string.Join(eol, lines)));
         return (backup, true);
     }
 }

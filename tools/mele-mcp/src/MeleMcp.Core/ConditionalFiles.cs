@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.RegularExpressions;
 using LegendaryExplorerCore.GameFilesystem;
@@ -92,7 +93,7 @@ public static partial class ConditionalFiles
 
         var backup = created ? null : PackageWriter.Backup(full);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        cnd.ToFile(full);
+        Save(cnd, full);
         return new CndEdit(full, id, created, oldText, newText, data.Length, cnd.ConditionalEntries.Count, backup, NameWarnings(full));
     }
 
@@ -147,6 +148,13 @@ public static partial class ConditionalFiles
 
     private static string Normal(string text) => BareFalse().Replace(Spaces().Replace(text, ""), "==boolfalse").ToLowerInvariant();
 
+    /// <summary>
+    /// Writes a .cnd through <see cref="AtomicFile"/>: LEC's ToFile opens the file with FileMode.Create, so a write cut off part
+    /// way would leave the mod an empty or half file. src/BannedSymbols.txt keeps ToFile here.
+    /// </summary>
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "ToFile writes AtomicFile's temporary file, never the target.")]
+    private static void Save(CNDFile cnd, string path) => AtomicFile.Write(path, temporary => cnd.ToFile(temporary));
+
     private static string Resolve(MEGame game, string fileOrPath)
     {
         LecHost.EnsureInitialized();
@@ -154,8 +162,7 @@ public static partial class ConditionalFiles
         if (File.Exists(candidate)) return Path.GetFullPath(candidate);
         var name = Path.GetFileName(candidate);
         if (!Path.HasExtension(name)) name += ".cnd";
-        // The root override keeps these out of LEC's cached list, which other tools read as packages.
-        var loaded = MELoadedFiles.GetFilesLoadedInGame(game, gameRootOverride: MEDirectories.GetDefaultGamePath(game), additionalExtensions: [".cnd"]);
+        var loaded = GamePaths.LoadedFilesWith(game, ".cnd");
         return loaded.TryGetValue(name, out var found) ? found : throw new FileNotFoundException($"'{fileOrPath}' is not an existing path and no file named '{name}' is loaded by {game}.");
     }
 

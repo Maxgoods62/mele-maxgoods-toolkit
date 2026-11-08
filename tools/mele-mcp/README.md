@@ -318,8 +318,11 @@ small mod that builds.
 
 ## Write rule
 
-Package writes go through `PackageWriter.Edit`, which guards, changes, backs up and saves. `level_build` takes the same
-steps itself, so it checks its forks and the level, a new one too, before it saves any of them. The guard refuses any file
+Package writes go through `PackageWriter.Edit`, which guards, changes, backs up and saves. A tool that builds a package
+itself saves it with `PackageWriter.Save`, so `level_build` checks its forks and the level, a new one too, before it saves
+any of them. Every other whole file is written by `AtomicFile`: beside the target, then moved over it, so a crash leaves the
+old file or the new one. `src/BannedSymbols.txt` makes any other package save, `File.WriteAll*` call, or read of LEC's
+file list outside `GamePaths` a build error. The guard refuses any file
 inside the Legendary Edition folder or the game path. It compares spellings, then what the path is on disk, so shares,
 junctions and volume names are caught too. It does not see a hard link to a game file.
 
@@ -342,6 +345,7 @@ All paths in this table are relative to `tools/mele-mcp`.
 | `src/MeleMcp/Program.cs` | The stdio host. Logs go to stderr, because stdout is reserved for JSON-RPC. |
 | `src/MeleMcp/Tools/` | One `*Tools.cs` class per area, each tool a thin wrapper over Core. |
 | `src/MeleMcp.Core/` | The tool logic. `LecHost` starts LEC, `GameBridge` and `LiveBridge` hold the two pipes. |
+| `src/BannedSymbols.txt`, `src/Directory.Build.props` | Calls allowed in one class only: a call anywhere else fails the build ([Write rule](#write-rule)). |
 | `external/LegendaryExplorer/` | The LEC submodule. Fetch it with `git submodule update --init`. |
 | `global.json` | Pins the .NET SDK to 10.0.402, with later 10.0.x accepted. |
 | `build.env.example` | Template for the ignored `build.env`, which `deploy.sh`, `test.sh` and the Python scripts read. |

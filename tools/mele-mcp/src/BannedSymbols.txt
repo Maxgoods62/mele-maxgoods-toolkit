@@ -1,0 +1,24 @@
+# APIs the server's code may call in one place only (RS0030 is a build error, Directory.Build.props). Each has a home that
+# does what the bare call forgets; that home suppresses RS0030 on the method that calls it. Tests are not covered.
+
+# Whole-file writes: AtomicFile writes beside the file, then moves over it, so a crash never leaves half a file.
+M:System.IO.File.WriteAllText(System.String,System.String);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllText(System.String,System.String,System.Text.Encoding);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllBytes(System.String,System.Byte[]);Use AtomicFile.WriteAllBytes: written beside the file, then moved over it
+M:System.IO.File.WriteAllLines(System.String,System.String[]);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllLines(System.String,System.String[],System.Text.Encoding);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllLines(System.String,System.Collections.Generic.IEnumerable{System.String});Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllLines(System.String,System.Collections.Generic.IEnumerable{System.String},System.Text.Encoding);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllTextAsync(System.String,System.String,System.Threading.CancellationToken);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllTextAsync(System.String,System.String,System.Text.Encoding,System.Threading.CancellationToken);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllBytesAsync(System.String,System.Byte[],System.Threading.CancellationToken);Use AtomicFile.WriteAllBytes: written beside the file, then moved over it
+M:LegendaryExplorerCore.Unreal.CNDFile.ToFile(System.String);Use ConditionalFiles.Save: ToFile truncates the file before it writes, Save goes through AtomicFile
+
+# Package saves: PackageWriter refuses a path in the game install and backs the old file up first.
+T:LegendaryExplorerCore.Packages.PackageSaver;Save packages with PackageWriter.Save: it refuses game-install paths and backs the file up
+M:LegendaryExplorerCore.Packages.MEPackageHandler.CreateAndSavePackage(System.String,LegendaryExplorerCore.Packages.MEGame);Use PackageWriter.Create: it refuses game-install paths
+
+# LEC's file list: one cache per game for the whole process. GamePaths keys it by the folders' signature instead of refreshes by hand.
+M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.GetFilesLoadedInGame(LegendaryExplorerCore.Packages.MEGame,System.Boolean,System.Boolean,System.Boolean,System.String,System.Boolean,System.String[],System.Boolean);Use GamePaths.LoadedFiles: rescanned when the game's folders change
+M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.TryGetHighestMountedFile(LegendaryExplorerCore.Packages.MEGame,System.String,System.String@);Use GamePaths.LoadedFiles: this one rescans every call
+M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.InvalidateCaches;Use GamePaths.RefreshLoadedFiles

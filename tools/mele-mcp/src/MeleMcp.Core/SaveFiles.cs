@@ -174,18 +174,13 @@ public static class SaveFiles
         var backup = Path.Combine(backupFolder, Path.GetFileName(path));
         File.Copy(path, backup);
         if (!File.ReadAllBytes(backup).AsSpan().SequenceEqual(original)) throw new IOException("The file changed since it was read.");
-        var temporary = path + ".tmp";
-        try
+        // The save keeps its own times: set on the new file before it is moved over the old one.
+        AtomicFile.WriteAllBytes(path, edited, temporary =>
         {
-            File.WriteAllBytes(temporary, edited);
             File.SetCreationTimeUtc(temporary, created);
             File.SetLastWriteTimeUtc(temporary, modified);
-            File.Move(temporary, path, overwrite: true);
-        }
-        finally
-        {
-            File.Delete(temporary);
-        }
+            return true;
+        });
         if (!File.ReadAllBytes(path).AsSpan().SequenceEqual(edited)) throw new IOException($"The file differs from what was written. The original is {backup}.");
     }
 

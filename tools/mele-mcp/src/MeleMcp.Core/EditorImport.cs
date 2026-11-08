@@ -1723,9 +1723,7 @@ public static class EditorImport
     internal static string WriteYaml(string file, string text, string? backup = null)
     {
         backup ??= PackageWriter.Backup(file);
-        var temporary = file + ".tmp";
-        File.WriteAllText(temporary, text, new UTF8Encoding(false));
-        File.Move(temporary, file, overwrite: true);
+        AtomicFile.WriteAllText(file, text, new UTF8Encoding(false));
         return backup;
     }
 
@@ -1780,18 +1778,10 @@ public static class EditorImport
         // Before the session loses them: a crash between the two writes leaves an entry in both, never in neither (and a retry after
         // a save below adds none twice).
         if (dropped.Count > 0) KeepDropped(dropFile, sessionFile, yamlFile, dropped);
-        // Written beside it, then moved over it: a crash mid-write leaves the old file whole. Not MeleBridge's .tmp name.
-        var temporary = sessionFile + ".import.tmp";
-        File.WriteAllText(temporary, json, new UTF8Encoding(false));
-        // Compared again right before the move, the writes above done: a MeleBridge save during them would be overwritten (the caller
-        // merges again instead). The window left is this read and the move.
-        if (File.ReadAllText(sessionFile) != read)
-        {
-            File.Delete(temporary);
-            return null;
-        }
-        File.Move(temporary, sessionFile, overwrite: true);
-        return marked;
+        // Written beside it, then moved over it: a crash mid-write leaves the old file whole (AtomicFile never uses MeleBridge's .tmp
+        // name). Compared again right before the move, the writes above done: a MeleBridge save during them would be overwritten (the
+        // caller merges again instead). The window left is this read and the move.
+        return AtomicFile.WriteAllText(sessionFile, json, new UTF8Encoding(false), _ => File.ReadAllText(sessionFile) == read) ? marked : null;
     }
 
     /// <summary>Whether a session entry, its base, imported.before or an installed state holds a light of the kinds of version 3: npc or vanilla.</summary>
@@ -1835,9 +1825,7 @@ public static class EditorImport
             if (list.Any(d => d?["session"] is JsonValue s && s.TryGetValue<string>(out var from) && from == sessionFile && JsonNode.DeepEquals(d["entry"], entry))) continue;
             list.Add(new JsonObject { ["at"] = at, ["session"] = sessionFile, ["file"] = yamlFile, ["why"] = why, ["entry"] = entry });
         }
-        var temporary = dropFile + ".import.tmp";
-        File.WriteAllText(temporary, doc.ToJsonString(Readable), new UTF8Encoding(false));
-        File.Move(temporary, dropFile, overwrite: true);
+        AtomicFile.WriteAllText(dropFile, doc.ToJsonString(Readable), new UTF8Encoding(false));
     }
 
     /// <summary>A transform as a session entry's base or imported.before has it; a value it lacks is left out (MeleBridge takes the actor's).</summary>

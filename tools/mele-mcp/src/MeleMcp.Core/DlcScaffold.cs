@@ -100,7 +100,7 @@ public static partial class DlcScaffold
                 files.Add(tlk);
             }
 
-            File.WriteAllText(moddesc, ModDesc(game, title, description, modVersion, dev, folder), new UTF8Encoding(false));
+            AtomicFile.WriteAllText(moddesc, ModDesc(game, title, description, modVersion, dev, folder), new UTF8Encoding(false));
             files.Add(moddesc);
 
             checks.Add(CheckMount(game, mountPath, folder, title, mountPriority, strRef, flags.FlagValue));

@@ -172,7 +172,8 @@ public static class CatalogBuilder
         var json = new JsonCatalog(FormatVersion, DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), PackageName, CatalogRules.Categories,
             kept.Select(e => new JsonEntry(e.Mesh.Name, e.Category, e.Mesh.Path, e.Mesh.Source, e.Load, e.Thumbnail ? $"thumbs/{e.ThumbFile}" : null,
                 e.Mesh.Size, e.Mesh.Tris, e.Mesh.Placed, e.Mesh.Large)).ToList());
-        WriteAtomic(catalog, JsonSerializer.Serialize(json, Json));
+        // Written beside it, then moved over it: the bridge never reads half a file.
+        AtomicFile.WriteAllText(catalog, JsonSerializer.Serialize(json, Json));
         written.Add(catalog);
         seconds["write"] = Round(sw);
         if (package is not null) notes.Add($"Install the mod (game closed: mod_install mod='{ModName}') so the game finds {PackageName} by name.");
@@ -234,7 +235,7 @@ public static class CatalogBuilder
             Directory.CreateDirectory(build);
             path = Path.Combine(build, PackageName + ".pcc");
             if (File.Exists(path)) File.Delete(path);
-            MEPackageHandler.CreateAndSavePackage(path, game);
+            PackageWriter.Create(path, game);
             catalog = MEPackageHandler.OpenMEPackage(path, forceLoadFromDisk: true);
             foreach (var group in todo.Select(e => e.Group).Distinct()) groups[group] = ExportCreator.CreatePackageExport(catalog, group, null, forcedExport: false);
             relink.Clear();
@@ -291,7 +292,7 @@ public static class CatalogBuilder
                 return null;
             }
             times["save"].Start();
-            catalog.Save();
+            PackageWriter.Save(catalog, backup: false);
             times["save"].Stop();
             return path;
         }
@@ -312,7 +313,7 @@ public static class CatalogBuilder
                 e.ThumbSkip = $"{thumbnail.Skip} ({string.Join("; ", thumbnail.Elements)})";
                 return;
             }
-            File.WriteAllBytes(Path.Combine(thumbsDir, e.ThumbFile), thumbnail.Png);
+            AtomicFile.WriteAllBytes(Path.Combine(thumbsDir, e.ThumbFile), thumbnail.Png);
             e.Thumbnail = true;
         }
         catch (Exception ex)
@@ -460,7 +461,7 @@ public static class CatalogBuilder
                 continue;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, text.ReplaceLineEndings("\r\n"), new UTF8Encoding(false));
+            AtomicFile.WriteAllText(path, text.ReplaceLineEndings("\r\n"), new UTF8Encoding(false));
             written.Add(path);
         }
     }
@@ -513,14 +514,6 @@ public static class CatalogBuilder
         {
             // Left for the next build.
         }
-    }
-
-    /// <summary>Written beside it, then moved over it: the bridge never reads half a file.</summary>
-    private static void WriteAtomic(string path, string text)
-    {
-        var temporary = path + ".tmp";
-        File.WriteAllText(temporary, text, new UTF8Encoding(false));
-        File.Move(temporary, path, overwrite: true);
     }
 
     /// <summary>M3's mod library: settings.ini's LibraryPath, else the 'mods' folder next to ME3TweaksModManager.exe (as mod_install finds it).</summary>
