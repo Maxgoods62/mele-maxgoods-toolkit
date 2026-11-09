@@ -997,6 +997,103 @@ if (cmd == "2da") {
   var tex = int.TryParse(args[2], out var ui) ? pcc.GetUExport(ui) : pcc.FindExport(args[2]);
   if (tex is not { ClassName: "Texture2D" }) { Console.WriteLine($"ERROR {args[2]}: not a Texture2D export of {Path.GetFileName(args[1])}"); Environment.Exit(1); }
   Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(tex).ExportToPNG(Writable(args[3])));
+} else if (cmd == "cubeshrink") {
+  // cubeshrink <pcc> <cubePath> <size> <DXT1|DXT5>: makes the six faces of a TextureCube smaller, in place. Each face's
+  // top mip is halved with a 2x2 box filter down to <size> (what the cooker does when a LOD group cuts top mips), then
+  // stored in the package in the new format with a full mip chain. The engine builds the cube from the faces, so all six
+  // must already match in size and format, and they match again after. Reads the package back and checks every face.
+  if (args.Length != 5 || !int.TryParse(args[3], out var size) || args[4] is not ("DXT1" or "DXT5")) {
+    Console.WriteLine("ERROR usage: cubeshrink <pcc> <cubePath> <size> <DXT1|DXT5>"); Environment.Exit(1); return;
+  }
+  var fmt = args[4] == "DXT1" ? LegendaryExplorerCore.Textures.PixelFormat.DXT1 : LegendaryExplorerCore.Textures.PixelFormat.DXT5;
+  string[] faceProps = { "FacePosX", "FaceNegX", "FacePosY", "FaceNegY", "FacePosZ", "FaceNegZ" };
+  var pkgPath = Writable(args[1]);
+  int wantMips = 1;
+  using (var pkg = MEPackageHandler.OpenMEPackage(pkgPath, forceLoadFromDisk: true)) {
+    var cube = pkg.FindExport(args[2]);
+    if (cube is not { ClassName: "TextureCube" }) { Console.WriteLine($"ERROR {args[2]}: not a TextureCube export of {Path.GetFileName(args[1])}"); Environment.Exit(1); return; }
+    var faces = faceProps.Select(n => cube.GetProperty<ObjectProperty>(n)?.ResolveToEntry(pkg) as ExportEntry).ToList();
+    if (faces.Any(f => f is not { ClassName: "Texture2D" }) || faces.Distinct().Count() != 6) {
+      Console.WriteLine($"ERROR {args[2]}: needs six different Texture2D exports of this package as faces"); Environment.Exit(1); return;
+    }
+    var texs = faces.Select(f => new Texture2D(f)).ToList();
+    var top = texs[0].GetTopMip();
+    if (texs.Any(t => t.GetTopMip().width != top.width || t.GetTopMip().height != top.height || t.TextureFormat != texs[0].TextureFormat)) {
+      Console.WriteLine($"ERROR {args[2]}: the faces differ in size or format"); Environment.Exit(1); return;
+    }
+    if (top.width != top.height || size < 4 || (size & (size - 1)) != 0 || size > top.width) {
+      Console.WriteLine($"ERROR size {size}: must be a power of two from 4 to the faces' {top.width}x{top.height}, and the faces square"); Environment.Exit(1); return;
+    }
+    for (int s = size; s > 1; s >>= 1) wantMips++;
+    for (int i = 0; i < 6; i++) {
+      var before = faces[i].DataSize;
+      var px = texs[i].ToImage(LegendaryExplorerCore.Textures.PixelFormat.ARGB).mipMaps.First(m => m.origWidth == size).data;
+      // DXT1 keeps one bit of alpha, and its encoder turns every texel under half alpha into black. A face whose alpha
+      // follows its brightness, as StarsCube01's does, came out all black: DXT1 faces are made opaque (BGRA bytes).
+      if (fmt == LegendaryExplorerCore.Textures.PixelFormat.DXT1) for (int b = 3; b < px.Length; b += 4) px[b] = 255;
+      var img = LegendaryExplorerCore.Textures.Image.LoadFromRaw(px, LegendaryExplorerCore.Textures.PixelFormat.ARGB, size, size);
+      foreach (var m in texs[i].Replace(img, faces[i].GetProperties(), isPackageStored: true, forcedNewFormat: fmt, forceMipping: true)) Console.WriteLine("note: " + m);
+      // Replace leaves these: the face has mips now, and its original size is the stored one. It keeps NeverStream only
+      // from 6 mips up, and these mips are in the package, so the engine must never look for them elsewhere.
+      var p = faces[i].GetProperties();
+      p.RemoveNamedProperty("CompressionNoMipmaps");
+      p.AddOrReplaceProp(new IntProperty(size, "OriginalSizeX"));
+      p.AddOrReplaceProp(new IntProperty(size, "OriginalSizeY"));
+      p.AddOrReplaceProp(new BoolProperty(true, "NeverStream"));
+      faces[i].WriteProperties(p);
+      Console.WriteLine($"{faces[i].UIndex}\t{faceProps[i]}\t{faces[i].InstancedFullPath}\t{before} -> {faces[i].DataSize} bytes");
+    }
+    pkg.Save();
+  }
+  using (var back = MEPackageHandler.OpenMEPackage(pkgPath, forceLoadFromDisk: true)) {
+    var cube = back.FindExport(args[2]);
+    long total = 0;
+    foreach (var n in faceProps) {
+      var f = (ExportEntry)cube.GetProperty<ObjectProperty>(n).ResolveToEntry(back);
+      var t = new Texture2D(f);
+      var tm = t.GetTopMip();
+      var stored = t.Mips.All(m => m.storageType is StorageTypes.pccUnc or StorageTypes.pccLZO or StorageTypes.pccZlib or StorageTypes.pccOodle);
+      if (tm.width != size || tm.height != size || t.Mips.Count != wantMips || t.TextureFormat != "PF_" + args[4] || !stored) {
+        Console.WriteLine($"ERROR {f.InstancedFullPath}: read back {tm.width}x{tm.height} {t.TextureFormat}, {t.Mips.Count} mips (want {wantMips}), all in the package: {stored}");
+        Environment.Exit(1);
+      }
+      total += f.DataSize;
+    }
+    Console.WriteLine($"{cube.InstancedFullPath}\t6 faces {size}x{size} PF_{args[4]}, {wantMips} mips\t{total} bytes");
+  }
+} else if (cmd == "forcepackage") {
+  // forcepackage <pcc> <package> [--move-out <path>]...: marks a top-level Package export and every export under it
+  // ForcedExport, as the game's own levels store shared art. Each object then loads under its own path (BIOG_NOR.Base.X,
+  // not <file>.BIOG_NOR.Base.X): the game uses the copy already in memory when there is one, and a texture override
+  // (M3's .m3to, which matches a texture's full path) finds it. --move-out first moves an export and everything under
+  // it to the top level of the file, not forced: for what the mod changed, which must not stand in for the game's copy.
+  var moveOut = new List<string>();
+  bool usageOk = args.Length >= 3;
+  for (int i = 3; i < args.Length && usageOk; i++) {
+    if (args[i] == "--move-out" && i + 1 < args.Length) moveOut.Add(args[++i]); else usageOk = false;
+  }
+  if (!usageOk) { Console.WriteLine("ERROR usage: forcepackage <pcc> <package> [--move-out <path>]..."); Environment.Exit(1); return; }
+  var pkgPath = Writable(args[1]);
+  var forced = LegendaryExplorerCore.Unreal.UnrealFlags.EExportFlags.ForcedExport;
+  using (var pkg = MEPackageHandler.OpenMEPackage(pkgPath, forceLoadFromDisk: true)) {
+    var top = pkg.FindExport(args[2]);
+    if (top is not { ClassName: "Package", Parent: null }) { Console.WriteLine($"ERROR {args[2]}: not a top-level Package export of {Path.GetFileName(args[1])}"); Environment.Exit(1); return; }
+    foreach (var path in moveOut) {
+      var e = pkg.FindExport(path);
+      if (e == null || !e.InstancedFullPath.StartsWith(top.InstancedFullPath + ".")) { Console.WriteLine($"ERROR {path}: not an export under {args[2]}"); Environment.Exit(1); return; }
+      if (pkg.Exports.Any(x => x.Parent == null && x.ObjectName == e.ObjectName)) { Console.WriteLine($"ERROR {path}: the top level already has a {e.ObjectName.Instanced}"); Environment.Exit(1); return; }
+      e.Parent = null;
+      foreach (var d in e.GetAllDescendants().OfType<ExportEntry>().Append(e)) d.ExportFlags &= ~forced;
+    }
+    foreach (var d in top.GetAllDescendants().OfType<ExportEntry>().Append(top)) d.ExportFlags |= forced;
+    pkg.Save();
+  }
+  using (var back = MEPackageHandler.OpenMEPackage(pkgPath, forceLoadFromDisk: true)) {
+    var top = back.FindExport(args[2]);
+    var below = top.GetAllDescendants().OfType<ExportEntry>().ToList();
+    if (!top.IsForcedExport || below.Any(d => !d.IsForcedExport)) { Console.WriteLine($"ERROR {args[2]}: read back with exports not forced"); Environment.Exit(1); }
+    foreach (var x in back.Exports.Where(e => e.Parent == null)) Console.WriteLine($"top\t{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{(x.IsForcedExport ? "forced" : "not forced")}\t{x.GetAllDescendants().Count} below");
+  }
 } else if (cmd == "coalesced") {
   // coalesced <bin> <outDir> [filter]: writes every ini of a Coalesced file (LE1, LE2, or LE3's Coalesced.bin and DLC
   // Default_<DLC>.bin) to outDir and prints the lines that contain filter, with tabs shown as \t (ConfigDelta removals

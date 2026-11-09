@@ -84,6 +84,8 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 91 tools:
   passed one test run on each game, on a Normandy save. `live_place` and `live_remove` have not run there.
   `--install` and `--uninstall` take `--game` too.
 - lectool: `coalesced` reads LE3's `Coalesced.bin` and `Default_<DLC>.bin`.
+- lectool: `cubeshrink` makes the faces of a `TextureCube` smaller, in place, as DXT1 or DXT5 with a full mip chain.
+- lectool: `forcepackage` gives ported art back the game's own paths (`ForcedExport`), so texture overrides reach it.
 - lectool: `morphface` gives a `BioMorphFace` the look of another, in place: LOD0 and LOD1 vertices, bones and material
   parameters. The donor may be a face of another game. `--sha1` stops the run on any other donor look.
 - lectool refuses to write, delete or save a file inside the Legendary Edition folder (mele-mcp's guard), refuses an

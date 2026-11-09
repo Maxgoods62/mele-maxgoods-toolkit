@@ -61,6 +61,10 @@ public class LectoolTests
     public void BuildSound_UnknownFlag_ExitsOne() =>
         AssertError("unknown option --unqiue-wave", "buildsound", "donor.pcc", "cue", "x.ogg", "1", "1", "1", Path.Combine(work, "out.pcc"), "new", "title", "1.0", "--unqiue-wave");
 
+    [TestMethod]
+    public void CubeShrink_BadFormat_ExitsOne() =>
+        AssertError("usage: cubeshrink", "cubeshrink", Path.Combine(work, "x.pcc"), "Pkg.Cube", "256", "BC4");
+
     /// <summary>lectool had no install guard: 2dapart deleted its output before it even opened its source.</summary>
     [TestMethod]
     public void WriteCommands_RefuseAFileInTheInstall_AndLeaveItAlone()
@@ -79,6 +83,8 @@ public class LectoolTests
             ["gfxpackage", Missing("src.pcc"), "Movie", gameFile],
             ["actortype", Missing("r.yaml"), Missing("t.pcc"), Missing("l.pcc"), gameFile],
             ["buildsound", Missing("donor.pcc"), "cue", Missing("x.ogg"), "1", "1", "1", gameFile, "new", "title"],
+            ["cubeshrink", gameFile, "Pkg.Cube", "256", "DXT1"],
+            ["forcepackage", gameFile, "Pkg"],
         ];
         foreach (var call in calls)
         {
