@@ -165,6 +165,7 @@ imports or copied; it adds textures for the images a patched movie adds, and giv
 
 Docs: [docs/design/in-game-editor.md](docs/design/in-game-editor.md), [docs/formats.md](docs/formats.md) (the pipe
 protocol, `levels.json` version 1, session files versions 1 to 3, `catalog.json` version 1) and
-[docs/le1-lighting.md](docs/le1-lighting.md).
+[docs/le1-lighting.md](docs/le1-lighting.md). [docs/translating.md](docs/translating.md) tells translators how to
+make a mod that translates one of my mods, in LE1, LE2 and LE3; each mod's own page links it.
 
 License: GPL-3.0.
