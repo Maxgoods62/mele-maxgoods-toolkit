@@ -63,6 +63,7 @@ ran on game files, and the game never loaded the result.
 - [Editor](design/in-game-editor.md) Phases 0 to 5a. Phase 5b is built, and its test is pending. Phase 5c is not built.
 - Catalog props spawn on the Normandy. `editor_import` ran through build and install, and it refused a conflict.
 - `le_find_file` matches the live TOC for 9,777 files.
+- `mergemod_build`: Sound Settings' merge, applied by M3, passed in game (2026-11-02).
 
 The LE1 runs used M3 9.2.1 build 137, LE1CP 2.0, `AutoTOCLE-v2`, `LE1AutoloadEnabler-v13`, `LE1DebugLogger-v8`,
 `LE1KismetLogger-v4`, `LE1LEXInterop-v10`.
@@ -83,6 +84,9 @@ The LE1 runs used M3 9.2.1 build 137, LE1CP 2.0, `AutoTOCLE-v2`, `LE1AutoloadEna
 
 - MeleBridge, one run on `BioP_Nor`, with the same list as LE2.
 - `game_cycle` without a mod: boot to `BioP_Nor` in 31 s, restart in 40 s.
+- `game_cycle` with mods: main menu at 24 s, a save's map at 32 s, a screenshot at 40 s (2026-11-09).
+- One mod, Sound Settings (2026-11-02): M3 installed the `dlc_new` skeleton, the game showed the options rows that
+  `config_set` wrote with their names from the `.tlk` files `tlk_set` wrote, and M3 applied its `mergemod_build` merge.
 
 ### All three, tested in game
 
@@ -101,5 +105,5 @@ The LE1 runs used M3 9.2.1 build 137, LE1CP 2.0, `AutoTOCLE-v2`, `LE1AutoloadEna
 - LE2 and LE3: `live_place`, `live_remove`, `live_watch` while Kismet runs, `live_call` with string or array args,
   `live_status` during a level change, keep ticking with the game focused, LEX Interop `game_*` tools, FaceFX tools.
 - LE2: `live_status` with the squad screen open.
-- LE3: `game_cycle` with a mod, and `dlc_new`, `config_set`, `tlk_set` or `script_compile` output loaded by the game.
-- LE1 and LE3: `exe_dump`, and `mergemod_build` applied by M3.
+- LE3: `script_compile` output loaded by the game.
+- LE1 and LE3: `exe_dump`.

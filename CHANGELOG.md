@@ -70,7 +70,7 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 91 tools:
   installed. Every file is read back with LEC; not parsed by M3's mod loader yet, not tested in game.
 - Merge mods: `mergemod_build` builds an M3 `.m3m` for SFXGame and the other core files in LE1, LE2 and LE3, from
   `changes` or an existing manifest. A dry check on a scratch copy comes first, so a script or property error stops
-  before M3 is touched; then M3 compiles it and `moddesc.ini` lists it. One merge mod applied by M3 and proved in LE2.
+  before M3 is touched; then M3 compiles it and `moddesc.ini` lists it. Merge mods applied by M3 and proved in LE1, LE2 and LE3.
 - Cross-game script: `xgame_decompile`, one class, function, state, struct or enum in LE1, LE2 and LE3, with where each
   winning file holds it and a unified diff against the first game that has it.
 - GFx, read only: `gfx_scan`, a C# inspector for a package's movies or a loose `.gfx`: movies, tags, images, and

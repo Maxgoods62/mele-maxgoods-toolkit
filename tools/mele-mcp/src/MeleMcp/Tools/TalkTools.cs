@@ -158,7 +158,7 @@ public static class TalkTools
      Description("Adds or replaces strings. LE1: in a package's BioTlkFile exports (all of them by default, so male and female stay in sync). "
                  + "LE2/LE3: in one mod .tlk file, one file per language, created with the header strings every .tlk has if it is missing; an id in both "
                  + "tables gets the new text in both, as LEC's ReplaceString does, unless the string gives female too. Notes warn when the file name is not one the DLC folder loads. "
-                 + "LE2/LE3 output reads back through LEC, non-ASCII text included. In LE2 the game loaded a .tlk it wrote; no LE3 one has been loaded. "
+                 + "LE2/LE3 output reads back through LEC, non-ASCII text included. In LE2 and LE3 the game loaded .tlk files it wrote. "
                  + "Backs an existing file up first and refuses files inside the game install. Use one id block per mod (mount x 10000).")]
     public static object TlkSet(
         [Description("Game: LE1, LE2 or LE3.")] string game,

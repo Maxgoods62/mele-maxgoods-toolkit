@@ -34,7 +34,7 @@ public static class ConfigTools
                  + "rows there go), add, addunique, remove (also drops this file's own add of that value), clear (placed before the key's rows in this "
                  + "file). An entry already there changes nothing. Backs up each file it changes and refuses anything inside the game install. "
                  + "LE2 and LE3 output was read back with LEC, and a real DLC config round-tripped. In LE2 a value it wrote was read back "
-                 + "in game; no LE3 output has been loaded by the game.")]
+                 + "in game, and LE3 showed the options rows it wrote.")]
     public static ConfigSetResult ConfigSet(
         [Description("Game: LE1, LE2 or LE3.")] string game,
         [Description("The mod's DLC_<name> folder or its CookedPCConsole, usually in the M3 library (Windows or /mnt/<drive> path).")] string folder,
