@@ -1,9 +1,9 @@
 namespace MeleMcp.Core;
 
 /// <summary>
-/// What a build that writes several files has put on disk so far, each file with its backup. The builds have no rollback (a
-/// package is saved in place, see <see cref="PackageWriter"/>), so when a later step fails the caller must still learn which
-/// files already changed and where their backups are. <see cref="Guard{T}"/> turns such a failure into a
+/// What a build that writes several files has put on disk so far, each file with its backup. The builds have no rollback (each
+/// file is replaced whole, see <see cref="PackageWriter"/>, but a build writes several), so when a later step fails the caller
+/// must still learn which files already changed and where their backups are. <see cref="Guard{T}"/> turns such a failure into a
 /// <see cref="PartialBuildException"/> that names them; while nothing is written yet the original exception goes through as it is.
 /// </summary>
 public sealed class BuildWrites

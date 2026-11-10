@@ -319,12 +319,13 @@ small mod that builds.
 ## Write rule
 
 Package writes go through `PackageWriter.Edit`, which guards, changes, backs up and saves. A tool that builds a package
-itself saves it with `PackageWriter.Save`, so `level_build` checks its forks and the level, a new one too, before it saves
-any of them. Every other whole file is written by `AtomicFile`: beside the target, then moved over it, so a crash leaves the
-old file or the new one. `src/BannedSymbols.txt` makes any other package save, `File.WriteAll*` call, or read of LEC's
-file list outside `GamePaths` a build error. The guard refuses any file
+itself saves it with `PackageWriter.Save`, so `level_build` checks its forks and the level, a new one too, before it
+saves any of them. A package, like every other whole file (`AtomicFile`), is written beside the target, then moved over
+it, so a crash or a failed save leaves the old file or the new one. `src/BannedSymbols.txt` makes any other package
+save, `File.WriteAll*` call, or read of LEC's file list outside `GamePaths` a build error. The guard refuses any file
 inside the Legendary Edition folder or the game path. It compares spellings, then what the path is on disk, so shares,
-junctions and volume names are caught too. It does not see a hard link to a game file.
+junctions and volume names are caught too. It does not see a hard link to a game file; a file saved over such a link
+replaces the link and leaves the game's file as it was.
 
 A file name can resolve to another mod's installed copy. Edit the mod's copy in M3's library, then run `mod_install`.
 Backups go to `%LOCALAPPDATA%\mele-mcp\backups` as `yyyyMMdd-HHmmss-fff_<file>` (`-2`, `-3`... after the time when two
