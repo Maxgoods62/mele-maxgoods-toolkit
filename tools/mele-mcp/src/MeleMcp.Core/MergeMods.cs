@@ -112,8 +112,23 @@ public static partial class MergeMods
         public static CheckedPlan Of(MEGame game, Plan plan) => new(plan, CheckAll(game, plan));
     }
 
+    /// <summary>
+    /// M3 as <see cref="Build(MEGame, string, string?, string?, IReadOnlyList{MergeChange}?, string?, bool, bool, int, M3Route)"/> uses it:
+    /// the lock that keeps other mele-mcp calls off M3, and the compile. <see cref="Real"/> everywhere but in tests, which pass a
+    /// stand-in so that no test starts M3 or takes the real lock.
+    /// </summary>
+    internal sealed record M3Route(Func<IDisposable> Lock,
+        Func<string, string, string, int, List<string>, (string Stage, double Seconds, IReadOnlyList<string> Log)> Compile)
+    {
+        public static readonly M3Route Real = new(GameLock.ForM3, RunM3);
+    }
+
     public static MergeBuildResult Build(MEGame game, string modRoot, string? name, string? targetFile, IReadOnlyList<MergeChange>? changes, string? manifestPath,
-        bool allLocalizations, bool compile, int timeoutSeconds)
+        bool allLocalizations, bool compile, int timeoutSeconds) =>
+        Build(game, modRoot, name, targetFile, changes, manifestPath, allLocalizations, compile, timeoutSeconds, M3Route.Real);
+
+    internal static MergeBuildResult Build(MEGame game, string modRoot, string? name, string? targetFile, IReadOnlyList<MergeChange>? changes, string? manifestPath,
+        bool allLocalizations, bool compile, int timeoutSeconds, M3Route m3)
     {
         LecHost.EnsureInitialized();
         if (!game.IsLEGame()) throw new ArgumentException("mergemod_build handles LE1, LE2 and LE3.");
@@ -144,13 +159,17 @@ public static partial class MergeMods
         var writes = new BuildWrites();
         return writes.Guard(() =>
         {
+            // M3 is one app with one log for all three games: from before this build's first write to the end of its compile, no
+            // other mele-mcp call may install, boot or compile through it, or each would read the other's log lines. Taken first, so
+            // a busy M3 refuses a build that has changed nothing. compile=false never touches M3 and takes no lock.
+            using var m3Held = compile ? m3.Lock() : null;
             Write(folder, manifest, check, writes);
             if (!compile) return NotCompiled("written", "Not compiled (compile=false).");
 
             (string Stage, double Seconds, IReadOnlyList<string> Log) run;
             try
             {
-                run = RunM3(manifest, m3m, cmmVer, timeoutSeconds, plan.Notes);
+                run = m3.Compile(manifest, m3m, cmmVer, timeoutSeconds, plan.Notes);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -740,7 +759,7 @@ public static partial class MergeMods
                 break;
             }
             size = now;
-            if (text.Contains(LogFailed, StringComparison.Ordinal) && text.Contains(LogBegin, StringComparison.Ordinal))
+            if (CompileFailed(text, manifest))
             {
                 stage = "m3-error";
                 break;
@@ -762,6 +781,18 @@ public static partial class MergeMods
                       + $"The manifest stays at {manifest}: dropping that file on M3's window compiles it too.");
         }
         return (stage, Math.Round((DateTime.UtcNow - started).TotalSeconds, 1), lines);
+    }
+
+    /// <summary>
+    /// Whether M3's log says the compile of <paramref name="manifest"/> failed. M3's failure line names no file, so it counts only
+    /// after the line that begins this manifest's compile ("M3MCompiler: Serializing &lt;manifest&gt; to ..."): one that follows
+    /// another manifest's begin line, or comes before this one's, belongs to another compile, and would take this build's good
+    /// .m3m out of moddesc.ini.
+    /// </summary>
+    internal static bool CompileFailed(string log, string manifest)
+    {
+        var begun = log.LastIndexOf(LogBegin + manifest, StringComparison.OrdinalIgnoreCase);
+        return begun >= 0 && log.IndexOf(LogFailed, begun, StringComparison.Ordinal) >= 0;
     }
 
     /// <summary>Whether nothing has the file open: opened with no sharing, which fails while M3 (or anything else) still holds it.</summary>

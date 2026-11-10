@@ -277,7 +277,7 @@ its other steps differ:
 
 The game is booted only once the install is verified. A game that closes after the boot ends the cycle at once, with
 the phase it closed in. `game_cycle`, `game_close` and `mod_install` refuse, after 5 s, while another call runs one of
-them on the same game, from any session's server. Installs and boots through M3 also wait for each other.
+them on the same game, from any session's server. Installs, boots and merge mod compiles through M3 also wait for each other.
 
 On LE1 a career save is not a slot, so it goes through `commands`:
 `nextframedefer loadgame <Career>_QuickSave DevId=-1`, with `waitForMap`. `game_plot` uses MeleBridge when it is there,
