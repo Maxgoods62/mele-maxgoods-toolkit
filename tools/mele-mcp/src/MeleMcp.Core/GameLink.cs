@@ -29,7 +29,9 @@ public static class GameLink
     /// What this server may have left in one game's LEX Interop ASI. Two modes stay on until their deactivate arrives: the live
     /// level editor (LLE_TEST_ACTIVE) and the player GPS (ACTIVATE_PLAYERGPS). And replies carry no request id, so the late
     /// reply to a request that timed out would answer the next request of its kind (the last actor's position read as this
-    /// one's). Read and changed only inside <see cref="Sequence{T}"/>, which holds the game's LEX Interop lock.
+    /// one's). Read and changed only inside <see cref="Sequence{T}"/>, which holds the game's LEX Interop lock. The mark of a
+    /// request that timed out is the machine's, not this server's: it is in <see cref="LexLinkShared"/>, since the late reply
+    /// can reach any server that holds the reply window next.
     /// </summary>
     private sealed class LinkState
     {
@@ -39,12 +41,15 @@ public static class GameLink
         /// sends both whenever its Live Level Editor closes.
         /// </summary>
         public readonly HashSet<string> Owed = [LleOff, GpsOff];
-
-        /// <summary>A request timed out and its reply may still come: the next sequence fences first (<see cref="Fence"/>).</summary>
-        public bool Unsettled;
     }
 
     private static readonly ConcurrentDictionary<MEGame, LinkState> States = new();
+
+    /// <summary>
+    /// What all servers share about the link (see <see cref="LexLinkShared"/>). Not a plain Lazy: that would keep a first
+    /// failure for the life of the server.
+    /// </summary>
+    private static readonly Lazy<LexLinkShared> Shared = new(() => new LexLinkShared(LexLinkShared.SectionName), LazyThreadSafetyMode.PublicationOnly);
 
     public static GameStatus Status(MEGame game)
     {
@@ -76,7 +81,11 @@ public static class GameLink
             }
             catch (TimeoutException) { problem = "Commands reach the game but no reply came back."; }
         }
-        if (windows > 1) problem = (problem is null ? "" : problem + " ") + "Another 'Legendary Explorer' window is open: close LEX, it may take the replies.";
+        if (windows > 1)
+        {
+            problem = (problem is null ? "" : problem + " ")
+                      + "Another window titled 'Legendary Explorer' is open and may take the replies: close LEX, and restart any mele-mcp server started before this version (in Claude Code: /mcp).";
+        }
         return new GameStatus(game.ToString(), running, pipe, replies, windows, problem);
     }
 
@@ -94,7 +103,7 @@ public static class GameLink
 
     /// <summary>
     /// The ASI reports the player's position on PlayerTick, but only when it changed since its last report. If Shepard has not
-    /// moved since then, fall back to the last report this server saw.
+    /// moved since then, fall back to the last report any server on this machine got from this game process.
     /// </summary>
     public static PlayerLocation PlayerLocation(MEGame game) => Sequence(game, state =>
     {
@@ -110,13 +119,16 @@ public static class GameLink
         catch (TimeoutException)
         {
             fresh = false;
-            reply = GameBridge.LastReply(game, IsGps)
+            reply = Shared.Value.GetPlayerGps(game)
                 ?? throw new TimeoutException("The game only reports the player's position after it changes. Move Shepard one step and retry.");
         }
         finally
         {
             Deactivate(game, state, GpsOff);
         }
+        // For every server: the game does not repeat a report, whoever asks next. The last one this window got, as more may
+        // have come after the first.
+        if (fresh) Shared.Value.SetPlayerGps(game, GameBridge.LastReply(game, IsGps) ?? reply);
 
         // PATHFINDING_GPS PLAYERLOC=x,y,z, PLAYERROT=pitch,yaw,roll
         var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -237,30 +249,35 @@ public static class GameLink
     /// <summary>
     /// Runs requests that belong together (select an actor, then read or move it) with no other call's in between: one lock per
     /// game, across threads and mele-mcp processes (<see cref="GameLock.ForLexInterop"/>), so another call's LLE_SELECT_ACTOR
-    /// cannot retarget this one's updates. Servers deployed before the lock take none. First sends the deactivates an earlier
-    /// call left owed, then fences when a request timed out.
+    /// cannot retarget this one's updates. Inside it, the reply window (<see cref="GameBridge.HoldReplies"/>), one holder for the
+    /// whole machine across threads and mele-mcp processes, so the game's replies come to this server for the whole sequence.
+    /// Servers deployed before the locks take none. First binds the shared state to the running game process, sends the
+    /// deactivates an earlier call left owed, then fences when a request timed out, in this server or another.
     /// </summary>
     private static T Sequence<T>(MEGame game, Func<LinkState, T> body)
     {
         using var held = GameLock.ForLexInterop(game);
+        // The games answer the one window titled "Legendary Explorer": ours carries the title for this sequence only, so the
+        // servers of other sessions get their turn.
+        using var replies = GameBridge.HoldReplies();
         var state = States.GetOrAdd(game, _ => new LinkState());
+        if (GameBridge.RunningProcess(game) is { } process) Shared.Value.Bind(game, process.Id, process.Started);
         foreach (var off in state.Owed.ToList()) Deactivate(game, state, off);
-        if (state.Unsettled) Fence(game, state);
+        if (Shared.Value.GetUnsettled(game)) Fence(game, state);
         return body(state);
     }
 
-    /// <summary>A request whose reply answers it alone: a timeout leaves the link unsettled, so the next sequence fences first.</summary>
+    /// <summary>
+    /// A request whose reply answers it alone. Marked unsettled before the send and settled by the reply: a timeout leaves the
+    /// mark, and so does a server stopped while it waits, or a send that failed part-way. The next sequence then fences first,
+    /// in whichever server it runs.
+    /// </summary>
     private static string Ask(MEGame game, LinkState state, string command, Func<string, bool> isReply, TimeSpan timeout)
     {
-        try
-        {
-            return GameBridge.SendAndWait(game, command, isReply, timeout);
-        }
-        catch (TimeoutException)
-        {
-            state.Unsettled = true;
-            throw;
-        }
+        Shared.Value.SetUnsettled(game, true);
+        var reply = GameBridge.SendAndWait(game, command, isReply, timeout);
+        Shared.Value.SetUnsettled(game, false);
+        return reply;
     }
 
     /// <summary>
@@ -284,7 +301,7 @@ public static class GameLink
         {
             Deactivate(game, state, LleOff);
         }
-        state.Unsettled = false;
+        Shared.Value.SetUnsettled(game, false);
     }
 
     /// <summary>Sends a mode's deactivate; one that does not go out (game gone, pipe busy) stays owed. Never throws: it runs in finally blocks.</summary>

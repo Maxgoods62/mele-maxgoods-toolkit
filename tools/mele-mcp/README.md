@@ -225,7 +225,8 @@ pass `allowRunning`. The save file layout is described in [docs/formats.md](../.
 ### Live link (LEX Interop)
 
 Install the LEX Interop ASI from LEX (Live Level Editor, requirements), then restart the game. Keep LEX closed while you
-use these tools. Replies go to the first window titled `Legendary Explorer`, and the server owns a hidden one.
+use these tools. Replies go to the first window titled `Legendary Explorer`. The server gives its hidden window that
+title only while one of its calls waits for a reply, so several sessions can use these tools on one machine.
 
 | Tool | Purpose | Games |
 |---|---|---|
