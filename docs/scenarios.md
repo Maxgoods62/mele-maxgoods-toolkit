@@ -9,6 +9,9 @@ LE1 only: `game` accepts only `LE1`, and the runner reads `MassEffect1.exe`, LE1
 - LE1 running on any map, the main menu included.
 - [MeleBridge](../tools/mele-bridge/README.md), with the DebugLogger and Kismet Logger ASIs. A bridge older than
   version 3 lacks the `status` and `keep_ticking` ops, and the run stops with "MeleBridge 3 or later is not installed".
+  The run also stops at its start when `le_status` finds no LE1 folder, or when `DebugLogger.log` does not show the
+  answer of a console command the runner sends: without that log every log check would pass on nothing. A missing
+  `KismetLogger.log` is a warning, and the steps that read it fail.
 - For a `cold_start` file, M3 and the LEX Interop ASI.
 - mele-mcp deployed by `tools/mele-mcp/scripts/deploy.sh`. The runner starts its own server.
 - WSL with Python 3. `.yaml` suites need PyYAML (`python3-yaml`); `.json` suites do not.
@@ -102,7 +105,8 @@ checks:
 
 `vars` values are literals or finders:
 `{find: {class, tag, name_contains, path_contains, where: {Prop: expect}, alive: true}}`. A finder needs `class`,
-`name_contains` or `path_contains`. `alive` drops objects with `bDeleteMe`. Where a step takes a finder, give the
+`name_contains` or `path_contains`. `alive` drops objects with `bDeleteMe`. A finder whose `class`, `name_contains`
+and `path_contains` match more than 500 live objects fails its step: narrow it. Where a step takes a finder, give the
 variable's bare name or a finder mapping.
 
 `${name}` works in any string. A string that is only `${name}` keeps the value's type, and `${a.b}` and `${a[0]}` index
@@ -152,15 +156,15 @@ Required keys come before the semicolon. `key: value` shows a default.
 | `count` | `find; expect` | Live objects a finder matches. `save_as` keeps their paths. |
 | `distance` | `a, b; axis: xyz, expect` | Between objects, `player`, `{X, Y, Z}` or `[x, y, z]`. `axis`: `xyz`, `xy`, `z`. |
 | `teleport` | `to`, `near` or `ahead`; `object: player, offset` | `SetLocation`. Retries higher, or closer for `ahead`. |
-| `raise_event` | `object` or `name`; `class: SeqEvent_RemoteEvent, path_contains: "${map}.TheWorld", originator, instigator, pick: one` | `CheckActivate`, which also reaches events nested in prefabs. `pick: all` fires every match. |
+| `raise_event` | `object` or `name`; `class: SeqEvent_RemoteEvent, path_contains: "${map}.TheWorld", originator, instigator, pick: one` | `CheckActivate`, which also reaches events nested in prefabs. `pick: all` fires every match and needs at least one. More than 500 objects of the class under `path_contains` fail the step. |
 | `squad_pick` | `members; open: console, event, expect_spawn: true, timeout: 30` | See below. |
 | `snapshot` | `name, object, props` | Keeps the props for `compare`, in this file. |
 | `compare` | `snapshot` or `objects: [a, b], props`; `ignore, tol: 1e-4` | Lists every difference. |
 | `quicksave` | `timeout: 60` | See Saves. |
 | `screenshot` | name, or `name; review: false, max_width: 1280` | `shots/NN-<file>-<check>-<name>.png`. `review` makes the check REVIEW. |
-| `assert_log` | `since: check, errors: true, regex, ignore, expect: {max: 0}` | Counts DebugLogger entries, problems only with `errors`. `save_as` keeps them normalised. |
+| `assert_log` | `since: check, errors: true, regex, ignore, expect: {max: 0}` | Counts DebugLogger entries, problems only with `errors`. `save_as` keeps them normalised. Fails when the log cannot be read. |
 | `compare_log` | `with; since: load, mode: no_extra, ignore` | Problems against a saved set. `mode: same` also fails on one gone. |
-| `assert_kismet` | `contains; expect: {min: 1}` or `order`; `since: check` | KismetLogger lines. `order` wants each text after the last. |
+| `assert_kismet` | `contains; expect: {min: 1}` or `order`; `since: check` | KismetLogger lines. `order` wants each text after the last. Fails when the log cannot be read. |
 | `prompt` | text, or `text; until, timeout: 300` | A message box for a person. It ends when `until` holds, or else when the box closes. |
 | `watch` | `functions; seconds: 10, object_contains, expect: {min: 1}` | `live_watch`, counting the calls. |
 | `keep_ticking` | `on` or `off` | Only for checks that test focus behaviour. `off` holds until `on`, a `game_cycle` or the end of its check (or `setup`), even when a step fails first: `wait_loaded` then neither turns it back on nor requires it. The next check, `teardown` or file starts with it on again. |

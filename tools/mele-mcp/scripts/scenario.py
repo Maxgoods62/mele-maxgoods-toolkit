@@ -62,6 +62,10 @@ CALL_DENY = re.compile(r"^(ConsoleCommand|QuickLoad|BioLoadGame|LoadGame\w*|NewC
 CALL_ALLOW = {"isabletosave"}
 BRIDGE3 = "MeleBridge 3 or later is not installed: tools/mele-bridge/build.sh --install with the game closed"
 FLUSH = "getall BioWorldInfo bHasPathNodes"
+# Seconds DebugLogger.log gets to show FLUSH's answer when a run starts (Runner.check_logs).
+LOG_PROBE = 5
+# Objects one live_find returns. A finder that matches more fails its step (Runner.live_objects).
+FIND_LIMIT = 500
 ENTRY = re.compile(r"^\[[\d:.]+ (\w+)\] ")
 GETALL = re.compile(r"^appLogErrorf: (?:\d+\) \S+ \S+\.\w+ =|\t\d+: )")
 SYNC_LOAD = re.compile(r"Loading package synchronously: (\S+)$")
@@ -907,7 +911,8 @@ def step_errors(step):
     errs += expect_errors(a.get("expect"))
     check = {
         "load": ("slot" in a) != ("save" in a), "teleport": sum(k in a for k in ("to", "near", "ahead")) == 1,
-        "raise_event": "object" in a or "name" in a, "assert_kismet": "contains" in a or "order" in a,
+        "raise_event": ("object" in a or "name" in a) and a.get("pick", "one") in ("one", "all"),
+        "assert_kismet": "contains" in a or "order" in a,
         "compare": "snapshot" in a or ("objects" in a and "props" in a),
         "keep_ticking": a.get("on") in (True, False, "on", "off"),
         "wait_loaded": a.get("expect_load", True) in (True, False, "auto"),
@@ -1153,6 +1158,7 @@ class Logs:
     as the current generation)."""
 
     HEAD = 512
+    ASIS = ("DebugLogger", "Kismet Logger")
 
     def __init__(self, game_dir=None, paths=None):
         base = to_wsl(game_dir.rstrip("\\") + "\\Binaries\\Win64\\Logs") if game_dir else ""
@@ -1165,6 +1171,16 @@ class Logs:
         if old is not None and head[:len(old)] != old:
             self.gen[which] += 1
         self.head[which] = head
+
+    def require(self, which):
+        """Fails the step when log 0 (debug) or 1 (kismet) cannot be opened. lines() reads such a log as an empty one,
+        which is right for a poll, but a check that counts lines would pass on it."""
+        try:
+            with open(self.paths[which], "rb"):
+                pass
+        except OSError as e:
+            raise StepFail(f"cannot read {self.paths[which]} ({e.strerror or e}): is the {self.ASIS[which]} ASI "
+                           "installed?")
 
     def offsets(self):
         out = []
@@ -1337,11 +1353,20 @@ class Runner:
             spec = v
         return self.interp(spec.get("find", spec) if isinstance(spec, dict) else spec)
 
+    def live_objects(self, cls, name, path):
+        """Every live object live_find matches by class, name and path. More matches than one call returns fail the
+        step: a part of the matches is no base for a count, a pick or 'no such object'."""
+        reply = self.call("live_find", {"className": cls, "name": name, "path": path, "limit": FIND_LIMIT})
+        found = reply.get("objects") or []
+        if (reply.get("total") or 0) > len(found):
+            raise StepFail(f"{reply['total']} live objects match class {cls}, name {name}, path {path}: more than the "
+                           f"{len(found)} live_find returned. Narrow it with name_contains or path_contains")
+        return found
+
     def find_all(self, spec):
         """Paths of the live objects a finder matches: class/name/path through live_find, then tag, where and alive."""
         f = self.finder(spec)
-        found = self.call("live_find", {"className": f.get("class"), "name": f.get("name_contains"),
-                                        "path": f.get("path_contains"), "limit": 500}).get("objects") or []
+        found = self.live_objects(f.get("class"), f.get("name_contains"), f.get("path_contains"))
         keep = []
         for o in found:
             path = o["path"]
@@ -1426,6 +1451,32 @@ class Runner:
 
     # -- marks, logs, scanning --
 
+    def open_logs(self, le):
+        """The game's two logs, from le_status's reply. Without an LE1 folder there is no log to read, and the run
+        stops."""
+        if not le.get("le1GamePath"):
+            raise SuiteError("le_status found no LE1 folder (le1GamePath), so the game's logs cannot be read: set "
+                             "MELE_LE_DIR")
+        self.logs = Logs(le["le1GamePath"])
+
+    def check_logs(self):
+        """Stops the run unless DebugLogger.log shows the answer of a console command sent now. A log that is missing,
+        or that an earlier session left behind a DebugLogger since removed, gets no new line, and every check on no
+        lines would pass (assert_log, compare_log, the save-load guard). A missing KismetLogger.log is a warning:
+        the steps that read it fail (Logs.require)."""
+        path, at = self.logs.paths[0], self.logs.offsets()[0]
+        self.call("live_console", {"command": FLUSH, "timeoutSeconds": 10})
+        end = time.time() + LOG_PROBE
+        while not any(GETALL.search(text) for _, text in entries(self.logs.lines(0, at)[0])):
+            if time.time() > end:
+                state = "took no line" if os.path.isfile(path) else "does not exist"
+                raise SuiteError(f"{path} {state} for a console command sent now, so every log check would pass on "
+                                 "nothing: install the DebugLogger ASI (docs/scenarios.md, Prerequisites)")
+            time.sleep(0.25)
+        if not os.path.isfile(self.logs.paths[1]):
+            self.warn(f"no {self.logs.paths[1]}: assert_kismet and kismet conditions will fail, and a Kismet autosave "
+                      "is not flagged (the Kismet Logger ASI is a prerequisite)")
+
     def flush_mark(self):
         """Log offsets after a forced DebugLogger flush, so no older line can land after them."""
         try:
@@ -1440,6 +1491,7 @@ class Runner:
         return self.marks[since]
 
     def log_entries(self, since, errors=True, regex=None, ignore=None):
+        self.logs.require(0)
         found = []
         for level, text in entries(self.logs.lines(0, self.mark_at(since)[0])[0]):
             if GETALL.search(text) or errors and not is_problem(level, text):
@@ -1450,6 +1502,7 @@ class Runner:
         return found
 
     def kismet_lines(self, since):
+        self.logs.require(1)
         return self.logs.lines(1, self.mark_at(since)[1])[0]
 
     def warn(self, text):
@@ -2120,18 +2173,23 @@ class Runner:
             events = [self.obj(a["object"])]
         else:
             name = str(self.interp(a["name"]))
-            found = self.call("live_find", {"className": a.get("class", "SeqEvent_RemoteEvent"),
-                                            "path": self.interp(a.get("path_contains", "${map}.TheWorld")),
-                                            "limit": 500}).get("objects") or []
+            found = self.live_objects(a.get("class", "SeqEvent_RemoteEvent"), None,
+                                      self.interp(a.get("path_contains", "${map}.TheWorld")))
             events = []
             for o in found:
                 try:
                     if equal(self.get(o["path"], "EventName"), name):
                         events.append(o["path"])
-                except ToolError:
-                    pass
+                except ToolError as e:
+                    # Gone since live_find, or an object without EventName: no match. Anything else (a timeout, a dead
+                    # pipe) fails the step, as in find_all, so "no event matches" is never a guess.
+                    if "no object at " in str(e) or "no property '" in str(e):
+                        continue
+                    raise
         if a.get("pick", "one") == "one" and len(events) != 1:
             self.fail(f"{len(events)} events match (pick: one needs exactly 1)", events[:5], 1)
+        if not events:
+            self.fail("no event matches (pick: all needs at least 1)", [], {"min": 1})
         orig, inst = self.interp(a.get("originator", "${world}")), self.interp(a.get("instigator", "${player}"))
         for e in events:
             r = self.call("live_call", {"objectPath": e, "function": "CheckActivate", "args": [orig, inst, False]})
@@ -2504,7 +2562,7 @@ class Runner:
                                  "(tools/mele-mcp/scripts/deploy.sh)")
             le = self.call("le_status")
             self.install = le.get("legendaryEditionDir")
-            self.logs = Logs(le.get("le1GamePath") or "")
+            self.open_logs(le)
             self.run_dir = os.path.join(self.suite_root, self.stamp)
             self.run_win = to_win(self.run_dir)
             assert_writable(self.run_dir, self.install)
@@ -2531,6 +2589,7 @@ class Runner:
             time.sleep(1.5)
             if (self.status().get("worldTicks") or 0) <= t1:
                 raise Aborted("keep_ticking does not see BioWorldInfo.Tick")
+            self.check_logs()
             if saving:  # before the first file, so the career-less sessions' autosaves are undone too
                 self.backup_now(saving[0].get("career"))
             for f, checks in selected:
@@ -2851,6 +2910,36 @@ def selftest():
         if a["objectPath"] == "L.BioPawn_1" else real_get(a)
     ok(r.find_all("hench") == [], "an object gone since live_find does not match")
     fake.replies["live_get"] = real_get
+    # more matches than live_find returned: no count, and no pick of an event
+    real_find = fake.replies["live_find"]
+    fake.replies["live_find"] = {"total": 600, "objects": real_find["objects"]}
+    raises(StepFail, lambda: r.find_all("hench"), "a part of the matches is no count")
+    ok(not r.holds_safe({"count": "hench", "expect": 1}), "count is not true on a part of the matches")
+    try:
+        r.k_raise_event({"name": "Go"})
+        ok(False, "raise_event picked from a part of the events")
+    except StepFail as e:
+        ok("more than" in str(e), "a part of the events is no pick")
+    fake.replies["live_find"] = real_find
+    # raise_event: every pick needs a match, a silent bridge is no "no such event", and pick is one or all
+    events = {"L.Seq.SeqEvent_RemoteEvent_0": {"EventName": "Go"}, "L.Seq.SeqEvent_RemoteEvent_1": {"EventName": "Stop"}}
+    pawns.update(events)
+    fake.replies["live_find"] = lambda a: {"total": 2, "objects": [{"path": p} for p in events]} \
+        if a.get("className") == "SeqEvent_RemoteEvent" else real_find
+    del fake.calls[:]
+    ok(r.k_raise_event({"name": "Go"}) == ["L.Seq.SeqEvent_RemoteEvent_0"], "raise_event finds the event by name")
+    ok([a["objectPath"] for t, a in fake.calls if t == "live_call"] == ["L.Seq.SeqEvent_RemoteEvent_0"],
+       "raise_event fires only the match")
+    raises(StepFail, lambda: r.k_raise_event({"name": "Nope"}), "pick: one with no match")
+    raises(StepFail, lambda: r.k_raise_event({"name": "Nope", "pick": "all"}), "pick: all with no match")
+    fake.replies["live_get"] = lambda a: ToolError("IOException: MeleBridge did not answer 'get' within 7 s.")
+    raises(ToolError, lambda: r.k_raise_event({"name": "Go", "pick": "all"}), "a silent bridge is no missing event")
+    fake.replies["live_get"] = real_get
+    ok(step_errors({"raise_event": {"name": "Go", "pick": "al"}})
+       and not step_errors({"raise_event": {"name": "Go", "pick": "all"}}), "pick is one or all")
+    fake.replies["live_find"] = real_find
+    for path in events:
+        del pawns[path]
     # a respawn that fails is a ToolError (a FAIL), never a SuiteError through the finally paths
     sess = Session.__new__(Session)
     sess.record, sess.proc, sess.spent = (lambda e: None), None, False
@@ -3047,6 +3136,30 @@ def selftest():
         got, at = logs.lines(0, old[0])
         ok(len(got) == 2 and got[0].startswith("[10:00:00.000"), "a new log reads an old offset from 0")
         ok(logs.lines(0, at)[0] == [] and logs.lines(0, 0)[0][1] == "[10:00:01.000 info] x", "offsets of the new log")
+
+        # a log that cannot be read fails the checks on it; a DebugLogger.log that takes no line stops the run
+        r2 = Runner(fake)
+        r2.logs = Logs(paths=(os.path.join(tmp, "probe.log"), os.path.join(tmp, "none.log")))
+        r2.marks = {"check": r2.logs.offsets()}
+        raises(StepFail, lambda: r2.k_assert_log({}), "assert_log without a DebugLogger.log")
+        raises(StepFail, lambda: r2.k_assert_kismet({"contains": "x", "expect": 0}), "assert_kismet without a KismetLogger.log")
+        ok(not r2.holds_safe({"log": {"regex": "x"}, "expect": 0}), "a log condition is not true without the log")
+        raises(SuiteError, lambda: r2.open_logs({}), "le_status without an LE1 folder stops the run")
+        with patched(LOG_PROBE=0.3):
+            fake.replies["live_console"] = {"lines": []}
+            raises(SuiteError, r2.check_logs, "a missing DebugLogger.log stops the run")
+            with open(r2.logs.paths[0], "w") as f:
+                f.write("[09:00:00.000 info] left by an earlier session\n")
+            raises(SuiteError, r2.check_logs, "a DebugLogger.log that takes no line stops the run")
+
+            def answer(a):
+                with open(r2.logs.paths[0], "a") as f:
+                    f.write("[09:00:01.000 error] appLogErrorf: 0) BioWorldInfo L.BioWorldInfo_0.bHasPathNodes = True\n")
+                return {"lines": []}
+            fake.replies["live_console"] = answer
+            r2.check_logs()
+        ok(any("none.log" in w for w in r2.warns), "a missing KismetLogger.log is a warning")
+        ok(r2.k_assert_log({}) == [], "assert_log reads a DebugLogger.log that is there")
 
         # the load window closes with a load step that failed, so a save load after it aborts
         fake.replies.update({"live_console": {"lines": []}, "live_keep_ticking": {"on": True},
