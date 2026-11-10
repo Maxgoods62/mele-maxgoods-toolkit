@@ -537,9 +537,9 @@ internal sealed class GameLock : IDisposable
         $"Another mele-mcp call (this session's or another's) is closing, cycling or installing {game} right now. Wait for it to end "
         + "(game_cycle takes up to a few minutes), then retry.");
 
-    /// <summary>M3 from a request to its end: two installs at once would read each other's lines in M3's log.</summary>
+    /// <summary>M3 from a request to its end: two installs or merge compiles at once would read each other's lines in M3's log.</summary>
     public static GameLock ForM3() => Take("MeleMcp.M3", ShortWait,
-        "Another mele-mcp call is installing a mod or booting a game through M3 right now. Wait for it to end, then retry.");
+        "Another mele-mcp call is installing a mod, booting a game or compiling a merge mod through M3 right now. Wait for it to end, then retry.");
 
     /// <summary>One LEX Interop request sequence (GameLink): a few seconds at most.</summary>
     public static GameLock ForLexInterop(MEGame game) => Take($"MeleMcp.LexInterop.{game}", TimeSpan.FromSeconds(15),

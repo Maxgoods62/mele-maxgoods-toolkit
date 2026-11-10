@@ -177,24 +177,38 @@ public static class ModInstaller
 
     private static List<string> Split(string? value) => value?.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList() ?? [];
 
-    /// <summary>Where M3's logs end now: <see cref="ReadNew"/> from here gives only what it writes next.</summary>
-    internal static Dictionary<string, long> LogOffsets() =>
-        Directory.Exists(LogDir) ? Directory.EnumerateFiles(LogDir, "*.txt").ToDictionary(f => f, f => new FileInfo(f).Length) : [];
+    /// <summary>Where M3's logs end now: <see cref="ReadNew(Dictionary{string, long})"/> from here gives only what it writes next.</summary>
+    internal static Dictionary<string, long> LogOffsets() => LogOffsets(LogDir);
+
+    /// <summary><see cref="LogOffsets()"/> for the logs in <paramref name="dir"/>: M3's folder everywhere but in tests.</summary>
+    internal static Dictionary<string, long> LogOffsets(string dir) =>
+        Directory.Exists(dir) ? Directory.EnumerateFiles(dir, "*.txt").ToDictionary(f => f, f => new FileInfo(f).Length) : [];
 
     /// <summary>Text M3 appended to its logs since the last read (M3 keeps them open; a new day starts a new file).</summary>
-    internal static string ReadNew(Dictionary<string, long> offsets)
+    internal static string ReadNew(Dictionary<string, long> offsets) => ReadNew(LogDir, offsets);
+
+    /// <summary>
+    /// The whole lines appended to the logs in <paramref name="dir"/> since the last read. A line M3 is still writing stays for
+    /// the next read, and a file's offset moves by the bytes returned, never to a length asked for after the read: what M3 appends
+    /// in between would be skipped, and a character cut in two would come back as two broken ones.
+    /// </summary>
+    internal static string ReadNew(string dir, Dictionary<string, long> offsets)
     {
-        if (!Directory.Exists(LogDir)) return "";
+        if (!Directory.Exists(dir)) return "";
         var text = new StringBuilder();
-        foreach (var file in Directory.EnumerateFiles(LogDir, "*.txt"))
+        foreach (var file in Directory.EnumerateFiles(dir, "*.txt"))
         {
             using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             var from = offsets.GetValueOrDefault(file);
-            if (stream.Length <= from) continue;
+            var length = stream.Length;
+            if (length <= from) continue;
             stream.Seek(from, SeekOrigin.Begin);
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            text.Append(reader.ReadToEnd());
-            offsets[file] = stream.Length;
+            var bytes = new byte[length - from];
+            var read = stream.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false);
+            var whole = bytes.AsSpan(0, read).LastIndexOf((byte)'\n') + 1;
+            if (whole == 0) continue;
+            text.Append(Encoding.UTF8.GetString(bytes, 0, whole));
+            offsets[file] = from + whole;
         }
         return text.ToString();
     }

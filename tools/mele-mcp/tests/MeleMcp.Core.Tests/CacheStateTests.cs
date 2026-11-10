@@ -206,7 +206,7 @@ public class CacheStateTests
     }
 
     /// <summary>A class default object with a plain IntProperty in one of the files, and its value, to set it to itself.</summary>
-    private static (string File, string Entry, string Property, string Value) SimpleIntProperty(MEGame game, params string[] files)
+    internal static (string File, string Entry, string Property, string Value) SimpleIntProperty(MEGame game, params string[] files)
     {
         foreach (var file in files)
         {

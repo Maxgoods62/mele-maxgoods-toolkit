@@ -43,7 +43,7 @@ public static class ModTools
     [McpServerTool(Name = "mod_install", Destructive = true),
      Description("Installs a mod into the game with ME3Tweaks Mod Manager (M3 --installmod, as LEX does): M3 copies the DLC folders, merges "
                  + "ConfigDelta files into Coalesced and runs AutoTOC. Refuses while the game runs, or while another mele-mcp call closes, "
-                 + "cycles or installs that game or installs or boots through M3 (it waits 5 s first). M3 is a GUI app (its window comes up); this "
+                 + "cycles or installs that game or installs, boots or compiles a merge mod through M3 (it waits 5 s first). M3 is a GUI app (its window comes up); this "
                  + "waits for the end of the install in M3's log, then compares every [CUSTOMDLC] file with its installed copy. A merge mod patches a core "
                  + "file in place: Differences names it when M3 logged no save, and the log holds M3's merge lines. A failed install stops the wait "
                  + "at once, with M3's dialog left open for a click.")]
