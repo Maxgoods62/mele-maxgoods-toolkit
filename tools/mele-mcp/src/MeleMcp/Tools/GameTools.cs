@@ -89,8 +89,10 @@ public static class GameTools
                  + "(LE1, stops on errors) and mod_install, then boots the game once the install is verified (or only boots, with no mod), "
                  + "waits for the main menu in the DebugLogger log, loads a save, runs console commands (e.g. 'at BIOA_MYM01 start_mym01'), "
                  + "waits for the map and takes a screenshot to Read. Commands after a map load wait for MeleBridge's status to show the load "
-                 + "ended (LE1 without MeleBridge: settleSeconds only). Takes 1 to 3 minutes. Refuses after 5 s while another mele-mcp call "
-                 + "closes, cycles or installs this game. LE1 loads a developer save slot (BioLoadGame <n> loads "
+                 + "ended (LE1 without MeleBridge: settleSeconds only). Takes 1 to 3 minutes. "
+                 + "Cancelling the call stops it at its next wait and frees the game for another call: what it already did (game closed, "
+                 + "mod installed, boot asked) stays done, and an install M3 has started is waited out first. Refuses after 5 s while another "
+                 + "mele-mcp call closes, cycles or installs this game. LE1 loads a developer save slot (BioLoadGame <n> loads "
                  + "Game\\ME1\\BioGame\\Save\\BioSaveGame<n>.sav, which the console's BioSaveGame <n> writes where Shepard stands; career "
                  + "saves can't be loaded this way (load one with commands: [\"nextframedefer loadgame <Career>_QuickSave DevId=-1\"] and "
                  + "waitForMap)), and needs the LEX Interop ASI. LE2 and LE3 need MeleBridge and the DebugLogger ASI, and load only the latest "
@@ -107,19 +109,22 @@ public static class GameTools
         [Description("Take a screenshot at the end.")] bool screenshot = true,
         [Description("Seconds to wait after the menu and after the map, for the loading screen to clear.")] double settleSeconds = 8,
         [Description("Kill the game if it does not close within 30 s of exit.")] bool force = false,
-        [Description("Seconds to wait for the menu, and again for the map.")] int timeoutSeconds = 240)
+        [Description("Seconds to wait for the menu, and again for the map.")] int timeoutSeconds = 240,
+        CancellationToken cancellationToken = default)
         => ToolErrors.Run(() => Core.GameCycle.Run(PackageTools.ParseGame(game), new Core.GameCycle.Options(
             mod, check, languages.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), loadSlot, loadLatest,
-            commands ?? [], waitForMap, settleSeconds, screenshot, force, timeoutSeconds)));
+            commands ?? [], waitForMap, settleSeconds, screenshot, force, timeoutSeconds), cancellationToken));
 
     [McpServerTool(Name = "game_close", Destructive = true),
      Description("Closes the running game WITHOUT SAVING: console exit (LEX Interop on LE1, MeleBridge on LE2 and LE3), waits for the process "
                  + "to end, and with force kills it after 30 s. Does nothing when the game is closed. game_cycle starts it again. Refuses "
-                 + "after 5 s while another mele-mcp call closes, cycles or installs this game.")]
+                 + "after 5 s while another mele-mcp call closes, cycles or installs this game. "
+                 + "Cancelling the call stops the wait; a game already told to exit still closes, and none is killed after that.")]
     public static GameCloseResult GameClose(
         [Description(GameParam)] string game,
-        [Description("Kill the game if it does not close within 30 s of exit.")] bool force = false)
-        => ToolErrors.Run(() => Core.GameCycle.Close(PackageTools.ParseGame(game), force));
+        [Description("Kill the game if it does not close within 30 s of exit.")] bool force = false,
+        CancellationToken cancellationToken = default)
+        => ToolErrors.Run(() => Core.GameCycle.Close(PackageTools.ParseGame(game), force, cancellationToken));
 
     [McpServerTool(Name = "game_remote_event"),
      Description("Fires every enabled Kismet SeqEvent_RemoteEvent with this name in the running game. "

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -161,5 +162,27 @@ public class GameCycleStateTests
         unknown["loadingMovie"] = null;
         unknown["streaming"] = null;
         Assert.IsNull(GameCycle.LoadProblem(unknown, "BIOA_NOR10"), "sections the bridge could not read");
+    }
+
+    /// <summary>
+    /// A cancelled game_cycle or game_close: its waits used to sleep on, so the call went on driving the game for minutes with
+    /// the game's lock held. A wait ends by throwing as soon as the call is cancelled.
+    /// </summary>
+    [TestMethod]
+    public void WaitUntil_ACancelledCall_EndsTheWaitAtOnce()
+    {
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var clock = Stopwatch.StartNew();
+        Assert.Throws<OperationCanceledException>(() => GameCycle.WaitUntil(() => false, 4, cancel.Token));
+        Assert.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(2), $"waited {clock.Elapsed.TotalSeconds:0.0} s");
+    }
+
+    /// <summary>Without a cancellation the wait is what it was: false when the time runs out, true once the condition holds.</summary>
+    [TestMethod]
+    public void WaitUntil_NotCancelled_TimesOutOrSucceeds()
+    {
+        Assert.IsFalse(GameCycle.WaitUntil(() => false, 0.6, CancellationToken.None));
+        var polls = 0;
+        Assert.IsTrue(GameCycle.WaitUntil(() => ++polls >= 2, 5, CancellationToken.None));
     }
 }

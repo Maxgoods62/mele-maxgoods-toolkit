@@ -195,6 +195,7 @@ public static class LiveTools
         [Description("Keep calls on objects whose path contains this.")] string? objectContains = null,
         [Description("Seconds to record.")] double seconds = 10,
         [Description("Stop after this many events.")] int maxEvents = 200,
-        [Description("Include each call's parameters.")] bool withParams = true)
-        => ToolErrors.Run(() => LiveBridge.Watch(PackageTools.ParseGame(game), functions, objectContains, withParams, seconds, maxEvents));
+        [Description("Include each call's parameters.")] bool withParams = true,
+        CancellationToken cancellationToken = default)
+        => ToolErrors.Run(() => LiveBridge.Watch(PackageTools.ParseGame(game), functions, objectContains, withParams, seconds, maxEvents, cancellationToken));
 }

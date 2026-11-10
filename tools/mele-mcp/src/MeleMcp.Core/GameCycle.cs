@@ -72,18 +72,18 @@ public static partial class GameCycle
     private enum Waited { Done, TimedOut, GameClosed }
 
     /// <summary>The console's exit, without saving.</summary>
-    public static GameCloseResult Close(MEGame game, bool force)
+    public static GameCloseResult Close(MEGame game, bool force, CancellationToken cancellationToken)
     {
         using var held = GameLock.ForGame(game);
         var clock = Stopwatch.StartNew();
         var steps = new List<string>();
         void Step(string text) => steps.Add($"{clock.Elapsed.TotalSeconds,5:0.0}s {text}");
-        if (Quit(game, force, Step) is not { } why) return new GameCloseResult(true, steps);
+        if (Quit(game, force, Step, cancellationToken) is not { } why) return new GameCloseResult(true, steps);
         Step(why);
         return new GameCloseResult(false, steps);
     }
 
-    public static GameCycleResult Run(MEGame game, Options o)
+    public static GameCycleResult Run(MEGame game, Options o, CancellationToken cancellationToken)
     {
         if (o.LoadSlot is not null && game != MEGame.LE1) throw new ArgumentException($"loadSlot is BioLoadGame, which {game} lacks: use loadLatest.");
         if (o.LoadLatest && game == MEGame.LE1) throw new ArgumentException("loadLatest is for LE2 and LE3: LE1 uses loadSlot, or a loadgame command.");
@@ -96,6 +96,13 @@ public static partial class GameCycle
         ModCheckResult? check = null;
         ModInstallResult? install = null;
         var phase = Phase.Quit;
+        // The one place the phase changes. A cancelled call stops here, before the next thing is done to the game, as it does
+        // inside every wait.
+        void Go(Phase next)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            phase = next;
+        }
         GameCycleResult Stop(string why)
         {
             Step(why);
@@ -106,7 +113,7 @@ public static partial class GameCycle
         // Null once the command is out; else the cycle's end.
         GameCycleResult? Send(string command)
         {
-            if (TrySend(game, command, Math.Min(o.TimeoutSeconds, LoadWaitSeconds), Step) is not { } why)
+            if (TrySend(game, command, Math.Min(o.TimeoutSeconds, LoadWaitSeconds), Step, cancellationToken) is not { } why)
             {
                 Step($"sent {command}");
                 return null;
@@ -115,12 +122,13 @@ public static partial class GameCycle
         }
         // The end of the load of a map, then the settle; null when the cycle goes on.
         GameCycleResult? Loaded(string loading) =>
-            WaitLoaded(game, loading, Math.Min(o.TimeoutSeconds, LoadWaitSeconds), Step) == Waited.GameClosed || !Settle(game, o.SettleSeconds) ? Closed() : null;
+            WaitLoaded(game, loading, Math.Min(o.TimeoutSeconds, LoadWaitSeconds), Step, cancellationToken) == Waited.GameClosed
+            || !Settle(game, o.SettleSeconds, cancellationToken) ? Closed() : null;
 
         try
         {
             // 1. Quit.
-            if (Quit(game, o.Force, Step) is { } stillUp) return Stop(stillUp);
+            if (Quit(game, o.Force, Step, cancellationToken) is { } stillUp) return Stop(stillUp);
 
             // 2. Check and install, then boot, or only boot. The boot waits for the install's check: M3's own --bootgame would
             // start the game after an install that turns out not verified.
@@ -128,24 +136,24 @@ public static partial class GameCycle
             {
                 if (o.Check && game.IsGame1())
                 {
-                    phase = Phase.Check;
+                    Go(Phase.Check);
                     check = ModChecker.Check(game, mod, [], o.Languages, 50);
                     Step($"mod_check: {check.Errors} errors, {check.Warnings} warnings");
                     if (check.Errors > 0) return Stop("stopped before installing: mod_check found errors");
                 }
-                phase = Phase.Install;
+                Go(Phase.Install);
                 install = ModInstaller.Install(game, mod, bootGame: false, timeoutSeconds: 180);
                 Step($"installed in {install.Seconds} s, {install.FilesChecked} files checked, {install.Differences.Count} differ");
                 if (!install.Completed || install.Differences.Count > 0) return Stop("install not verified, so the game was not booted");
             }
-            phase = Phase.Boot;
+            Go(Phase.Boot);
             var bootAsked = DateTime.Now;
             ModInstaller.Boot(game);
             Step("asked M3 to boot the game");
 
             // 3. The menu: a game started after the boot request, whose log reached EntryMenu. A game that dies before it (seen
             // once while the ASI loader hooked ProcessEvent: a call through address 0) is booted again, once.
-            phase = Phase.Menu;
+            Go(Phase.Menu);
             string? log = null;
             string? crashedFirst = null;
             for (var attempt = 1; ; attempt++)
@@ -159,7 +167,7 @@ public static partial class GameCycle
                     // A game that dies between two polls is never seen running, but its DebugLogger log says it started.
                     crashed = !running && (seen || SessionStarted(game, bootAsked, crashedFirst, out _));
                     return crashed || running && SessionStarted(game, bootAsked, crashedFirst, out log) && Lines(log!).Any(IsEntryMenu);
-                }, o.TimeoutSeconds) && !crashed;
+                }, o.TimeoutSeconds, cancellationToken) && !crashed;
                 if (menu) break;
                 if (!crashed) return Stop(seen ? $"no main menu within {o.TimeoutSeconds} s" : $"the game did not start within {o.TimeoutSeconds} s of the boot request");
                 if (attempt > 1) return Stop("the game closed before the main menu twice (see the Windows Application log)");
@@ -169,13 +177,13 @@ public static partial class GameCycle
                 ModInstaller.Boot(game);
             }
             Step("main menu loaded");
-            phase = Phase.AtMenu;
-            switch (WaitAlive(game, () => ConsoleOpen(game), 30))
+            Go(Phase.AtMenu);
+            switch (WaitAlive(game, () => ConsoleOpen(game), 30, cancellationToken))
             {
                 case Waited.GameClosed: return Closed();
                 case Waited.TimedOut: return Stop(game == MEGame.LE1 ? "the LEX Interop pipe did not open" : "the MeleBridge pipe did not open");
             }
-            if (!Settle(game, o.SettleSeconds)) return Closed();
+            if (!Settle(game, o.SettleSeconds, cancellationToken)) return Closed();
 
             // 4. Save, then commands; each map load is read from the log.
             var map = "EntryMenu";
@@ -183,11 +191,11 @@ public static partial class GameCycle
             var load = o.LoadSlot is { } slot ? $"BioLoadGame {slot}" : o.LoadLatest ? "QuickLoad" : null;
             if (load is not null)
             {
-                phase = Phase.Load;
+                Go(Phase.Load);
                 if (Send(load) is { } unsent) return unsent;
                 // With commands to run, the save's own map comes first, whatever it is; the wanted one is awaited after them.
                 var wanted = o.Commands.Count > 0 ? null : o.WaitForMap;
-                switch (WaitForMap(game, log!, offset, wanted, o.TimeoutSeconds, Step, out map))
+                switch (WaitForMap(game, log!, offset, wanted, o.TimeoutSeconds, Step, cancellationToken, out map))
                 {
                     case Waited.GameClosed: return Closed();
                     case Waited.TimedOut: return Stop(LoadFailure(log!, offset) ?? $"no map loaded after {load}");
@@ -196,12 +204,12 @@ public static partial class GameCycle
                 // The load line comes before the loading screen, and console input sent during the load is lost (LE1) or refused.
                 if (o.Commands.Count > 0 && Loaded(map) is { } stop) return stop;
             }
-            phase = Phase.Commands;
+            Go(Phase.Commands);
             for (var i = 0; i < o.Commands.Count; i++)
             {
                 var at = DebugLog.Length(log!);
                 if (Send(o.Commands[i]) is { } unsent) return unsent;
-                if (!Settle(game, 1)) return Closed();
+                if (!Settle(game, 1, cancellationToken)) return Closed();
                 // A command that loads a map ('at BIOA_MYM01 ...', 'loadgame ...') holds the game: the next one waits for that load.
                 if (i < o.Commands.Count - 1 && MapLoads(game, DebugLog.LinesAfter(log!, at)).FirstOrDefault() is { } loading)
                 {
@@ -211,8 +219,8 @@ public static partial class GameCycle
             }
             if (o.Commands.Count > 0 && o.WaitForMap is { Length: > 0 } && !map.Equals(o.WaitForMap, StringComparison.OrdinalIgnoreCase))
             {
-                phase = Phase.Map;
-                switch (WaitForMap(game, log!, offset, o.WaitForMap, o.TimeoutSeconds, Step, out map))
+                Go(Phase.Map);
+                switch (WaitForMap(game, log!, offset, o.WaitForMap, o.TimeoutSeconds, Step, cancellationToken, out map))
                 {
                     case Waited.GameClosed: return Closed();
                     case Waited.TimedOut: return Stop(LoadFailure(log!, offset) ?? $"{o.WaitForMap} did not load");
@@ -223,8 +231,8 @@ public static partial class GameCycle
             Screenshot? shot = null;
             if (o.Screenshot)
             {
-                phase = Phase.Screenshot;
-                if (!Settle(game, o.SettleSeconds)) return Closed();
+                Go(Phase.Screenshot);
+                if (!Settle(game, o.SettleSeconds, cancellationToken)) return Closed();
                 try
                 {
                     shot = GameScreenshot.Take(game, null, 1280);
@@ -238,6 +246,13 @@ public static partial class GameCycle
             }
             return new GameCycleResult(true, map, steps, check, install, shot);
         }
+        catch (OperationCanceledException)
+        {
+            // The client has stopped waiting and shows no reply, so the server's log keeps what was already done to the game.
+            System.Console.Error.WriteLine($"[mele-mcp] game_cycle on {game} cancelled during {Words(phase)}. Done so far: "
+                                           + (steps.Count == 0 ? "nothing" : string.Join("; ", steps.Select(s => s.Trim()))));
+            throw;
+        }
         catch (Exception e) when (e is not OperationCanceledException)
         {
             // Whatever failed, the steps say what was already done to the game: closed, installed, booted.
@@ -249,7 +264,7 @@ public static partial class GameCycle
     /// The console's exit lets the engine shut down; killing it only when asked. Returns why the game is still up, or null when it
     /// is gone.
     /// </summary>
-    private static string? Quit(MEGame game, bool force, Action<string> step)
+    private static string? Quit(MEGame game, bool force, Action<string> step, CancellationToken cancellationToken)
     {
         if (!GameBridge.IsGameRunning(game)) return null;
         try
@@ -262,14 +277,15 @@ public static partial class GameCycle
             // MeleBridge can go down before it answers, or refuse while the game loads; a game that stayed up is caught below.
             step($"exit: {e.Message}");
         }
-        if (WaitUntil(() => !GameBridge.IsGameRunning(game), 30))
+        if (WaitUntil(() => !GameBridge.IsGameRunning(game), 30, cancellationToken))
         {
             step("game closed");
             return null;
         }
         if (!force) return "the game did not close within 30 s (pass force to kill it)";
+        cancellationToken.ThrowIfCancellationRequested();
         foreach (var p in Process.GetProcessesByName(GameBridge.ProcessName(game))) using (p) p.Kill();
-        if (!WaitUntil(() => !GameBridge.IsGameRunning(game), 15)) return "the game survived Kill";
+        if (!WaitUntil(() => !GameBridge.IsGameRunning(game), 15, cancellationToken)) return "the game survived Kill";
         step("killed the game");
         return null;
     }
@@ -287,7 +303,8 @@ public static partial class GameCycle
     /// Waits for a save load and the map it brings (or <paramref name="wanted"/>), after <paramref name="offset"/> in the log.
     /// TimedOut also when the game logged that the load failed (<see cref="LoadFailure"/> reads which).
     /// </summary>
-    private static Waited WaitForMap(MEGame game, string log, long offset, string? wanted, int timeoutSeconds, Action<string> step, out string map)
+    private static Waited WaitForMap(MEGame game, string log, long offset, string? wanted, int timeoutSeconds, Action<string> step,
+                                     CancellationToken cancellationToken, out string map)
     {
         string? found = null;
         var failed = false;
@@ -301,7 +318,7 @@ public static partial class GameCycle
             // A failed load logs an error and leaves the menu as it was: no map will come.
             failed = found is null && lines.Any(l => LoadFailed().IsMatch(l));
             return found is not null || failed;
-        }, timeoutSeconds);
+        }, timeoutSeconds, cancellationToken);
         map = found ?? "";
         if (waited == Waited.Done && failed) return Waited.TimedOut;
         if (waited == Waited.Done) step($"map {found} loaded");
@@ -329,7 +346,7 @@ public static partial class GameCycle
     /// thread did not take within 5 s (a load holds it), and such a request never ran, so it goes again, once, when the thread answers
     /// a ping. LE1's LEX Interop takes a command with no reply, so nothing shows there: <see cref="WaitLoaded"/> runs before.
     /// </summary>
-    private static string? TrySend(MEGame game, string command, double seconds, Action<string> step)
+    private static string? TrySend(MEGame game, string command, double seconds, Action<string> step, CancellationToken cancellationToken)
     {
         try
         {
@@ -339,7 +356,7 @@ public static partial class GameCycle
         catch (Exception e) when (game != MEGame.LE1 && e.Message.Contains(NotTaken, StringComparison.Ordinal))
         {
             step($"{command}: {e.Message.TrimEnd('.')}; sending it again once the game thread answers");
-            if (WaitAlive(game, () => GameThreadAnswers(game), seconds) != Waited.Done) return Failed(game, command, e);
+            if (WaitAlive(game, () => GameThreadAnswers(game), seconds, cancellationToken) != Waited.Done) return Failed(game, command, e);
         }
         catch (Exception e)
         {
@@ -388,7 +405,7 @@ public static partial class GameCycle
     /// on LE1) nothing tells, and only the settle is left. A load that has not ended after <paramref name="seconds"/> is noted and
     /// the cycle goes on. GameClosed is the only result that stops it.
     /// </summary>
-    private static Waited WaitLoaded(MEGame game, string map, double seconds, Action<string> step)
+    private static Waited WaitLoaded(MEGame game, string map, double seconds, Action<string> step, CancellationToken cancellationToken)
     {
         if (!LiveBridge.IsAvailable(game))
         {
@@ -414,7 +431,7 @@ public static partial class GameCycle
             }
             streak = why is null ? streak + 1 : 0;
             return streak >= 2;
-        }, seconds);
+        }, seconds, cancellationToken);
         if (waited == Waited.GameClosed) return waited;
         step(unreadable is not null ? $"MeleBridge status failed ({unreadable}): only settleSeconds is waited"
              : waited == Waited.Done ? $"{map} load ended (MeleBridge status)"
@@ -488,32 +505,41 @@ public static partial class GameCycle
 
     private static List<string> Lines(string log) => DebugLog.LinesAfter(log, 0);
 
-    private static bool WaitUntil(Func<bool> condition, double seconds)
+    /// <summary>One poll's sleep. A cancelled call cuts it short, and it throws for it.</summary>
+    private static void Pause(CancellationToken cancellationToken)
+    {
+        if (cancellationToken.WaitHandle.WaitOne(Poll)) cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    internal static bool WaitUntil(Func<bool> condition, double seconds, CancellationToken cancellationToken)
     {
         var clock = Stopwatch.StartNew();
         while (clock.Elapsed.TotalSeconds < seconds)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (condition()) return true;
-            Thread.Sleep(Poll);
+            Pause(cancellationToken);
         }
         return condition();
     }
 
     /// <summary>Like <see cref="WaitUntil"/>, but a game that closes ends the wait at once.</summary>
-    private static Waited WaitAlive(MEGame game, Func<bool> condition, double seconds)
+    private static Waited WaitAlive(MEGame game, Func<bool> condition, double seconds, CancellationToken cancellationToken)
     {
         var clock = Stopwatch.StartNew();
         while (true)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (condition()) return Waited.Done;
             if (!GameBridge.IsGameRunning(game)) return Waited.GameClosed;
             if (clock.Elapsed.TotalSeconds >= seconds) return Waited.TimedOut;
-            Thread.Sleep(Poll);
+            Pause(cancellationToken);
         }
     }
 
     /// <summary>Waits <paramref name="seconds"/>; false as soon as the game has closed.</summary>
-    private static bool Settle(MEGame game, double seconds) => WaitAlive(game, () => false, seconds) != Waited.GameClosed;
+    private static bool Settle(MEGame game, double seconds, CancellationToken cancellationToken) =>
+        WaitAlive(game, () => false, seconds, cancellationToken) != Waited.GameClosed;
 }
 
 /// <summary>

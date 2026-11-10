@@ -149,14 +149,14 @@ public static partial class LiveBridge
     /// earlier request and is skipped. A line without one is taken: every MeleBridge echoes the id of a request that parsed as an
     /// object, so only the error reply to a line it could not parse comes without.
     /// </summary>
-    internal static string? ReadReply(StreamReader reader, long id, TimeSpan timeout)
+    internal static string? ReadReply(StreamReader reader, long id, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         var clock = Stopwatch.StartNew();
         while (true)
         {
             var left = timeout - clock.Elapsed;
             if (left <= TimeSpan.Zero) return null;
-            var line = ReadLine(reader, left);
+            var line = ReadLine(reader, left, cancellationToken);
             if (line is null || ReplyId(line) is not { } other || other == id) return line;
         }
     }
@@ -218,7 +218,8 @@ public static partial class LiveBridge
     private static partial Regex LogPrefix();
 
     /// <summary>Subscribes to ProcessEvent calls of these functions and collects them for a while.</summary>
-    public static LiveEvents Watch(MEGame game, IReadOnlyList<string> functions, string? objectContains, bool withParams, double seconds, int maxEvents)
+    public static LiveEvents Watch(MEGame game, IReadOnlyList<string> functions, string? objectContains, bool withParams, double seconds, int maxEvents,
+                                   CancellationToken cancellationToken)
     {
         if (functions.Count == 0) throw new ArgumentException("Give at least one function, e.g. Engine.SequenceOp.Activated.");
         using var pipe = Connect(game);
@@ -236,7 +237,7 @@ public static partial class LiveBridge
         writer.WriteLine(request.ToJsonString());
         // No timeoutMs: the bridge's default, 5 s.
         var wait = ReplyWait(5);
-        var ack = Check(ReadReply(reader, id, wait) ?? throw new IOException($"MeleBridge did not answer the subscription within {wait.TotalSeconds:0.#} s."), request);
+        var ack = Check(ReadReply(reader, id, wait, cancellationToken) ?? throw new IOException($"MeleBridge did not answer the subscription within {wait.TotalSeconds:0.#} s."), request);
         var watched = ack["functions"]!.AsArray().Select(f => f!.GetValue<string>()).ToList();
 
         var events = new List<JsonNode>();
@@ -246,7 +247,7 @@ public static partial class LiveBridge
         {
             var left = TimeSpan.FromSeconds(seconds) - clock.Elapsed;
             if (left <= TimeSpan.Zero) break;
-            var line = ReadLine(reader, left);
+            var line = ReadLine(reader, left, cancellationToken);
             if (line is null) break;
             var node = JsonNode.Parse(line)!.AsObject();
             if (node.ContainsKey("heartbeat")) continue;
@@ -288,15 +289,16 @@ public static partial class LiveBridge
         return reply;
     }
 
-    /// <summary>Null when nothing came within the time (or the bridge closed the connection).</summary>
-    private static string? ReadLine(StreamReader reader, TimeSpan timeout)
+    /// <summary>Null when nothing came within the time (or the bridge closed the connection). A cancelled call throws instead.</summary>
+    internal static string? ReadLine(StreamReader reader, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        using var cts = new CancellationTokenSource(timeout);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
         try
         {
             return reader.ReadLineAsync(cts.Token).AsTask().GetAwaiter().GetResult();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return null;
         }
