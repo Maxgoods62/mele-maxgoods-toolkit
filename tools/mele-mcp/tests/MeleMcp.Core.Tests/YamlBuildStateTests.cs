@@ -101,6 +101,31 @@ public class YamlBuildStateTests
     }
 
     /// <summary>
+    /// A 'package' that climbs out of its DLC folder with '..' landed outside out=: the path from the DLC folder on was joined to
+    /// out= before '..' was resolved. An out= build changes nothing outside out=.
+    /// </summary>
+    [TestMethod]
+    public void Out_APackageThatClimbsOutOfItsDlcFolder_IsRefused()
+    {
+        LecHost.EnsureInitialized();
+        var root = TestSetup.NewFolder("out-escape");
+        // The DLC folder beside the YAML makes the YAML's folder the mod root, so M3's library is never asked.
+        Directory.CreateDirectory(Path.Combine(root, "DLC_MOD_T", "CookedPCConsole"));
+        var outRoot = Path.Combine(root, "out");
+        Directory.CreateDirectory(outRoot);
+        var notes = new List<string>();
+
+        foreach (var package in new[] { @"DLC_MOD_T\..\..\escaped.pcc", @"DLC_MOD_T\..\escaped.pcc", "DLC_MOD_T/CookedPCConsole/../../../escaped.pcc" })
+        {
+            Assert.ThrowsExactly<ArgumentException>(() => { YamlFiles.Target(MEGame.LE1, package, root, outRoot, notes); }, package);
+        }
+
+        var (path, missing) = YamlFiles.Target(MEGame.LE1, @"DLC_MOD_T\CookedPCConsole\A.pcc", root, outRoot, notes);
+        Assert.AreEqual(Path.Combine(outRoot, @"DLC_MOD_T\CookedPCConsole\A.pcc"), path);
+        Assert.IsTrue(missing);
+    }
+
+    /// <summary>
     /// M23a: plot_build saves the package, then each GlobalTlk, then the AutoLoad.ini. A failure on a GlobalTlk threw the bare
     /// error: the package stayed saved and its backup path was lost with the exception.
     /// </summary>

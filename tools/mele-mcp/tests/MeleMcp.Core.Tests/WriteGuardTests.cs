@@ -164,6 +164,34 @@ public class WriteGuardTests
         PackageWriter.EnsureWritable(MEGame.LE1, Path.Combine(outside, @"mod\x.pcc")); // and %TEMP% passes
     }
 
+    /// <summary>
+    /// The writers that save no package take the same guard: game_screenshot's PNG, and the level YAML that editor_import,
+    /// npc_place and live_save rewrite. Each is asked about a folder of the real install that does not exist, so even a guard
+    /// that let them through could write nothing there.
+    /// </summary>
+    [TestMethod]
+    public void ScreenshotAndLevelYaml_InsideTheRealInstall_AreRefused()
+    {
+        var le = TestSetup.RequireGame();
+        var inside = Path.Combine(le, @"Game\ME1\mele-tests-no-such-folder");
+        Assert.IsFalse(Directory.Exists(inside));
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => GameScreenshot.OutputPath(MEGame.LE1, Path.Combine(inside, "shot.png")));
+        Assert.ThrowsExactly<InvalidOperationException>(() => EditorImport.WriteYaml(Path.Combine(inside, "level.yaml"), "package: X.pcc\n"));
+        Assert.IsFalse(Directory.Exists(inside), "a refusal created the folder");
+    }
+
+    /// <summary>A screenshot path of the caller's is a full path ending in .png: a relative one landed in the server's folder, and any other name could replace a package or a YAML.</summary>
+    [TestMethod]
+    public void Screenshot_Path_IsAFullPngPath()
+    {
+        Assert.ThrowsExactly<ArgumentException>(() => GameScreenshot.OutputPath(MEGame.LE1, "shot.png"));
+        Assert.ThrowsExactly<ArgumentException>(() => GameScreenshot.OutputPath(MEGame.LE1, Path.Combine(outside, @"mod\x.pcc")));
+        var given = Path.Combine(outside, @"mod\shot.PNG");
+        Assert.AreEqual(given, GameScreenshot.OutputPath(MEGame.LE1, given));
+        Assert.IsTrue(GameScreenshot.OutputPath(MEGame.LE1, null).EndsWith(".png", StringComparison.Ordinal));
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool GetVolumeNameForVolumeMountPointW(string mountPoint, StringBuilder volumeName, uint length);
 

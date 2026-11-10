@@ -75,12 +75,12 @@ public static class GameTools
         [Description("Maximum entries returned: the last ones that match.")] int limit = 100)
         => ToolErrors.Run(() => KismetLog.Read(PackageTools.ParseGame(game), contains, lastSeconds, grouped, limit));
 
-    [McpServerTool(Name = "game_screenshot", ReadOnly = true),
+    [McpServerTool(Name = "game_screenshot", Destructive = false),
      Description("Saves a PNG of the game window (windowed or borderless; works behind other windows) and returns its Windows and WSL "
                  + "paths: open the WSL path with Read to see it. Check a change yourself (lit? placed? visible?) instead of asking the user.")]
     public static Screenshot GameScreenshot(
         [Description(GameParam)] string game,
-        [Description("Where to save the PNG (Windows or /mnt/<drive> path). Default: %LOCALAPPDATA%\\mele-mcp\\screenshots\\<game>_<time>.png.")] string? path = null,
+        [Description("Where to save the PNG: a full path ending in .png (Windows or /mnt/<drive>), outside the game install; a PNG already there is replaced. Default: %LOCALAPPDATA%\\mele-mcp\\screenshots\\<game>_<time>.png.")] string? path = null,
         [Description("Scale down to this width in pixels (0: full size).")] int maxWidth = 1280)
         => ToolErrors.Run(() => Core.GameScreenshot.Take(PackageTools.ParseGame(game), path is null ? null : GamePaths.ToWindowsPath(path), maxWidth));
 

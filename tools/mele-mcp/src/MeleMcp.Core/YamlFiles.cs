@@ -55,7 +55,11 @@ internal static partial class YamlFiles
         var source = Path.IsPathRooted(given) ? Path.GetFullPath(given)
             : ModRoot(game, given, yamlDir) is { } from ? Path.GetFullPath(Path.Combine(from, given)) : null;
         var target = Path.GetFullPath(Path.Combine(into, part));
-        var to = DlcFolder(target)!;
+        // 'part' is the YAML's text from its DLC folder on: a '..' in it takes the join out of that folder, or out of out= itself.
+        // An out= build changes nothing outside out= (InOut says the same of the other files).
+        var to = DlcFolder(target);
+        if (to is null || !to.StartsWith(into.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException($"package '{package}': with out=, the path from its DLC folder on must stay in that folder ('..' takes it out of out=, {into}).");
         if (source is not null && DlcFolder(source) is { } copied && Directory.Exists(copied))
         {
             if (!Directory.Exists(to))
