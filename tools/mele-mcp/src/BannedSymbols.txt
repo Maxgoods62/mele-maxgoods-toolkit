@@ -12,6 +12,9 @@ M:System.IO.File.WriteAllLines(System.String,System.Collections.Generic.IEnumera
 M:System.IO.File.WriteAllTextAsync(System.String,System.String,System.Threading.CancellationToken);Use AtomicFile.WriteAllText: written beside the file, then moved over it
 M:System.IO.File.WriteAllTextAsync(System.String,System.String,System.Text.Encoding,System.Threading.CancellationToken);Use AtomicFile.WriteAllText: written beside the file, then moved over it
 M:System.IO.File.WriteAllBytesAsync(System.String,System.Byte[],System.Threading.CancellationToken);Use AtomicFile.WriteAllBytes: written beside the file, then moved over it
+M:System.IO.File.WriteAllText(System.String,System.ReadOnlySpan{System.Char});Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllText(System.String,System.ReadOnlySpan{System.Char},System.Text.Encoding);Use AtomicFile.WriteAllText: written beside the file, then moved over it
+M:System.IO.File.WriteAllBytes(System.String,System.ReadOnlySpan{System.Byte});Use AtomicFile.WriteAllBytes: written beside the file, then moved over it
 M:LegendaryExplorerCore.Unreal.CNDFile.ToFile(System.String);Use ConditionalFiles.Save: ToFile truncates the file before it writes, Save goes through AtomicFile
 
 # Package saves: PackageWriter refuses a path in the game install and backs the old file up first.
