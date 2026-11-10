@@ -65,6 +65,14 @@ public class LectoolTests
     public void BuildSound_UnknownFlag_ExitsOne() =>
         AssertError("unknown option --unqiue-wave", "buildsound", "donor.pcc", "cue", "x.ogg", "1", "1", "1", Path.Combine(work, "out.pcc"), "new", "title", "1.0", "--unqiue-wave");
 
+    /// <summary>
+    /// float.Parse read a volume of "0,5" as 5. The volume is now checked before any file is opened, so this needs no donor
+    /// package.
+    /// </summary>
+    [TestMethod]
+    public void BuildSound_VolumeWithAComma_ExitsOne() =>
+        AssertError("volume '0,5' is not a number", "buildsound", "donor.pcc", "cue", "x.ogg", "1", "1", "1", Path.Combine(work, "out.pcc"), "new", "title", "0,5");
+
     [TestMethod]
     public void CubeShrink_BadFormat_ExitsOne() =>
         AssertError("usage: cubeshrink", "cubeshrink", Path.Combine(work, "x.pcc"), "Pkg.Cube", "256", "BC4");
