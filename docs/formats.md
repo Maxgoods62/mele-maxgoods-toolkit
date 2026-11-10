@@ -25,7 +25,7 @@ The examples use the map `BIOA_MYM01` and the NPC `guard`; use your own names.
 | `.pcsav` career saves | LE2 30, LE3 59 | the game, `save_set`, `save_head_default` | mele-mcp | "Save format N: LE2 saves are format 30." |
 
 The protocol number is `MELE_PROTOCOL_VERSION` in `tools/mele-bridge/src/SharedVersion.h` and `Versions.BridgeProtocol`
-in mele-mcp. The same header holds `ASI_VERSION` 5, which `ping` and `status` report as `"bridge": "5"`. It is for
+in mele-mcp. The same header holds `ASI_VERSION` 6, which `ping` and `status` report as `"bridge": "6"`. It is for
 people and logs; programs check `"protocol"`. mele-mcp's own version, 0.1.0, is the `<Version>` in
 `tools/mele-mcp/src/MeleMcp/MeleMcp.csproj`, and a YAML's `requires: mele-mcp >= X.Y.Z` is checked against it.
 
@@ -110,7 +110,7 @@ game is closed, and "Pipe MeleBridge_LE`<n>` not found" when the ASI is missing 
 `ping` returns:
 
 ```json
-{"ok": true, "bridge": "5", "protocol": 1, "map": "BIOA_NOR00", "objects": 512345}
+{"ok": true, "bridge": "6", "protocol": 1, "map": "BIOA_NOR00", "objects": 512345}
 ```
 
 - mele-mcp pings before its first request to a game process, known by process id and start time. It caches the answer
@@ -212,16 +212,18 @@ pause, so the world and Kismet run with the game window in the background.
 
 - Object paths are full paths as `find` returns them, `Package.Group.Name`, compared without case. The `Class Path` form
   some tools print is taken too. Not found: `"no object at X (paths as find returns them)"`.
-- Property paths read `A.B[2].C`. A dot enters a struct, and `[i]` indexes a static or dynamic array.
+- Property paths read `A.B[2].C`. A dot enters a struct, and `[i]` indexes a static or dynamic array. The index is a
+  whole number from 0, and anything else between the brackets is refused (MeleBridge 5 and older read `[-1]` as the
+  whole array and `[1x]` as `[1]`).
 
 | Property type | In a reply | Accepted by `set` and `call` |
 |---|---|---|
 | bool | `true` / `false` | a bool, a number (0 is false), `"true"`, `"false"`, `"1"`, `"0"` in any case |
 | byte | the enum value's name when the property has an enum, else a number | an enum value's name (any case) or 0 to 255 |
 | int, stringref | a number | a number, a bool or a numeric string; it must be whole |
-| float | a number | a number, a bool or a numeric string |
+| float | a number | a number, a bool or a numeric string; it must be finite and fit a float |
 | name, string | a string | a string |
-| object | its path, or `null` | a path; `null`, `""` or `"None"` for none. The class is checked. |
+| object | its path, or `null` | a path; `null`, `""` or `"None"` for none. The class is checked, and a `class<X>` property takes X or a subclass of it (MeleBridge 5 and older took any class). |
 | interface | its object's path, or `null` | refused |
 | delegate | `Object.Function`, or `null` | refused |
 | struct | an object of its members | an object of the members to change; the others keep their values |
@@ -233,13 +235,14 @@ pause, so the world and Kismet run with the game window in the background.
 ### 3.6 Events
 
 After a `subscribe` succeeds, the bridge reads no more requests on that connection. It writes one line per watched call
-until the client closes the connection.
+until the client closes the connection, or the bridge ends the watch (the last row below).
 
 | Line | Meaning |
 |---|---|
 | `{"t": 12.345, "function": "...", "object": "...", "class": "...", "params": {...}, "pin": "In"}` | A watched function was called. `t` is seconds since the bridge started, to the millisecond. `params` holds the parameters by name at depth 1, when `params` is true. `pin` is the input link that fired, for a Kismet `SequenceOp`. |
 | `{"heartbeat": true}` | Nothing happened for 2 s. |
 | `{"dropped": n}` | n events were dropped, because 10,000 were already waiting to be sent. |
+| `{"dropped": 0, "error": "the watch ended: ..."}` | The bridge could not read a watched call (a fault in game memory, or an error while it built the event). It ends every watch with this line and closes the connection; the game goes on. The `dropped` key keeps the line out of a client's events. MeleBridge 6. |
 
 - A watch matches its function by name on any object of the function's class or a subclass. A watch on
   `Engine.SequenceOp.Activated` therefore sees every Kismet op that fires. For a function declared in a state, the
@@ -254,7 +257,8 @@ until the client closes the connection.
   request sets off later, such as Kismet on the next tick, is sent. The `subscribe` reply says so in `skipped`, and
   `live_watch` in its `note`.
 - mele-mcp's `live_watch` closes the connection when its time or event limit is reached. It hides heartbeats and adds up
-  `dropped`.
+  `dropped`. It does not show that last line's `error` yet: a watch the bridge ended comes back early, and
+  `Logs\MeleBridge.log` says why.
 
 ### 3.7 The editor op
 

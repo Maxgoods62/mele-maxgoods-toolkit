@@ -10,7 +10,7 @@ It fills gaps in the LEX Interop ASI. LEX Interop sends its replies to a window 
 handles whole classes (`getall`), and commands queued together run in reverse order. MeleBridge answers each request
 on the same connection and works on one object at a time.
 
-This is MeleBridge 5 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1.
+This is MeleBridge 6 (`ASI_VERSION` in `src/SharedVersion.h`), speaking pipe protocol 1.
 
 ## What it does on each game
 
@@ -128,7 +128,7 @@ event stream and version check are in section 3 of [formats.md](../../docs/forma
 
 ```json
 {"op": "ping"}
-{"bridge":"5","map":"BIOA_NOR00","objects":512345,"ok":true,"protocol":1}
+{"bridge":"6","map":"BIOA_NOR00","objects":512345,"ok":true,"protocol":1}
 ```
 
 | Op | What it does | Waits for the game thread |

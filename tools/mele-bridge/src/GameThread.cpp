@@ -7,6 +7,7 @@
 #include <cstring>
 #include <format>
 #include <future>
+#include <thread>
 #include <vector>
 
 namespace MeleBridge
@@ -263,6 +264,77 @@ namespace MeleBridge
                 Watching.store(!Subscribers.empty(), std::memory_order_relaxed);
             }
         }
+
+        /// Ends every watch: each client gets a last line that says why, then Stream (Pipe.cpp) closes its connection. Game
+        /// thread. The last line is best effort; the closed connection always follows.
+        void EndWatches(std::string const& why)
+        {
+            LEASI_ERROR("the event stream ended: {}", why.c_str());
+            // "dropped": 0 keeps the line out of a client's events: mele-mcp counts every line without that key as a watched call.
+            auto const line = json{ { "dropped", 0 }, { "error", "the watch ended: " + why } }.dump(-1, ' ', false, json::error_handler_t::replace);
+            for (auto const& sub : Subscribers)
+            {
+                {
+                    // The pipe thread holds this lock only while it takes the queued lines. A bounded wait: the game thread
+                    // must never hang here, whatever a fault left behind.
+                    std::unique_lock lock{ sub->Lock, std::try_to_lock };
+                    for (int i = 0; i < 100 && !lock.owns_lock(); i++)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        if (lock.try_lock()) break;
+                    }
+                    if (lock.owns_lock()) sub->Lines.push_back(line);
+                    // Set before the lock is let go (when it was taken): Stream reads the flag under the same lock, so it
+                    // never sees the flag without the line.
+                    sub->Closed.store(true);
+                }
+                sub->Ready.notify_one();
+            }
+            Subscribers.clear();
+            Watching.store(false, std::memory_order_relaxed);
+        }
+
+        struct PublishContext
+        {
+            UObject* Context;
+            UFunction* Function;
+            void* Parms;
+            bool Threw;
+        };
+
+        void PublishWork(void* context)
+        {
+            auto* c = static_cast<PublishContext*>(context);
+            try
+            {
+                Publish(c->Context, c->Function, c->Parms);
+            }
+            catch (...)
+            {
+                c->Threw = true;
+            }
+        }
+
+        /// Publish, for the ProcessEvent hook: nothing it does may leave the hook into the game's own frames. A fault RunGuarded
+        /// takes (a parameter or a Kismet op read at a wrong address) or a C++ throw ends the watches instead of the game.
+        void PublishGuarded(UObject* context, UFunction* function, void* parms)
+        {
+            PublishContext c{ context, function, parms, false };
+            auto const fault = RunGuarded(PublishWork, &c);
+            if (fault == 0 && !c.Threw) return;
+            try
+            {
+                EndWatches(fault != 0 ? std::string(FaultName(fault)) + " in the game while reading a watched call"
+                                      : std::string("an error while reading a watched call"));
+            }
+            catch (...)
+            {
+                // Out of memory while saying so: the watches still end, without their last line.
+                for (auto const& sub : Subscribers) sub->Closed.store(true);
+                Subscribers.clear();
+                Watching.store(false, std::memory_order_relaxed);
+            }
+        }
     }
 
     void AddSubscriber(std::shared_ptr<Subscriber> subscriber)
@@ -491,7 +563,7 @@ namespace MeleBridge
             // through calls at every poll of a test's wait, and the editor calls Canvas.Project and Actor.Trace every frame: a watch
             // would show the bridge's own reads as the game's. What a request sets off later (Kismet on the next tick) is published.
             // The subscribe reply says so in "skipped" (docs/formats.md §3.6).
-            if (Watching.load(std::memory_order_relaxed) && !InJobs && !editor) Publish(Context, Function, Parms);
+            if (Watching.load(std::memory_order_relaxed) && !InJobs && !editor) PublishGuarded(Context, Function, Parms);
 
             // keep_ticking wraps the world's own Tick, whoever calls it (jobs and the editor never do).
             AWorldInfo* ticking = nullptr;
