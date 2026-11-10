@@ -106,7 +106,7 @@ public static partial class LivePlot
         {
             "bool" => number == "1",
             "int" => int.Parse(number, CultureInfo.InvariantCulture),
-            _ => double.Parse(number, CultureInfo.InvariantCulture),
+            _ => NumberText.Double(number),
         };
         // SetBool's third argument (bEvaluateAchievement) stays false: no achievement check.
         var set = kind == "bool" ? Call("SetBool", setId, newValue, false) : Call("Set" + type, setId, newValue);
@@ -143,11 +143,11 @@ public static partial class LivePlot
     }
 
     /// <summary>The console takes a float for every kind: True/False become 1/0.</summary>
-    private static string Number(string kind, string value)
+    internal static string Number(string kind, string value)
     {
         var v = value.Trim();
         if (kind == "bool" && bool.TryParse(v, out var b)) return b ? "1" : "0";
-        if (!double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)) throw new ArgumentException($"'{value}' is not a {kind} value.");
+        if (!NumberText.TryDouble(v, out var d)) throw new ArgumentException($"'{value}' is not a {kind} value.");
         if (kind == "int" && d != Math.Floor(d)) throw new ArgumentException($"'{value}' is not an int.");
         return d.ToString(CultureInfo.InvariantCulture);
     }

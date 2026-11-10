@@ -339,6 +339,6 @@ public static class GameLink
             I(t[rot + 1]), I(t[rot + 2]), I(t[rot + 3]), F(t[scale + 1]), t[hid + 1] == "1");
     }
 
-    private static float F(string s) => float.Parse(s, Inv);
+    private static float F(string s) => NumberText.Float(s);
     private static int I(string s) => int.Parse(s, Inv);
 }

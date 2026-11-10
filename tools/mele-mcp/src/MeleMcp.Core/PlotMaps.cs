@@ -146,7 +146,7 @@ public static partial class PlotMaps
             case "int":
                 return new BioStateEventElementInt { Type = BioStateEventElementType.Int, InstanceVersion = IncrementVersion, GlobalInt = target, NewValue = int.Parse(value, inv), Increment = increment };
             default:
-                return new BioStateEventElementFloat { Type = BioStateEventElementType.Float, InstanceVersion = IncrementVersion, GlobalFloat = target, NewValue = float.Parse(value, inv), Increment = increment };
+                return new BioStateEventElementFloat { Type = BioStateEventElementType.Float, InstanceVersion = IncrementVersion, GlobalFloat = target, NewValue = NumberText.Float(value), Increment = increment };
         }
     }
 

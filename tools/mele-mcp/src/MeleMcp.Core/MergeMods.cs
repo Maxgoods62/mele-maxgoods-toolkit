@@ -138,7 +138,7 @@ public static partial class MergeMods
         var root = Root(modRoot);
         var modDesc = Path.Combine(root, "moddesc.ini");
         var cmmVer = ModDescVersion(game, modDesc);
-        var cmm = double.Parse(cmmVer, CultureInfo.InvariantCulture);
+        var cmm = NumberText.Double(cmmVer);
         if (cmm < 7) throw new ArgumentException($"{modDesc} has cmmver {cmmVer}: merge mods need 7.0 or higher.");
 
         var stem = name?.Trim() ?? (manifestPath is null ? null : Path.GetFileNameWithoutExtension(GamePaths.ToWindowsPath(manifestPath)));
@@ -228,7 +228,7 @@ public static partial class MergeMods
         var modGame = ini.GetValueOrDefault("ModInfo")?.GetValueOrDefault("game");
         if (!string.Equals(modGame, game.ToString(), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException($"{modDesc} is a {modGame ?? "?"} mod, not {game}.");
         var version = ini.GetValueOrDefault("ModManager")?.GetValueOrDefault("cmmver");
-        if (!double.TryParse(version, NumberStyles.Float, CultureInfo.InvariantCulture, out _)) throw new ArgumentException($"{modDesc} has no usable cmmver ('{version}').");
+        if (!NumberText.TryDouble(version, out _)) throw new ArgumentException($"{modDesc} has no usable cmmver ('{version}').");
         return version!;
     }
 
@@ -630,12 +630,12 @@ public static partial class MergeMods
         return file;
     }
 
-    private static void CheckValue(ExportEntry target, string type, string value)
+    internal static void CheckValue(ExportEntry target, string type, string value)
     {
         switch (type)
         {
             case "FloatProperty":
-                float.Parse(value, CultureInfo.InvariantCulture);
+                NumberText.Float(value);
                 break;
             case "IntProperty":
                 int.Parse(value, CultureInfo.InvariantCulture);

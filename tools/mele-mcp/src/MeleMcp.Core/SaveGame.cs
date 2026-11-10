@@ -165,11 +165,11 @@ public sealed class SaveGame
         ? BitConverter.ToSingle(bytes, offset).ToString("R", CultureInfo.InvariantCulture)
         : BitConverter.ToInt32(bytes, offset).ToString(CultureInfo.InvariantCulture);
 
-    private static byte[] Encode(string value, bool isFloat)
+    internal static byte[] Encode(string value, bool isFloat)
     {
         if (isFloat)
         {
-            if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)) return BitConverter.GetBytes(f);
+            if (NumberText.TryFloat(value, out var f)) return BitConverter.GetBytes(f);
         }
         else if (int.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var i))
         {

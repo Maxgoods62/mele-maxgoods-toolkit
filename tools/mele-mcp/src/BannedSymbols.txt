@@ -27,6 +27,23 @@ M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.GetFilesLoadedInGame(Legend
 M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.TryGetHighestMountedFile(LegendaryExplorerCore.Packages.MEGame,System.String,System.String@);Use GamePaths.LoadedFiles: this one rescans every call
 M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.InvalidateCaches;Use GamePaths.RefreshLoadedFiles
 
+# Decimal numbers from text: NumberText reads them with the invariant culture, without thousands separators (float.Parse with a
+# culture reads "0,5" as 5), and refuses NaN, Infinity and a number too large for its type. Whole numbers (int.Parse) are not banned.
+M:System.Single.Parse(System.String);Use NumberText.Float: invariant culture, no thousands separator, finite
+M:System.Single.Parse(System.String,System.IFormatProvider);Use NumberText.Float: invariant culture, no thousands separator, finite
+M:System.Single.Parse(System.String,System.Globalization.NumberStyles);Use NumberText.Float: invariant culture, no thousands separator, finite
+M:System.Single.Parse(System.String,System.Globalization.NumberStyles,System.IFormatProvider);Use NumberText.Float: invariant culture, no thousands separator, finite
+M:System.Single.TryParse(System.String,System.Single@);Use NumberText.TryFloat: invariant culture, no thousands separator, finite
+M:System.Single.TryParse(System.String,System.IFormatProvider,System.Single@);Use NumberText.TryFloat: invariant culture, no thousands separator, finite
+M:System.Single.TryParse(System.String,System.Globalization.NumberStyles,System.IFormatProvider,System.Single@);Use NumberText.TryFloat: invariant culture, no thousands separator, finite
+M:System.Double.Parse(System.String);Use NumberText.Double: invariant culture, no thousands separator, finite
+M:System.Double.Parse(System.String,System.IFormatProvider);Use NumberText.Double: invariant culture, no thousands separator, finite
+M:System.Double.Parse(System.String,System.Globalization.NumberStyles);Use NumberText.Double: invariant culture, no thousands separator, finite
+M:System.Double.Parse(System.String,System.Globalization.NumberStyles,System.IFormatProvider);Use NumberText.Double: invariant culture, no thousands separator, finite
+M:System.Double.TryParse(System.String,System.Double@);Use NumberText.TryDouble: invariant culture, no thousands separator, finite
+M:System.Double.TryParse(System.String,System.IFormatProvider,System.Double@);Use NumberText.TryDouble: invariant culture, no thousands separator, finite
+M:System.Double.TryParse(System.String,System.Globalization.NumberStyles,System.IFormatProvider,System.Double@);Use NumberText.TryDouble: invariant culture, no thousands separator, finite
+
 # Image files: encode into a MemoryStream, then AtomicFile.WriteAllBytes, behind the caller's install guard (GameScreenshot).
 M:System.Drawing.Image.Save(System.String);Save the image to a MemoryStream, then use AtomicFile.WriteAllBytes: written beside the file, then moved over it
 M:System.Drawing.Image.Save(System.String,System.Drawing.Imaging.ImageFormat);Save the image to a MemoryStream, then use AtomicFile.WriteAllBytes: written beside the file, then moved over it
