@@ -28,7 +28,7 @@ An ASI is a DLL that a game loads at start, through an ASI loader. M3 installs t
 | LEX Interop | `game_*` tools that send commands, `game_cycle` and `game_close` on LE1, `npc_place`, `game_plot` without MeleBridge | Legendary Explorer (LEX): Live Level Editor, requirements |
 
 `game_status` says whether the LEX Interop pipe answers. Close LEX while you use this ASI: the game sends replies to the
-first window titled "Legendary Explorer", and mele-mcp owns a hidden one.
+first window titled "Legendary Explorer", which mele-mcp's hidden window is only while one of its calls waits for one.
 
 ## Get the source
 

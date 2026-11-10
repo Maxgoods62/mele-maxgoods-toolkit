@@ -545,6 +545,13 @@ internal sealed class GameLock : IDisposable
     public static GameLock ForLexInterop(MEGame game) => Take($"MeleMcp.LexInterop.{game}", TimeSpan.FromSeconds(15),
         $"Another mele-mcp call has held the {game} LEX Interop link for 15 s. Retry when it ends.");
 
+    /// <summary>
+    /// The LEX Interop reply window's title (GameBridge.HoldReplies): the games answer the one window that carries it, so one
+    /// holder at a time on the machine, whatever the game. Taken inside a sequence's own lock, for a few seconds at most.
+    /// </summary>
+    public static GameLock ForLexReplies() => Take("MeleMcp.LexReplies", TimeSpan.FromSeconds(15),
+        "Another mele-mcp call has held the LEX Interop reply window for 15 s. Retry when it ends.");
+
     /// <summary>Waits up to <paramref name="wait"/> for the lock, then refuses with <paramref name="busy"/>.</summary>
     internal static GameLock Take(string name, TimeSpan wait, string busy)
     {

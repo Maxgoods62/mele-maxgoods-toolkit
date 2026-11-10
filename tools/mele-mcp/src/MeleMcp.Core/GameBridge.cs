@@ -9,12 +9,56 @@ namespace MeleMcp.Core;
 /// <summary>
 /// Live link to a running LE game through ME3Tweaks' LEX Interop ASI, speaking the same protocol as Legendary Explorer:
 /// commands go in over the named pipe <c>LEX_{game}_COMM_PIPE</c> (one connection per command), replies come back as
-/// WM_COPYDATA to the top-level window titled "Legendary Explorer". We own a hidden window with that title, so replies
-/// reach us only while LEX itself is closed.
+/// WM_COPYDATA to the first top-level window titled "Legendary Explorer". We own a hidden window that carries that title only
+/// while one of our calls waits for a reply (<see cref="HoldReplies"/>), so several servers can share the link. Replies reach
+/// us only while LEX itself is closed.
 /// </summary>
 public static class GameBridge
 {
     public const string ReplyWindowTitle = "Legendary Explorer";
+
+    /// <summary>Our window's title while no call of this server waits for a reply: one the LEX Interop ASIs do not look for.</summary>
+    private const string IdleWindowTitle = "MeleMcp LEX replies (idle)";
+
+    /// <summary>How many times this thread holds the reply window: the title goes on at the first and off at the last.</summary>
+    [ThreadStatic] private static int _holds;
+
+    /// <summary>
+    /// Makes this server the one the games answer, until the result is disposed: takes the machine-wide lock, then gives our
+    /// hidden window the title the LEX Interop ASIs look for. Disposing puts the idle title back, then releases the lock, on
+    /// every way out. Dispose on the thread that called this (the lock is a mutex).
+    /// </summary>
+    internal static IDisposable HoldReplies()
+    {
+        var held = GameLock.ForLexReplies();
+        try
+        {
+            if (_holds == 0) ReplyReceiver.Instance.SetTitle(ReplyWindowTitle);
+            _holds++;
+        }
+        catch
+        {
+            held.Dispose();
+            throw;
+        }
+        return new ReplyHold(held);
+    }
+
+    private sealed class ReplyHold(GameLock held) : IDisposable
+    {
+        public void Dispose()
+        {
+            try
+            {
+                // Not checked: a window that is gone has no title left to take replies with.
+                if (--_holds == 0) ReplyReceiver.Instance.TrySetTitle(IdleWindowTitle);
+            }
+            finally
+            {
+                held.Dispose();
+            }
+        }
+    }
 
     private static readonly Dictionary<MEGame, (string Process, ulong Signature)> Targets = new()
     {
@@ -41,6 +85,28 @@ public static class GameBridge
         var processes = Process.GetProcessesByName(Target(game).Process);
         foreach (var p in processes) p.Dispose();
         return processes.Length > 0;
+    }
+
+    /// <summary>The running game's process, by id and start time (ids are reused), or null. The start is 0 when Windows does not say.</summary>
+    internal static (int Id, long Started)? RunningProcess(MEGame game)
+    {
+        var processes = Process.GetProcessesByName(Target(game).Process);
+        try
+        {
+            if (processes.MinBy(p => p.Id) is not { } process) return null;
+            try
+            {
+                return (process.Id, process.StartTime.ToFileTimeUtc());
+            }
+            catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return (process.Id, 0);
+            }
+        }
+        finally
+        {
+            foreach (var p in processes) p.Dispose();
+        }
     }
 
     /// <summary>Enumerating \\.\pipe\ does not connect, so it cannot steal the ASI's single pipe instance.</summary>
@@ -97,13 +163,17 @@ public static class GameBridge
                                           + "Is LEX closed (it takes the replies) and the game window not paused in a menu?");
     }
 
-    /// <summary>Most recent reply that matches, from anything received since this server started, without sending.</summary>
+    /// <summary>Most recent reply that matches, from anything received while this server held the reply window, without sending.</summary>
     public static string? LastReply(MEGame game, Func<string, bool> isReply) => ReplyReceiver.Instance.Last(Target(game).Signature, isReply);
 
-    /// <summary>Number of top-level windows titled "Legendary Explorer", ours included. More than one means replies may go elsewhere.</summary>
+    /// <summary>
+    /// Top-level windows titled "Legendary Explorer" while this server holds the title: 1 is ours alone. More means LEX is open,
+    /// or a mele-mcp server from before the title was shared is still running; either may take the replies. Takes the reply
+    /// window itself, for the count.
+    /// </summary>
     public static int ReplyWindowCount()
     {
-        _ = ReplyReceiver.Instance;
+        using var replies = HoldReplies();
         var count = 0;
         var hwnd = IntPtr.Zero;
         while ((hwnd = Native.FindWindowExW(IntPtr.Zero, hwnd, null, ReplyWindowTitle)) != IntPtr.Zero) count++;
@@ -136,8 +206,8 @@ public static class GameBridge
 
         /// <summary>
         /// Made on first use. A window that could not be made is tried again at the next use: a Lazy would keep that first
-        /// exception and refuse every LE1 LEX Interop tool until the server restarts. One attempt at a time, so there is never a
-        /// second window of ours titled "Legendary Explorer" to take the replies.
+        /// exception and refuse every LE1 LEX Interop tool until the server restarts. One attempt at a time, so this server never
+        /// has a second window. Each starts with the idle title, and only <see cref="HoldReplies"/> gives it "Legendary Explorer".
         /// </summary>
         public static ReplyReceiver Instance
         {
@@ -151,6 +221,7 @@ public static class GameBridge
         private readonly List<(long Seq, ulong Signature, string Text)> _messages = [];
         private long _seq;
         private readonly Native.WndProc _wndProc; // kept alive: the window calls it from native code
+        private IntPtr _hwnd; // set on the window's thread before the constructor returns
 
         private ReplyReceiver(int attempt)
         {
@@ -196,6 +267,14 @@ public static class GameBridge
             lock (_messages) return _messages.LastOrDefault(m => m.Signature == signature && isReply(m.Text)).Text;
         }
 
+        public void SetTitle(string title)
+        {
+            if (!TrySetTitle(title)) throw new InvalidOperationException($"SetWindowText failed: {Marshal.GetLastWin32Error()}");
+        }
+
+        /// <summary>From any thread: Windows hands the change to the window's own thread, whose message loop is always running.</summary>
+        public bool TrySetTitle(string title) => Native.SetWindowTextW(_hwnd, title);
+
         private void CreateWindow(string className)
         {
             var wc = new Native.WNDCLASSEXW
@@ -206,9 +285,11 @@ public static class GameBridge
                 lpszClassName = className,
             };
             if (Native.RegisterClassExW(ref wc) == 0) throw new InvalidOperationException($"RegisterClassEx failed: {Marshal.GetLastWin32Error()}");
-            // A normal (not message-only) top-level window, never shown: FindWindow in the game must be able to see it.
-            var hwnd = Native.CreateWindowExW(0, className, ReplyWindowTitle, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
+            // A normal (not message-only) top-level window, never shown: FindWindow in the game must be able to see it while it
+            // carries the title (HoldReplies). It starts idle, so the game answers another server's window until we hold it.
+            var hwnd = Native.CreateWindowExW(0, className, IdleWindowTitle, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
             if (hwnd == IntPtr.Zero) throw new InvalidOperationException($"CreateWindowEx failed: {Marshal.GetLastWin32Error()}");
+            _hwnd = hwnd;
         }
 
         private IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -273,6 +354,10 @@ public static class GameBridge
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string? className, string? title);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowTextW(IntPtr hwnd, string text);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr GetModuleHandleW(string? name);
