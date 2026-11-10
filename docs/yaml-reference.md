@@ -94,7 +94,8 @@ because it could resolve into the game install.
 
 With `mod_build out=<folder>`, that folder is the mod root:
 
-- Each `package` goes under `out` by its DLC folder. A `package` without a DLC folder is refused.
+- Each `package` goes under `out` by its DLC folder. A `package` without a DLC folder is refused, and so is one that
+  leaves its DLC folder with `..`.
 - When `out` lacks the DLC folder and the source one exists, the build first copies that folder whole into `out`. A copy
   that stops half way leaves nothing, so the next build copies again. The copy is a snapshot: later builds into `out` build
   on it as it is, and a note names the source files that are newer than their copy, or were added since and are missing

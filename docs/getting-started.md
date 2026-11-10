@@ -154,7 +154,9 @@ Most write tools refuse the Legendary Edition folder. Edit the mod's copy in M3'
 | What | Where | Guard |
 |---|---|---|
 | Packages, and what a build writes beside them | the path you name; with `mod_build`'s `out`, under `out` | Install refused. Backup: `<backups>\yyyyMMdd-HHmmss-fff_<file>`. Forks of vanilla levels get none. |
-| Editor sessions (LE1) | `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json` | `editor_import` adds `<session>.dropped.json`. |
+| Level YAML (`editor_import`, `npc_place`, `live_save`) | the file you name | Install refused. Backup in `<backups>` before each write. |
+| Screenshots | `game_screenshot`'s `path` (a full path ending in `.png`), or `%LOCALAPPDATA%\mele-mcp\screenshots` | Install refused. No backup: a PNG of that name is replaced. |
+| Editor sessions (LE1) | `%LOCALAPPDATA%\MeleBridge\LE1\sessions\<map>.json` | Install refused. `editor_import` adds `<session>.dropped.json`. |
 | Prop catalog (LE1) | `%LOCALAPPDATA%\MeleBridge\LE1\catalog`; `mods\LE1\Mele Catalog` in M3's library | Install refused. |
 | `.tlk`, `.cnd`, config, `dlc_new`, `pkg_to_text` `outPath` | the path you name | Install refused. |
 | Merge mods | `<modRoot>\MergeMods\`, `moddesc.ini`; scratch in `%TEMP%\mele-mcp-merge-<guid>` | The later install patches a core file. Only M3's Restore undoes it. |
@@ -162,14 +164,12 @@ Most write tools refuse the Legendary Edition folder. Edit the mod's copy in M3'
 | Dumps | `MELE_DUMP_DIR`, a folder per game | They are game code: keep them out of repos. |
 | Id reservations (LE1) | `%LOCALAPPDATA%\mele-mcp\id-reservations.json` | Only `id_alloc` reads it. Deleting it drops every reservation. |
 
-These writers have no install guard or make no backup, so check the path you give them:
+These writers make no backup, so check the path you give them:
 
-- `game_screenshot` writes its `path`, or a PNG in `%LOCALAPPDATA%\mele-mcp\screenshots`.
-- `editor_import`, `npc_place` and `live_save` write the level YAML with no install guard, then run `level_build`.
-  Each copies it to `<backups>` first.
 - With `sideloader`, `level_build` writes `ConfigDelta-<level>.m3cd` over any file of that name, unless an `.m3cd` beside
   the level already names it.
-- lectool writes where its arguments point, with no backup. `compileclass` deletes an existing output file.
+- lectool refuses the Legendary Edition folder as mele-mcp does, and writes where its arguments point with no backup.
+  `compileclass` deletes an existing output file.
 
 ## MeleBridge
 
