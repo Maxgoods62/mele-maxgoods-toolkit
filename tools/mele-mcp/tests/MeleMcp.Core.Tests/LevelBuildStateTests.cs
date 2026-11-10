@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using LegendaryExplorerCore.Kismet;
 using LegendaryExplorerCore.Packages;
 using LegendaryExplorerCore.Packages.CloningImportingAndRelinking;
 using LegendaryExplorerCore.Unreal;
@@ -268,6 +269,108 @@ public class LevelBuildStateTests
         }
     }
 
+    /// <summary>
+    /// A usable whose YAML lost its 'goTo' kept the chain an earlier build linked: using it still loaded the old map. The build now
+    /// cuts use → chain as it does for a removed squad, conversation or idle, and leaves the other usable's chain alone. A 'goTo'
+    /// given again fires one chain.
+    /// </summary>
+    [TestMethod]
+    public void GoToRemoved_UsingItLoadsNoMap_AndTheOtherUsableKeepsItsOwn()
+    {
+        TestSetup.RequireGame();
+        var map = Level("goto-removed", (pcc, cache) =>
+        {
+            var level = pcc.FindExport(LevelPath)!;
+            foreach (var (n, tag) in new[] { (1, "t_use"), (2, "t_keep") })
+            {
+                var behavior = Add(pcc, cache, "BioPawnBehavior", $"BioPawnBehavior_{n}", level);
+                Add(pcc, cache, "BioUseable", $"BioUseable_{n}", level, new NameProperty(tag, "Tag"), new ObjectProperty(behavior, "m_oBehavior"));
+            }
+        });
+        const string Keep = """
+              door:
+                tag: t_keep
+                goTo: { map: BIOA_NOR10, startPoint: start_door }
+            """;
+
+        LevelBuilder.Build(MEGame.LE1, Yaml(map, $$"""
+            usables:
+              terminal:
+                tag: t_use
+                goTo:
+                  - { if: conditional 812, map: BIOA_STA00, startPoint: start_a }
+                  - { map: BIOA_NOR10 }
+            {{Keep}}
+            """), null);
+        CollectionAssert.AreEqual(new[] { "BioSeqAct_PMCheckConditional" }, UseTargets(map, "BioUseable_1"));
+        CollectionAssert.AreEqual(new[] { "BioSeqAct_AreaTransition" }, UseTargets(map, "BioUseable_2"));
+
+        var without = Yaml(map, $$"""
+            usables:
+              terminal:
+                tag: t_use
+            {{Keep}}
+            """);
+        var result = LevelBuilder.Build(MEGame.LE1, without, null);
+        Assert.IsEmpty(UseTargets(map, "BioUseable_1"), "the removed goTo still fires");
+        CollectionAssert.AreEqual(new[] { "BioSeqAct_AreaTransition" }, UseTargets(map, "BioUseable_2"), "the other usable lost its goTo");
+        CollectionAssert.Contains(result.Usables.Single(u => u.Name == "terminal").Changes.ToList(), "Kismet: use → go to unlinked");
+        Assert.HasCount(1, result.Notes.Where(n => n.Contains("no 'goTo'")).ToList(), string.Join("\n", result.Notes));
+
+        // Nothing left to cut: no second note.
+        result = LevelBuilder.Build(MEGame.LE1, without, null);
+        Assert.IsFalse(result.Notes.Any(n => n.Contains("no 'goTo'")), string.Join("\n", result.Notes));
+
+        LevelBuilder.Build(MEGame.LE1, Yaml(map, $$"""
+            usables:
+              terminal:
+                tag: t_use
+                goTo: { map: BIOA_NOR10 }
+            {{Keep}}
+            """), null);
+        CollectionAssert.AreEqual(new[] { "BioSeqAct_AreaTransition" }, UseTargets(map, "BioUseable_1"), "a goTo given again should fire one chain");
+    }
+
+    /// <summary>
+    /// A YAML that lost its 'sideloader' key left ConfigDelta-&lt;level&gt;.m3cd in place with no word about it: LE1CP went on
+    /// loading the level. The build still leaves the file as it is (see the next test), and now says so.
+    /// </summary>
+    [TestMethod]
+    public void SideloaderKeyRemoved_TheFileStays_AndTheBuildSaysSo()
+    {
+        TestSetup.RequireGame();
+        var map = MapPath("sideloader-left");
+        LevelBuilder.Build(MEGame.LE1, Yaml(map, "sideloader: [BIOA_T00X]"), null);
+        var config = Path.Combine(Path.GetDirectoryName(map)!, "ConfigDelta-BIOA_T00.m3cd");
+        var bytes = File.ReadAllBytes(config);
+
+        var result = LevelBuilder.Build(MEGame.LE1, Yaml(map, ""), null);
+
+        CollectionAssert.AreEqual(bytes, File.ReadAllBytes(config), "a build without 'sideloader' changed the .m3cd");
+        Assert.IsNull(result.SideloaderConfig);
+        Assert.HasCount(1, result.Notes.Where(n => n.Contains("ConfigDelta-BIOA_T00.m3cd") && n.Contains("no 'sideloader'")).ToList(), string.Join("\n", result.Notes));
+    }
+
+    /// <summary>
+    /// A decision, not a bug: a mod may keep the Sideloader line by hand in its own .m3cd, with a field the build does not write,
+    /// and leave 'sideloader' out of the YAML for that reason. Such a line is never changed, removed or reported. This test passes
+    /// before and after the change that added the note above; it is here so that nobody "fixes" the absence of a removal.
+    /// </summary>
+    [TestMethod]
+    public void NoSideloaderKey_ALineKeptByHandStays_AndNothingIsSaid()
+    {
+        TestSetup.RequireGame();
+        var map = MapPath("sideloader-by-hand");
+        var config = Path.Combine(Path.GetDirectoryName(map)!, "ConfigDelta-MyMod.m3cd");
+        const string Text = "[BioGame.ini SFXGame.SideloaderFramework]\n+Levels=(LevelName=\"BIOA_T00\", LoadIfPrefix=(\"BIOA_NOR10_11_\"), StateId=1234)\n";
+        File.WriteAllText(config, Text);
+
+        var result = LevelBuilder.Build(MEGame.LE1, Yaml(map, ""), null);
+
+        Assert.AreEqual(Text, File.ReadAllText(config));
+        Assert.IsFalse(result.Notes.Any(n => n.Contains("sideloader", StringComparison.OrdinalIgnoreCase)), string.Join("\n", result.Notes));
+    }
+
     /// <summary>The channels on, without bInitialized; none for no LightingChannels of its own.</summary>
     private static List<string> On(PropertyCollection component) =>
         component.GetProp<StructProperty>("LightingChannels")?.Properties.OfType<BoolProperty>().Where(b => b.Value && b.Name.Instanced != "bInitialized")
@@ -353,5 +456,16 @@ public class LevelBuildStateTests
     {
         using var pcc = MEPackageHandler.OpenMEPackage(map, forceLoadFromDisk: true);
         return LevelStreams.Streamed(pcc, pcc.FindExport(LevelPath)!).ToList();
+    }
+
+    /// <summary>The classes of the objects the usable's use event fires from Out, in the saved level; none when it has no such output.</summary>
+    private static List<string> UseTargets(string map, string usable)
+    {
+        using var pcc = MEPackageHandler.OpenMEPackage(map, forceLoadFromDisk: true);
+        var actor = pcc.FindExport($"{LevelPath}.{usable}")!;
+        var used = KismetHelper.GetSequenceObjects(pcc.FindExport($"{LevelPath}.Main_Sequence")!).OfType<ExportEntry>()
+            .Single(o => o.ClassName == "BioSeqEvt_ArtPlaceableUsed" && o.GetProperty<ObjectProperty>("Originator")?.Value == actor.UIndex);
+        var index = KismetHelper.GetOutputLinkNames(used).IndexOf("Out");
+        return index < 0 ? [] : KismetHelper.GetOutputLinksOfNode(used)[index].Select(l => l.LinkedOp).OfType<ExportEntry>().Select(o => o.ClassName).ToList();
     }
 }
