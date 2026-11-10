@@ -14,7 +14,12 @@ public static class LevelCreator
     {
         var full = Checked(game, path);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        MEPackageHandler.CreateEmptyLevel(full, game);
+        // What LEC's CreateEmptyLevel does, except that it writes into the file itself: written beside it, then moved, a write
+        // that fails leaves no half-made level, which a second level_new would refuse as "already exists".
+        using (var level = MEPackageHandler.CreateEmptyLevelStream(Path.GetFileNameWithoutExtension(full), game))
+        {
+            AtomicFile.Write(full, temporary => LegendaryExplorerCore.Helpers.StreamHelpers.WriteToFile(level, temporary));
+        }
 
         using var pcc = MEPackageHandler.OpenMEPackage(full, forceLoadFromDisk: true);
         return new NewLevelResult(full, Path.GetFileNameWithoutExtension(full), pcc.ExportCount, pcc.Exports.Select(ExportInspector.Row).ToList());
