@@ -225,6 +225,11 @@ public static class EditorImport
         var notes = new List<string>();
         var sessionFile = sessionPath is null ? FindSession(level, root, notes) : Path.GetFullPath(GamePaths.ToWindowsPath(sessionPath));
         var dropFile = DroppedFile(sessionFile);
+        // Checked before the first write: the YAML here (WriteYaml checks it again for npc_place and live_save), and the session
+        // file with its .dropped.json beside it, unless they are left alone.
+        LecHost.EnsureInitialized();
+        ConfigFiles.EnsureWritable(file);
+        if (!keepSession) ConfigFiles.EnsureWritable(sessionFile);
 
         // A spawned mesh's file as the YAML names it: the level as its 'package' gives it, read from where level_build finds it (beside the
         // YAML or under its mod root; by name, the game finds the installed copy), so a relative one stays relative; others by name, a fork
@@ -1718,10 +1723,14 @@ public static class EditorImport
     /// <summary>
     /// Writes a level YAML file over itself, as editor_import and npc_place do: backed up first (<see cref="PackageWriter.Backup"/>,
     /// into the backups folder, which M3 never installs) unless <paramref name="backup"/> is this run's backup already, then written
-    /// beside it and moved over it, so a crash mid-write leaves the old file whole. Returns the backup.
+    /// beside it and moved over it, so a crash mid-write leaves the old file whole. Returns the backup. Refused for a file inside
+    /// the game install.
     /// </summary>
     internal static string WriteYaml(string file, string text, string? backup = null)
     {
+        // A YAML at a caller's path, like a package: never one inside the game install (the roots need LEC initialized).
+        LecHost.EnsureInitialized();
+        ConfigFiles.EnsureWritable(file);
         backup ??= PackageWriter.Backup(file);
         AtomicFile.WriteAllText(file, text, new UTF8Encoding(false));
         return backup;

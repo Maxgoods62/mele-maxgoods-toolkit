@@ -323,19 +323,20 @@ Package writes go through `PackageWriter.Edit`, which guards, changes, backs up 
 itself saves it with `PackageWriter.Save`, so `level_build` checks its forks and the level, a new one too, before it
 saves any of them. A package, like every other whole file (`AtomicFile`), is written beside the target, then moved over
 it, so a crash or a failed save leaves the old file or the new one. `src/BannedSymbols.txt` makes any other package
-save, `File.WriteAll*` call, or read of LEC's file list outside `GamePaths` a build error. The guard refuses any file
-inside the Legendary Edition folder or the game path. It compares spellings, then what the path is on disk, so shares,
-junctions and volume names are caught too. It does not see a hard link to a game file; a file saved over such a link
-replaces the link and leaves the game's file as it was.
+save, `File.WriteAll*` call, `Image.Save` to a path, or read of LEC's file list outside `GamePaths` a build error. The
+guard refuses any file inside the Legendary Edition folder or the game path. It compares spellings, then what the path
+is on disk, so shares, junctions and volume names are caught too. It does not see a hard link to a game file; a file
+saved over such a link replaces the link and leaves the game's file as it was.
 
 A file name can resolve to another mod's installed copy. Edit the mod's copy in M3's library, then run `mod_install`.
 Backups go to `%LOCALAPPDATA%\mele-mcp\backups` as `yyyyMMdd-HHmmss-fff_<file>` (`-2`, `-3`... after the time when two
 share a millisecond), and `MELE_BACKUP_DIR` moves them.
 
-These writes fall outside that rule, and [getting started](../../docs/getting-started.md) lists every other location:
+These writes are not packages, and [getting started](../../docs/getting-started.md) lists every other location:
 
-- `editor_import`, `npc_place` and `live_save` write the level YAML with no guard on it. Each backs it up first.
-- `game_screenshot` writes to its `path` parameter with no guard.
+- `editor_import`, `npc_place` and `live_save` rewrite the level YAML: guarded, backed up first, then written by
+  `AtomicFile`. `editor_import` guards its session file the same way, with no backup.
+- `game_screenshot` writes a PNG: guarded, written by `AtomicFile`, with no backup.
 - `level_build` makes no backup of the forks it writes beside a level, because each is rebuilt from the vanilla file.
 
 ## Layout

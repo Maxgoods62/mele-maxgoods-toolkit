@@ -66,7 +66,7 @@ and ask it to call `le_status`. [Getting started](docs/getting-started.md) cover
 
 The repo holds no game files. Most write tools refuse paths inside the game's folder and back up what they change.
 Mods go in through M3 (`mod_install`) and an ASI through its `build.sh --install`, game closed. lectool and a few other
-writers have no guard: [getting started](docs/getting-started.md) lists them.
+writers make no backup: [getting started](docs/getting-started.md) lists them.
 
 ## Related repos
 

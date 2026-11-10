@@ -24,6 +24,7 @@ public static class GameScreenshot
     /// <param name="maxWidth">Scales the image down to this width (0: full size); smaller images are cheaper to read.</param>
     public static Screenshot Take(MEGame game, string? outputPath, int maxWidth)
     {
+        var path = OutputPath(game, outputPath);
         var processes = Process.GetProcessesByName(GameBridge.ProcessName(game));
         try
         {
@@ -35,7 +36,7 @@ public static class GameScreenshot
             var previous = Native.SetThreadDpiAwarenessContext(PerMonitorAwareV2);
             try
             {
-                return Capture(window, outputPath ?? DefaultPath(game), maxWidth);
+                return Capture(window, path, maxWidth);
             }
             finally
             {
@@ -46,6 +47,24 @@ public static class GameScreenshot
         {
             foreach (var p in processes) p.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Where the PNG goes: <paramref name="outputPath"/>, or a new file under %LOCALAPPDATA%\mele-mcp\screenshots. A path of the
+    /// caller's is a full path ending in .png (a relative one would land in the server's working folder, and any other name could
+    /// replace a package or a YAML), outside the game install like every file the server writes.
+    /// </summary>
+    internal static string OutputPath(MEGame game, string? outputPath)
+    {
+        var path = outputPath ?? DefaultPath(game);
+        if (!System.IO.Path.IsPathFullyQualified(path))
+            throw new ArgumentException($"path '{path}': give a full path, such as C:\\shots\\a.png or /mnt/c/shots/a.png.");
+        if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException($"path '{path}': the screenshot is a PNG, so the file name must end in .png.");
+        // The guard's roots are LEC's settings: empty until LEC is initialized, and then it refuses nothing.
+        LecHost.EnsureInitialized();
+        ConfigFiles.EnsureWritable(path);
+        return path;
     }
 
     private static Screenshot Capture(IntPtr window, string path, int maxWidth)
@@ -75,7 +94,10 @@ public static class GameScreenshot
 
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
         using var saved = maxWidth > 0 && image.Width > maxWidth ? Scale(image, maxWidth) : new Bitmap(image);
-        saved.Save(path, ImageFormat.Png);
+        // Encoded in memory, then written beside the file and moved over it (AtomicFile), like every whole file the server writes.
+        using var png = new MemoryStream();
+        saved.Save(png, ImageFormat.Png);
+        AtomicFile.WriteAllBytes(path, png.ToArray());
         return new Screenshot(path, GamePaths.ToWslPath(path), saved.Width, saved.Height, method, note);
     }
 

@@ -23,3 +23,8 @@ M:LegendaryExplorerCore.Packages.MEPackageHandler.CreateEmptyLevel(System.String
 M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.GetFilesLoadedInGame(LegendaryExplorerCore.Packages.MEGame,System.Boolean,System.Boolean,System.Boolean,System.String,System.Boolean,System.String[],System.Boolean);Use GamePaths.LoadedFiles: rescanned when the game's folders change
 M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.TryGetHighestMountedFile(LegendaryExplorerCore.Packages.MEGame,System.String,System.String@);Use GamePaths.LoadedFiles: this one rescans every call
 M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.InvalidateCaches;Use GamePaths.RefreshLoadedFiles
+
+# Image files: encode into a MemoryStream, then AtomicFile.WriteAllBytes, behind the caller's install guard (GameScreenshot).
+M:System.Drawing.Image.Save(System.String);Save the image to a MemoryStream, then use AtomicFile.WriteAllBytes: written beside the file, then moved over it
+M:System.Drawing.Image.Save(System.String,System.Drawing.Imaging.ImageFormat);Save the image to a MemoryStream, then use AtomicFile.WriteAllBytes: written beside the file, then moved over it
+M:System.Drawing.Image.Save(System.String,System.Drawing.Imaging.ImageCodecInfo,System.Drawing.Imaging.EncoderParameters);Save the image to a MemoryStream, then use AtomicFile.WriteAllBytes: written beside the file, then moved over it
