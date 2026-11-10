@@ -9,7 +9,7 @@ This is a personal tool, shared as-is. It comes with no support and no warranty 
 
 What it needs:
 - Windows x64.
-- The .NET 8 runtime, x64: https://dotnet.microsoft.com/download/dotnet/8.0
+- The .NET 10 runtime, x64: https://dotnet.microsoft.com/download/dotnet/10.0
 - Mass Effect Legendary Edition. The server finds it in the registry. If it does not, set
   MELE_LE_DIR to the folder that holds Game\ME1, Game\ME2 and Game\ME3.
 - ME3Tweaks Mod Manager, for mod_install and game_cycle.

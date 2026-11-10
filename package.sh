@@ -3,7 +3,7 @@
 #   ./package.sh
 # Runs in WSL and finds the Windows dotnet.exe as tools/mele-mcp/scripts/deploy.sh does: MELE_DOTNET from the
 # environment, then from tools/mele-mcp/build.env. The version is <Version> in tools/mele-mcp/src/MeleMcp/MeleMcp.csproj.
-# The zip holds a framework-dependent win-x64 publish (the user installs the .NET 8 runtime), LICENSE, THIRD_PARTY.md,
+# The zip holds a framework-dependent win-x64 publish (the user installs the .NET 10 runtime), LICENSE, THIRD_PARTY.md,
 # README.txt and licenses\: the texts of the NuGet packages (taken from the NuGet cache), of the native DLLs and of
 # Legendary Explorer's notices. It never holds Oodle, a native DLL whose license nobody checked (THIRD_PARTY.md), or
 # this machine's paths.

@@ -26,7 +26,7 @@ has run in each game.
 ## What you need
 
 - Windows x64 with Mass Effect Legendary Edition installed.
-- The .NET SDK 10.0.402 or a later 10.0.x to build, and the .NET 8 runtime (x64) to run.
+- The .NET SDK 10.0.402 or a later 10.0.x to build, and the .NET 10 runtime (x64) to run.
 - M3, started once so the server can find it.
 - An MCP client that starts stdio servers, such as Claude Code.
 - For MeleBridge: WSL with `rsync`, Git for Windows, and the Visual Studio 18 (2026) Build Tools with C++ and CMake.

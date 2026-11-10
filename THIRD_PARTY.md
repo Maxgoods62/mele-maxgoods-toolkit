@@ -45,11 +45,9 @@ The Microsoft .NET packages, all MIT:
 | Packages | Version | Used by |
 |---|---|---|
 | Microsoft.Extensions.Hosting and what it pulls in: Microsoft.Extensions.Caching.Abstractions, .Configuration, .Configuration.Abstractions, .Configuration.Binder, .Configuration.CommandLine, .Configuration.EnvironmentVariables, .Configuration.FileExtensions, .Configuration.Json, .Configuration.UserSecrets, .DependencyInjection, .DependencyInjection.Abstractions, .Diagnostics, .Diagnostics.Abstractions, .FileProviders.Abstractions, .FileProviders.Physical, .FileSystemGlobbing, .Hosting.Abstractions, .Logging, .Logging.Abstractions, .Logging.Configuration, .Logging.Console, .Logging.Debug, .Logging.EventLog, .Logging.EventSource, .Options, .Options.ConfigurationExtensions, .Primitives | 10.0.13 | mele-mcp |
-| System.Diagnostics.DiagnosticSource, System.Diagnostics.EventLog, System.IO.Pipelines, System.Net.ServerSentEvents, System.Text.Encodings.Web, System.Text.Json | 10.0.13 | mele-mcp |
+| System.Diagnostics.EventLog | 10.0.13 | mele-mcp |
 | Microsoft.Extensions.AI.Abstractions (through ModelContextProtocol) | 10.11.0 | mele-mcp |
 | System.Drawing.Common, Microsoft.Win32.SystemEvents, System.IO.Hashing | 10.0.2 | both, through LEC |
-| System.Buffers | 4.6.1 | both, through LEC |
-| Microsoft.Win32.Registry, System.Security.AccessControl, System.Security.Principal.Windows, Microsoft.NETCore.Platforms | 5.0.0 | both, through LEC |
 
 LEC's build also runs Fody 6.6.4 and PropertyChanged.Fody 4.1.0 (both MIT). They rewrite LEC's assembly while it
 builds and are referenced with `PrivateAssets="All"`, so neither lands in the output.
@@ -100,4 +98,4 @@ listing for `oo2core`.
 ## The .NET runtime
 
 Both builds are framework-dependent: `MeleMcp.runtimeconfig.json` and `lectool.runtimeconfig.json` ask for
-`Microsoft.NETCore.App` 8.0, which is not part of the output.
+`Microsoft.NETCore.App` 10.0, which is not part of the output.

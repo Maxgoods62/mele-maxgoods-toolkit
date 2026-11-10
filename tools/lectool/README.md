@@ -15,7 +15,7 @@ an output that is also one of its inputs. Build into your mod's folder and insta
 
 ## Build
 
-lectool is a Windows program (`net8.0-windows`, x64) that needs the .NET 8 x64 runtime. Building needs the Windows .NET
+lectool is a Windows program (`net10.0-windows`, x64) that needs the .NET 10 x64 runtime. Building needs the Windows .NET
 SDK 10.0.402 or a later 10.0.x, and the LEC submodule it shares with mele-mcp. [THIRD_PARTY.md](../../THIRD_PARTY.md)
 lists what it builds with. From WSL, `-o` takes a Windows path.
 
