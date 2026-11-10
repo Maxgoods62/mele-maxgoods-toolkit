@@ -2,6 +2,8 @@
 #include "Common/Objects.hpp"
 
 #include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include <cwctype>
 #include <memory>
 #include <unordered_map>
@@ -135,6 +137,16 @@ namespace MeleBridge
             return found;
         }
 
+        /// Whether a class is base itself or derives from it: the SuperField chain, as FindFunction walks it.
+        bool DerivesFrom(UStruct const* cls, UStruct const* base)
+        {
+            for (UStruct const* s = cls; s != nullptr; s = static_cast<UStruct const*>(s->SuperField))
+            {
+                if (s == base) return true;
+            }
+            return false;
+        }
+
         // ! Export
         // ========================================
 
@@ -227,7 +239,8 @@ namespace MeleBridge
                     size_t used = 0;
                     auto const s = v.get<std::string>();
                     auto const d = std::stod(s, &used);
-                    if (used == s.size()) return d;
+                    // "nan", "inf" and "infinity" parse as numbers: no property takes them.
+                    if (used == s.size() && std::isfinite(d)) return d;
                 }
                 catch (std::exception const&)
                 {
@@ -271,11 +284,19 @@ namespace MeleBridge
             case Kind::StringRef:
             {
                 auto const d = ParseNumber(v);
-                if (d != static_cast<int>(d)) throw BridgeError("not an int: " + v.dump());
+                // The range first: a double outside int's range has no defined conversion to int.
+                if (d < -2147483648.0 || d > 2147483647.0 || d != static_cast<int>(d)) throw BridgeError("not an int: " + v.dump());
                 *reinterpret_cast<int*>(addr) = static_cast<int>(d);
                 return;
             }
-            case Kind::Float: *reinterpret_cast<float*>(addr) = static_cast<float>(ParseNumber(v)); return;
+            case Kind::Float:
+            {
+                auto const d = ParseNumber(v);
+                // A JSON number can be a finite double and still too big for a float (1e39).
+                if (!std::isfinite(d) || std::fabs(d) > FLT_MAX) throw BridgeError("not a finite float: " + v.dump());
+                *reinterpret_cast<float*>(addr) = static_cast<float>(d);
+                return;
+            }
             case Kind::Name:
                 if (!v.is_string()) throw BridgeError("a name is a string: " + v.dump());
                 *reinterpret_cast<SFXName*>(addr) = SFXName(ToWide(v.get<std::string>()).c_str(), 0, true);
@@ -297,6 +318,15 @@ namespace MeleBridge
                 auto const required = static_cast<UObjectProperty const*>(p)->PropertyClass;
                 if (required != nullptr && !object->IsA(required))
                     throw BridgeError(v.get<std::string>() + " is a " + ToUtf8(NameOf(object->Class)) + ", not a " + ToUtf8(NameOf(required)));
+                // class<X>: PropertyClass is Class itself, which every class is. The value must be X or a subclass of it, or
+                // script would use an object of another class through X's layout.
+                if (p->IsA(UClassProperty::StaticClass()))
+                {
+                    if (!object->IsA(UClass::StaticClass())) throw BridgeError(v.get<std::string>() + " is not a class");
+                    auto const meta = static_cast<UClassProperty const*>(p)->MetaClass;
+                    if (meta != nullptr && !DerivesFrom(static_cast<UClass const*>(object), meta))
+                        throw BridgeError(v.get<std::string>() + " is not " + ToUtf8(NameOf(meta)) + " or a subclass of it");
+                }
                 slot = object;
                 return;
             }
@@ -371,7 +401,12 @@ namespace MeleBridge
                 if (auto const bracket = segment.find(L'['); bracket != std::wstring::npos)
                 {
                     if (segment.back() != L']') throw BridgeError("bad index in '" + ToUtf8(segment) + "'");
-                    index = std::stoi(segment.substr(bracket + 1, segment.size() - bracket - 2));
+                    auto const digits = segment.substr(bracket + 1, segment.size() - bracket - 2);
+                    // Digits only: std::stoi alone took "1x" and "1][2" as 1, and a negative index read as no index at all
+                    // (the whole array).
+                    if (digits.empty() || digits.size() > 9 || !std::all_of(digits.begin(), digits.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }))
+                        throw BridgeError("bad index in '" + ToUtf8(segment) + "': a whole number from 0 goes between the brackets");
+                    index = std::stoi(digits);
                     segment.resize(bracket);
                 }
 

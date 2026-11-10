@@ -28,13 +28,16 @@ namespace MeleBridge
             return it == request.end() || it->is_null() ? fallback : it->get<T>();
         }
 
+        /// The loaded class of this name, compared whole and without case, over every object: the find op's substring
+        /// search with a limit missed a class whose name many other class names contain, such as Light.
         UClass* ClassNamed(std::wstring const& name)
         {
-            size_t total = 0;
-            auto const found = FindObjects(L"Class", name, L"", true, 50, total);
-            for (auto const& f : found)
+            auto& objects = *UObject::GObjObjects;
+            for (UINT i = 0; i < objects.Count(); i++)
             {
-                if (_wcsicmp(NameOf(f.Object).c_str(), name.c_str()) == 0) return static_cast<UClass*>(f.Object);
+                auto const object = objects.GetData()[i];
+                if (object != nullptr && object->IsA(UClass::StaticClass()) && _wcsicmp(NameOf(object).c_str(), name.c_str()) == 0)
+                    return static_cast<UClass*>(object);
             }
             throw BridgeError("no class named " + ToUtf8(name) + " is loaded");
         }

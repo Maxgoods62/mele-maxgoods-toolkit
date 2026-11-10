@@ -119,7 +119,7 @@ Set-up and settings:
 - `.mcp.json.example`: an example entry that registers the server with an MCP client.
 - `package.sh` builds the release zip `dist/mele-mcp-v<version>-win-x64.zip`, with its license texts and no Oodle.
 
-MeleBridge 5, pipe protocol 1:
+MeleBridge 6, pipe protocol 1:
 
 - `MeleBridge.asi` serves `\\.\pipe\MeleBridge_LE1`: one JSON request per line, with the ops `ping`, `console`,
   `find`, `get`, `set`, `call`, `describe`, `subscribe`, `editor`, `status` and `keep_ticking`.
@@ -136,6 +136,10 @@ MeleBridge 5, pipe protocol 1:
   `loadingMovie: null` comes from its 5 s cache; says in `subscribe`'s `skipped` what the stream leaves out; and
   watches functions declared in a state. mele-mcp sends an `id` with each request, skips replies with another one,
   waits 4 s past the timeout, and names the answered and never-sent requests when one of several fails.
+- MeleBridge 6 refuses what it used to take: a class that is not the `class<X>` property's X or a subclass of it, a
+  float that is not finite or does not fit, and an index that is not a whole number from 0 (`[-1]` read as the whole
+  array, `[1x]` as `[1]`). `describe` finds a class by its exact name whatever else is loaded. A fault while it reads
+  a watched call ends the watch (a last `dropped` line with an `error`) instead of the game.
 - `build.sh` builds in its own LExASIs checkout (default `%LOCALAPPDATA%\mele-asi-build\MeleBridge\LExASIs`), stages
   in `dist/` (`MELE_STAGE`), finds Visual Studio 18 with vswhere and the game in the registry, and runs one build of a
   checkout at a time.

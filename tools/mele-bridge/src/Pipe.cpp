@@ -7,6 +7,8 @@
 // after its timeout gets {"ok":false,"running":true} (RunOnGameThread). A client that subscribes gets no more replies: the
 // connection streams one event line per watched call, plus a heartbeat line every 2 s when nothing happens, until the client
 // closes it. The stream leaves out calls made while a request runs and the in-game editor's own calls (docs/formats.md §3.6).
+// The bridge ends a watch itself when it faults while reading a watched call: one last {"dropped":0,"error":...} line, then
+// it closes the connection (EndWatches in GameThread.cpp).
 namespace MeleBridge
 {
     namespace
@@ -28,17 +30,22 @@ namespace MeleBridge
             {
                 std::deque<std::string> lines;
                 size_t dropped = 0;
+                bool closed = false;
                 {
                     std::unique_lock lock{ sub.Lock };
                     sub.Ready.wait_for(lock, std::chrono::milliseconds(500), [&] { return !sub.Lines.empty(); });
                     lines.swap(sub.Lines);
                     std::swap(dropped, sub.Dropped);
+                    // Read with the lines: the game thread sets it under this lock, after its last line (EndWatches).
+                    closed = sub.Closed.load(std::memory_order_relaxed);
                 }
                 if (dropped > 0 && !WriteLine(pipe, json{ { "dropped", dropped } }.dump())) return;
                 for (auto& line : lines)
                 {
                     if (!WriteLine(pipe, std::move(line))) return;
                 }
+                // The game thread ended the watch: its last line is written, and closing the connection tells the client.
+                if (closed) return;
                 if (!lines.empty()) quiet = std::chrono::steady_clock::now();
                 else if (std::chrono::steady_clock::now() - quiet > std::chrono::seconds(2))
                 {
