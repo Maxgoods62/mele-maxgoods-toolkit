@@ -16,8 +16,8 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 91 tools:
 - Packages, read only: `pkg_info`, `pkg_search`, `pkg_find_name`, `pkg_to_text` (properties as text LEC compiles
   back, with a `roundTrip` check), `export_get`, `export_refs`, `export_decompile`, `export_diff`.
 - Packages, write: `export_set`, `export_set_batch`, `export_clone`, `export_import`, `export_rename`, `level_new`.
-  Every write tool backs the file up first and refuses files inside the Legendary Edition folder. Files other than
-  packages are written beside the target, then moved over it.
+  Every write tool backs the file up first and refuses files inside the Legendary Edition folder. Every file, a
+  package too, is written beside the target, then moved over it.
 - Strings, conversations and lip sync: `tlk_get`, `tlk_set`, `conv_read`, `conv_find`, `conv_set_ids`,
   `conv_add_node`, `conv_link`, `conv_audio` (lines without a voice), `facefx_get`, `facefx_copy_lines`.
 - Kismet: `kismet_read` (a sequence in flow order, with the Kismet Logger's trace), `kismet_add`, `kismet_link`.

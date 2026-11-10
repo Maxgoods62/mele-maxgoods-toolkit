@@ -9,9 +9,9 @@ Start with [mele-mcp](../mele-mcp/README.md): its package tools make backups and
 when a build script needs a package with no server running, as `mele-galaxy-map-normandy` does. Use it also for quick dumps,
 and for jobs mele-mcp has no tool for.
 
-lectool makes no backups. It refuses to write, delete or save a file inside the game install (the same check as
-mele-mcp's), and refuses an output that is also one of its inputs. Build into your mod's folder and install with
-ME3Tweaks Mod Manager (M3).
+lectool makes no backups. It writes a package beside the file, then moves it over it, so a save that fails leaves the
+old file. It refuses to write, delete or save a file inside the game install (the same check as mele-mcp's), and refuses
+an output that is also one of its inputs. Build into your mod's folder and install with ME3Tweaks Mod Manager (M3).
 
 ## Build
 
@@ -50,7 +50,7 @@ no game check and follows your package. Per-game status is in [games.md](../../d
 
 | Command | Games | What it does |
 |---|---|---|
-| `compileclass <outPcc> <packageName> <Class.uc>... [--pkg=<name> <Class.uc>...] [--unforce=<name>] [--no-referencer]` | LE1 | Replaces `<outPcc>` with a new package, the classes under a `Package` export. A class takes its file's name. |
+| `compileclass <outPcc> <packageName> <Class.uc>... [--pkg=<name> <Class.uc>...] [--unforce=<name>] [--no-referencer]` | LE1 | Replaces `<outPcc>` with a new package, the classes under a `Package` export. A class takes its file's name. A compile that fails leaves no `<outPcc>`. |
 | `addactor <levelPcc> <package> <class>` | Written for LE1 | Adds one actor of a script class at the level's origin, in place. `<package>` must be an AutoLoad package, which the game loads at startup. |
 
 `--pkg` starts another `Package` export for the `.uc` files after it. `--unforce` clears `ForcedExport` on one package,
@@ -62,7 +62,7 @@ which keeps an AutoLoad package's classes loaded.
 | Command | Games | What it does |
 |---|---|---|
 | `portmesh <srcPcc> <srcUIndex> <pcc> <newName>` | Any | Ports a `StaticMesh` with its materials, textures and local shaders to the top level of an existing package. It exits 0 even after printing `BROKEN material`. |
-| `portfx <srcPcc> <srcUIndex> <pcc> <newName>` | Any; source of any game | Ports any export, such as a `ParticleSystem`, with what it uses to the top level of an existing package. An object the target game can't load, such as an LE3 material that only LE3's `SFXGame.pcc` holds, is first copied from the source game's file that holds it. Exits 1 on a broken material or an import the target game can't load. Shaders port between LE1 and LE3 only. |
+| `portfx <srcPcc> <srcUIndex> <pcc> <newName>` | Any; source of any game | Ports any export, such as a `ParticleSystem`, with what it uses to the top level of an existing package. An object the target game can't load, such as an LE3 material that only LE3's `SFXGame.pcc` holds, is first copied from the source game's file that holds it. Exits 1, with `<pcc>` unchanged, on a broken material or an import the target game can't load. Shaders port between LE1 and LE3 only. |
 | `addtexture <pcc> <name> <png> [--argb]` | Any | Adds a new top-level UI `Texture2D` from a PNG, as DXT5 with one mip. `--argb` stores it uncompressed, since DXT5 bands dark colours. |
 | `cubeshrink <pcc> <cubePath> <size> <DXT1\|DXT5>` | Any | Makes the six faces of a `TextureCube` smaller, in place: each face's top mip halved with a box filter down to `<size>`, then stored in the package in the new format with a full mip chain. DXT1 faces are made opaque. Reads the package back and checks every face. |
 | `forcepackage <pcc> <package> [--move-out <path>]...` | Any | Marks a top-level `Package` export and everything under it `ForcedExport`, as the game's levels store shared art: its objects load under their own path, so the game uses its copy already in memory and a texture override (`.m3to`) matches them. `--move-out` first moves an export and its children to the top level, not forced. Run it after `portmesh` and `portfx`, which clear the flag. |

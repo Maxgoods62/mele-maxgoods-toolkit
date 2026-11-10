@@ -6,8 +6,9 @@ using LegendaryExplorerCore.Packages;
 namespace MeleMcp.Core;
 
 /// <summary>
-/// The only way tools modify packages: open, refuse game-install files, back up, mutate, save. src/BannedSymbols.txt keeps LEC's
-/// package Save and CreateAndSavePackage to this class.
+/// The only way tools modify packages: open, refuse game-install files, back up, mutate, save. A package is written beside its
+/// file, then moved over it (<see cref="AtomicFile"/>), so the file is always the old package or the new one.
+/// src/BannedSymbols.txt keeps LEC's package Save and CreateAndSavePackage to this class.
 /// </summary>
 public static class PackageWriter
 {
@@ -26,29 +27,13 @@ public static class PackageWriter
         // "Error saving <path>:", then "<exception type>: <message>", then stack traces: the first two lines say it all.
         throw new PackageSaveException(string.Join(" ", lecMessage.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(2)));
 
-    /// <summary>Runs one save, and turns LEC's failure (<see cref="SaveFailed"/>) into one that names the file and its backup.</summary>
-    private static void Saving(string target, string? backup, Action save)
-    {
-        try
-        {
-            save();
-        }
-        catch (PackageSaveException e)
-        {
-            // LEC writes into the file itself: a write that stopped half way leaves it cut short.
-            var kept = backup is null ? "No backup was taken." : $"Its backup from before this change is {backup}.";
-            throw new PackageSaveException($"{target} was not saved and may be damaged. {kept} {e.Message}", e);
-        }
-    }
-
-    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place packages are saved.")]
     public static (T Result, string BackupPath) Edit<T>(MEGame game, string fileOrPath, Func<IMEPackage, T> mutate)
     {
         using var pcc = PackageInspector.Open(game, fileOrPath);
         EnsureWritable(pcc.Game, pcc.FilePath);
         var result = mutate(pcc);
         var backup = Backup(pcc.FilePath);
-        Saving(pcc.FilePath, backup, () => pcc.Save());
+        WriteBeside(pcc, pcc.FilePath, backup);
         return (result, backup);
     }
 
@@ -57,17 +42,17 @@ public static class PackageWriter
     /// <paramref name="backup"/> is false (a file the tool made new, or one any build makes again), then saves. Returns the backup.
     /// </summary>
     /// <param name="path">Where to save; by default the package's own file. A level created in memory has none and passes its path.</param>
-    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place packages are saved.")]
     public static string? Save(IMEPackage pcc, bool backup = true, string? path = null)
     {
+        // As LEC's own Save: a package made in memory has no file of its own.
+        if (path is null && (pcc.IsMemoryPackage || pcc.FilePath is null))
+        {
+            throw new InvalidOperationException("A package made in memory is saved with its path.");
+        }
         var target = path ?? pcc.FilePath;
         EnsureWritable(pcc.Game, target);
         var copy = backup && File.Exists(target) ? Backup(target) : null;
-        Saving(target, copy, () =>
-        {
-            if (path is null) pcc.Save();
-            else pcc.Save(path);
-        });
+        WriteBeside(pcc, target, copy);
         return copy;
     }
 
@@ -76,8 +61,47 @@ public static class PackageWriter
     public static void Create(string path, MEGame game)
     {
         EnsureWritable(game, path);
-        Saving(path, null, () => MEPackageHandler.CreateAndSavePackage(path, game));
+        try
+        {
+            // LEC writes the temporary file: the empty package does not depend on its path. A failure LEC reports throws (SaveFailed).
+            AtomicFile.Write(path, temporary => MEPackageHandler.CreateAndSavePackage(temporary, game));
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            throw new PackageSaveException($"{path} was not created. {Reason(e)}", e);
+        }
     }
+
+    /// <summary>
+    /// Writes the package to <paramref name="target"/>. An LE package is serialized in memory exactly as LEC's own Save does it
+    /// (compressed), written to a file beside the target, and that file is moved over the target: a crash, a full disk or a file
+    /// another program holds open leaves the target as it was (ForkBuilder writes its forks the same way). LEC's Save has checks of
+    /// its own for the older games (ME1's texture files, UDK), which no tool here works on: their packages keep its in-place save.
+    /// </summary>
+    [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place packages are saved.")]
+    private static void WriteBeside(IMEPackage pcc, string target, string? backup)
+    {
+        var beside = pcc.Game.IsLEGame();
+        try
+        {
+            if (!beside)
+            {
+                pcc.Save(target);
+                return;
+            }
+            using var bytes = pcc.SaveToStream(compress: true);
+            AtomicFile.Write(target, temporary => LegendaryExplorerCore.Helpers.StreamHelpers.WriteToFile(bytes, temporary));
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            var state = beside ? "is as it was" : "may be damaged";
+            var kept = backup is null ? "" : $" Its backup from before this change is {backup}.";
+            throw new PackageSaveException($"{target} was not saved and {state}.{kept} {Reason(e)}", e);
+        }
+    }
+
+    /// <summary>What went wrong, for the message: LEC's own report (SaveFailed) as it is, anything else with its type.</summary>
+    private static string Reason(Exception e) => e is PackageSaveException ? e.Message : $"{e.GetType().Name}: {e.Message}";
 
     /// <summary>
     /// The game install is a deploy target, never an edit target: a file name can resolve to the base game or to another

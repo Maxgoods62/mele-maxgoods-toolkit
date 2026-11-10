@@ -143,4 +143,25 @@ public class LectoolTests
         Assert.Contains("PackageSaveException", output);
         CollectionAssert.AreEqual(before, File.ReadAllBytes(level));
     }
+
+    /// <summary>
+    /// A save that works, start to finish: tlkpackage creates the package, saves it and reads it back, and leaves nothing else in
+    /// the folder. The real game folder, because LEC needs the game's Oodle DLL to compress; the output is under Temp.
+    /// </summary>
+    [TestMethod]
+    public void TlkPackage_WritesThePackage_AndLeavesNoTemporaryFile()
+    {
+        var le = TestSetup.RequireGame();
+        var dir = Path.Combine(work, "tlk-ok");
+        Directory.CreateDirectory(dir);
+        var tsv = Path.Combine(dir, "INT.tsv");
+        File.WriteAllText(tsv, "74210001\tHello\n");
+        var package = Path.Combine(dir, "DLC_MOD_T_GlobalTlk.pcc");
+
+        var (exit, output) = RunIn(le, "tlkpackage", package, tsv);
+
+        Assert.AreEqual(0, exit, output);
+        Assert.Contains("1 strings", output);
+        CollectionAssert.AreEquivalent(new[] { tsv, package }, Directory.GetFiles(dir));
+    }
 }

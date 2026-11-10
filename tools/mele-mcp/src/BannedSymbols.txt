@@ -17,6 +17,7 @@ M:LegendaryExplorerCore.Unreal.CNDFile.ToFile(System.String);Use ConditionalFile
 # Package saves: PackageWriter refuses a path in the game install and backs the old file up first.
 T:LegendaryExplorerCore.Packages.PackageSaver;Save packages with PackageWriter.Save: it refuses game-install paths and backs the file up
 M:LegendaryExplorerCore.Packages.MEPackageHandler.CreateAndSavePackage(System.String,LegendaryExplorerCore.Packages.MEGame);Use PackageWriter.Create: it refuses game-install paths
+M:LegendaryExplorerCore.Packages.MEPackageHandler.CreateEmptyLevel(System.String,LegendaryExplorerCore.Packages.MEGame);Use LevelCreator.Create: it refuses game-install paths and writes beside the file, then moves it
 
 # LEC's file list: one cache per game for the whole process. GamePaths keys it by the folders' signature instead of refreshes by hand.
 M:LegendaryExplorerCore.GameFilesystem.MELoadedFiles.GetFilesLoadedInGame(LegendaryExplorerCore.Packages.MEGame,System.Boolean,System.Boolean,System.Boolean,System.String,System.Boolean,System.String[],System.Boolean);Use GamePaths.LoadedFiles: rescanned when the game's folders change
