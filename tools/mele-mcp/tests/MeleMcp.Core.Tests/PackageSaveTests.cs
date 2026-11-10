@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LegendaryExplorerCore.Packages;
 
 namespace MeleMcp.Core.Tests;
@@ -37,6 +38,7 @@ public class PackageSaveTests
         StringAssert.Contains(e.Message, file);
         StringAssert.Contains(e.Message, backup);
         CollectionAssert.AreEqual(before, File.ReadAllBytes(file));
+        CollectionAssert.AreEqual(new[] { file }, Directory.GetFiles(Path.GetDirectoryName(file)!), "a temporary file was left beside the package");
     }
 
     [TestMethod]
@@ -52,6 +54,7 @@ public class PackageSaveTests
         }
 
         CollectionAssert.AreEqual(before, File.ReadAllBytes(file));
+        CollectionAssert.AreEqual(new[] { file }, Directory.GetFiles(Path.GetDirectoryName(file)!), "a temporary file was left beside the package");
     }
 
     /// <summary>LEC does not create folders: Create returned normally and left no file.</summary>
@@ -65,5 +68,86 @@ public class PackageSaveTests
 
         StringAssert.Contains(e.Message, path);
         Assert.IsFalse(File.Exists(path));
+    }
+
+    /// <summary>
+    /// Written beside the file and moved, a package must be the file LEC's own Save writes, byte for byte. A plot package from
+    /// plot_map_new: two maps and a referencer, so there are exports to serialize and compress.
+    /// </summary>
+    [TestMethod]
+    public void Save_WritesTheBytesLecsOwnSaveWrites_AndLeavesNoTemporaryFile()
+    {
+        TestSetup.RequireGame();
+        var lecs = Path.Combine(TestSetup.NewFolder("save-bytes-lec"), "Same.pcc");
+        var ours = Path.Combine(TestSetup.NewFolder("save-bytes"), "Same.pcc");
+        PlotMaps.NewPackage(MEGame.LE1, lecs);
+        File.Copy(lecs, ours);
+
+        using (var pcc = MEPackageHandler.OpenMEPackage(lecs, forceLoadFromDisk: true))
+        {
+            for (var i = 0; i < 200; i++) pcc.FindNameOrAdd($"MeleSaveTest_{i}");
+            pcc.Save(); // LEC's own save, into the file: tests are outside the ban of src/BannedSymbols.txt
+        }
+        using (var pcc = MEPackageHandler.OpenMEPackage(ours, forceLoadFromDisk: true))
+        {
+            for (var i = 0; i < 200; i++) pcc.FindNameOrAdd($"MeleSaveTest_{i}");
+            PackageWriter.Save(pcc, backup: false);
+        }
+
+        CollectionAssert.AreEqual(File.ReadAllBytes(lecs), File.ReadAllBytes(ours));
+        CollectionAssert.AreEqual(new[] { ours }, Directory.GetFiles(Path.GetDirectoryName(ours)!));
+    }
+
+    [TestMethod]
+    public void Create_WritesTheBytesLecWrites_AndLeavesNoTemporaryFile()
+    {
+        TestSetup.RequireGame();
+        var lecs = Path.Combine(TestSetup.NewFolder("create-bytes-lec"), "New.pcc");
+        var ours = Path.Combine(TestSetup.NewFolder("create-bytes"), "New.pcc");
+        MEPackageHandler.CreateAndSavePackage(lecs, MEGame.LE1);
+
+        PackageWriter.Create(ours, MEGame.LE1);
+
+        CollectionAssert.AreEqual(File.ReadAllBytes(lecs), File.ReadAllBytes(ours));
+        CollectionAssert.AreEqual(new[] { ours }, Directory.GetFiles(Path.GetDirectoryName(ours)!));
+    }
+
+    /// <summary>level_new: the level is named after its file and opens. (Each level gets a new GUID, so its bytes are not compared.)</summary>
+    [TestMethod]
+    public void LevelNew_WritesALevelNamedAfterItsFile_AndLeavesNoTemporaryFile()
+    {
+        TestSetup.RequireGame();
+        var path = Path.Combine(TestSetup.NewFolder("level-new"), "BIOA_T00.pcc");
+
+        var made = LevelCreator.Create(MEGame.LE1, path);
+
+        Assert.AreEqual("BIOA_T00", made.LevelName);
+        Assert.IsGreaterThan(0, made.ExportCount);
+        CollectionAssert.AreEqual(new[] { path }, Directory.GetFiles(Path.GetDirectoryName(path)!));
+    }
+
+    /// <summary>
+    /// A hard link gives one file a second name. LEC wrote into the file, so saving a package through one name changed what the
+    /// other name holds: a link in a mod folder to a game file would let a save reach the game's file, and the write guard cannot
+    /// see such a link. Moved over the name, the new package replaces the link only.
+    /// </summary>
+    [TestMethod]
+    public void Save_OverAHardLink_ReplacesTheLink_AndLeavesTheOtherName()
+    {
+        var other = NewPackage("save-link", "Other.pcc");
+        var link = Path.Combine(Path.GetDirectoryName(other)!, "Link.pcc");
+        var mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /H \"{link}\" \"{other}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true });
+        mklink!.WaitForExit();
+        if (!File.Exists(link)) Assert.Inconclusive("mklink /H failed: no hard link to test with.");
+        var before = File.ReadAllBytes(other);
+
+        using (var pcc = MEPackageHandler.OpenMEPackage(link, forceLoadFromDisk: true))
+        {
+            pcc.FindNameOrAdd("MeleSaveTest");
+            PackageWriter.Save(pcc, backup: false);
+        }
+
+        CollectionAssert.AreEqual(before, File.ReadAllBytes(other));
+        CollectionAssert.AreNotEqual(before, File.ReadAllBytes(link));
     }
 }
