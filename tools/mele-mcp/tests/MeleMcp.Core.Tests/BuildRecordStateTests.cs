@@ -110,7 +110,7 @@ public class BuildRecordStateTests
         var second = Assert.Throws<PartialBuildException>(() => LevelBuilder.Build(MEGame.LE1, yaml, null));
         Assert.IsTrue(second.Written.Any(w => w.File == fork && w.Backup is null && w.Rebuilt), string.Join("; ", second.Written));
         StringAssert.Contains(second.Message, $"{fork} (rewritten; rebuilt from the vanilla file, no backup)");
-        Assert.IsFalse(second.Message.Contains($"{fork} (created)"), second.Message);
+        Assert.DoesNotContain($"{fork} (created)", second.Message, second.Message);
     }
 
     /// <summary>

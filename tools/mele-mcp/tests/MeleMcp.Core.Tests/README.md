@@ -5,10 +5,16 @@ Run from WSL, in `tools/mele-mcp`:
 ```bash
 scripts/test.sh                      # everything, about 30 s
 scripts/test.sh --filter WriteGuard  # one class
+scripts/test.sh --allow-skips        # on a machine without the game
 ```
 
 `test.sh` builds lectool first and points the lectool tests at it through `LECTOOL`. Plain `dotnet test` works too,
 but then the lectool tests are skipped. No CI runs these, so run them before a push.
+
+A test that needs the game, lectool or an admin share is skipped without it, and `dotnet test` still exits 0. So
+`test.sh` counts the tests that did not run, prints the reasons, and fails unless you pass `--allow-skips`. Its
+output keeps the toolkit's own build warnings and the NuGet audit warnings, and leaves out LegendaryExplorerCore's
+build warnings.
 
 ## What gets a test
 
@@ -35,7 +41,7 @@ game can't run here.
 ## Rules for new tests
 
 - Never commit a game file. A test that needs one opens it read-only from the install (`TestSetup.RequireGame()`), and
-  is skipped when there is no game.
+  is skipped when there is no game, which `test.sh` reports.
 - Never write into the install. Write under `TestSetup.Temp`. `MELE_BACKUP_DIR` and `MELE_LEVELS_JSON` point there too,
   so backups and `levels.json` stay out of your real folders.
 - Before you keep a new test, check that it fails on the bug it is for.
