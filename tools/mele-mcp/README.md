@@ -276,9 +276,11 @@ its other steps differ:
 | `mod_check` before the install | Yes, unless `check` is false | Skipped |
 | Commands after a map load | Sent once MeleBridge's status says the load ended, then `settleSeconds`. Without MeleBridge, after `settleSeconds` only: LEX Interop drops a command sent during a load and nothing says so | Sent once MeleBridge's status says the load ended, then `settleSeconds`. A command refused during a load goes again once |
 
-The game is booted only once the install is verified. A game that closes after the boot ends the cycle at once, with
-the phase it closed in. `game_cycle`, `game_close` and `mod_install` refuse, after 5 s, while another call runs one of
-them on the same game, from any session's server. Installs, boots and merge mod compiles through M3 also wait for each other.
+The game is booted only once the install is verified. A game that closes after the boot ends the cycle at once, with the
+phase it closed in. `game_cycle`, `game_close` and `mod_install` refuse, after 5 s, while another call runs one of them
+on the same game, from any session's server. Installs, boots and merge mod compiles through M3 also wait for each other.
+Cancelling `game_cycle` or `game_close` stops it at its next wait and frees the game: what it already did stays done,
+and an install M3 has started is waited out first.
 
 On LE1 a career save is not a slot, so it goes through `commands`:
 `nextframedefer loadgame <Career>_QuickSave DevId=-1`, with `waitForMap`. `game_plot` uses MeleBridge when it is there,

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -125,6 +126,24 @@ public class PipeStateTests
     public void ReplyWait_OutlastsTheBridgesRunningAnswer()
     {
         Assert.IsTrue(LiveBridge.ReplyWait(5) >= TimeSpan.FromSeconds(5 + 1.5 + 1), LiveBridge.ReplyWait(5).ToString());
+    }
+
+    /// <summary>
+    /// live_watch reads the pipe for as long as it was asked to. A read that runs out of time gives nothing, as before; a
+    /// cancelled call ends the read by throwing, so the watch stops instead of recording on.
+    /// </summary>
+    [TestMethod]
+    public void ReadLine_NothingInTime_IsNull_ButACancelledCallThrows()
+    {
+        var silent = new StreamReader(new FakeBridge((_, _) => []), Encoding.UTF8);
+        Assert.IsNull(LiveBridge.ReadLine(silent, Wait));
+
+        // A new reader: one is never used again after a read that was cut off.
+        var reader = new StreamReader(new FakeBridge((_, _) => []), Encoding.UTF8);
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        var clock = Stopwatch.StartNew();
+        Assert.Throws<OperationCanceledException>(() => LiveBridge.ReadLine(reader, TimeSpan.FromSeconds(3), cancel.Token));
+        Assert.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(2), $"waited {clock.Elapsed.TotalSeconds:0.0} s");
     }
 
     /// <summary>
