@@ -50,7 +50,8 @@ public static class LecHost
 
             // Console hosts have no SynchronizationContext, so the default scheduler stands in for LEX's UI scheduler.
             LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default,
-                packageSavingFailed: msg => Console.Error.WriteLine($"[LEC] package save failed: {msg}"),
+                // LEC's Save reports a failure here and returns as if it had saved: this callback throws.
+                packageSavingFailed: PackageWriter.SaveFailed,
                 objectDBsToLoad: [MEGame.LE1, MEGame.LE2, MEGame.LE3]);
 
             status = new LecStatus(

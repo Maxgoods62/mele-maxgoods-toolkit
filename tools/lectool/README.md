@@ -41,7 +41,7 @@ MELE_LE_DIR='<LE folder>' WSLENV="$WSLENV:MELE_LE_DIR" /mnt/c/tools/lectool/lect
 From WSL, name each variable you set in `WSLENV`, and pass paths as Windows paths (`wslpath -w`).
 
 There is no usage text. An unknown command, or a `--flag` that `buildsound` does not know, prints `ERROR` and exits 1,
-so a build script that is newer than your lectool fails. Commands with checks print `ERROR` lines and exit 1. A `uIndex` is an export's number, the first column of `pkglist`.
+so a build script that is newer than your lectool fails. Commands with checks print `ERROR` lines and exit 1. A package that cannot be saved (a file another program holds open, a full disk) ends the command with an unhandled `PackageSaveException` and a non-zero exit code. A `uIndex` is an export's number, the first column of `pkglist`.
 
 `LE1` below means the command writes an LE1 package or reads LE1 data, whatever `LECGAME` says. `Any` means the code has
 no game check and follows your package. Per-game status is in [games.md](../../docs/games.md).

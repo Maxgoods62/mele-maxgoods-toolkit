@@ -18,7 +18,8 @@ var gameArg = Environment.GetEnvironmentVariable("LECGAME") ?? "LE1";
 var game = Enum.Parse<MEGame>(gameArg);
 if (game == MEGame.LE2) LE2Directory.ReloadDefaultGamePath(); if (game == MEGame.LE3) LE3Directory.ReloadDefaultGamePath();
 // morphface and portfx read a file of another game, so they need that game's object database too.
-LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default, s => Console.Error.WriteLine(s), objectDBsToLoad: args[0] is "morphface" or "portfx" ? new[]{MEGame.LE1, MEGame.LE2, MEGame.LE3} : new[]{game});
+// LEC's Save reports a failure to this callback and returns as if it had saved: the callback throws, so the command ends there.
+LegendaryExplorerCoreLib.InitLib(TaskScheduler.Default, MeleMcp.Core.PackageWriter.SaveFailed, objectDBsToLoad: args[0] is "morphface" or "portfx" ? new[]{MEGame.LE1, MEGame.LE2, MEGame.LE3} : new[]{game});
 var cmd = args[0];
 // Every file lectool writes, deletes or saves in place goes through here: never one inside the game install (mele-mcp's
 // guard, which also sees junctions, shares and \\?\ spellings of that folder).
