@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using LegendaryExplorerCore.Packages;
 
 namespace MeleMcp.Core.Tests;
 
@@ -29,11 +30,14 @@ public class LectoolTests
         File.WriteAllText(gameFile, "vanilla");
     }
 
-    private static (int Exit, string Out) Run(params string[] args)
+    private static (int Exit, string Out) Run(params string[] args) => RunIn(fakeLe, args);
+
+    /// <summary>The same with another Legendary Edition folder: the real one, for a test that needs LEC to read or compress a package.</summary>
+    private static (int Exit, string Out) RunIn(string leDir, params string[] args)
     {
         var info = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var a in args) info.ArgumentList.Add(a);
-        info.Environment["MELE_LE_DIR"] = fakeLe;
+        info.Environment["MELE_LE_DIR"] = leDir;
         using var p = Process.Start(info)!;
         var output = p.StandardOutput.ReadToEndAsync();
         var err = p.StandardError.ReadToEndAsync();
@@ -116,5 +120,27 @@ public class LectoolTests
         File.WriteAllText(ids, "1\tHi\n");
         AssertError("the output is also an input", "tlkpackage", ids, tsv, "--ids-from", ids);
         Assert.AreEqual("1\tHi\n", File.ReadAllText(ids));
+    }
+
+    /// <summary>
+    /// LEC reports a failed save to a callback and returns: addactor printed its result line and exited 0 with the level unchanged.
+    /// The real game folder, because LEC needs the game's Oodle DLL to read the level; the level itself is under Temp.
+    /// </summary>
+    [TestMethod]
+    public void SaveThatFails_ExitsNonZero_AndLeavesTheFile()
+    {
+        var le = TestSetup.RequireGame();
+        var level = Path.Combine(work, "HeldLevel.pcc");
+        MEPackageHandler.CreateEmptyLevel(level, MEGame.LE1);
+        var before = File.ReadAllBytes(level);
+
+        int exit;
+        string output;
+        // Readers may open it, writers may not: the save fails when it opens the file to write.
+        using (new FileStream(level, FileMode.Open, FileAccess.Read, FileShare.Read)) (exit, output) = RunIn(le, "addactor", level, "Pkg", "Cls");
+
+        Assert.AreNotEqual(0, exit, output);
+        Assert.Contains("PackageSaveException", output);
+        CollectionAssert.AreEqual(before, File.ReadAllBytes(level));
     }
 }

@@ -17,6 +17,30 @@ public static class PackageWriter
     /// <summary>%LOCALAPPDATA%\mele-mcp\backups, when <see cref="BackupDirEnvVar"/> is not set.</summary>
     private static string DefaultBackupDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "mele-mcp", "backups");
 
+    /// <summary>
+    /// The callback LecHost and lectool give LEC's InitLib. LEC's Save catches every exception outside its DEBUG builds, passes a
+    /// message here and returns as if the package were saved. Thrown from here, the failure reaches the code that called Save: LEC
+    /// calls this on the saving thread, from its catch block.
+    /// </summary>
+    public static void SaveFailed(string lecMessage) =>
+        // "Error saving <path>:", then "<exception type>: <message>", then stack traces: the first two lines say it all.
+        throw new PackageSaveException(string.Join(" ", lecMessage.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(2)));
+
+    /// <summary>Runs one save, and turns LEC's failure (<see cref="SaveFailed"/>) into one that names the file and its backup.</summary>
+    private static void Saving(string target, string? backup, Action save)
+    {
+        try
+        {
+            save();
+        }
+        catch (PackageSaveException e)
+        {
+            // LEC writes into the file itself: a write that stopped half way leaves it cut short.
+            var kept = backup is null ? "No backup was taken." : $"Its backup from before this change is {backup}.";
+            throw new PackageSaveException($"{target} was not saved and may be damaged. {kept} {e.Message}", e);
+        }
+    }
+
     [SuppressMessage("ApiDesign", "RS0030", Justification = "The one place packages are saved.")]
     public static (T Result, string BackupPath) Edit<T>(MEGame game, string fileOrPath, Func<IMEPackage, T> mutate)
     {
@@ -24,7 +48,7 @@ public static class PackageWriter
         EnsureWritable(pcc.Game, pcc.FilePath);
         var result = mutate(pcc);
         var backup = Backup(pcc.FilePath);
-        pcc.Save();
+        Saving(pcc.FilePath, backup, () => pcc.Save());
         return (result, backup);
     }
 
@@ -39,8 +63,11 @@ public static class PackageWriter
         var target = path ?? pcc.FilePath;
         EnsureWritable(pcc.Game, target);
         var copy = backup && File.Exists(target) ? Backup(target) : null;
-        if (path is null) pcc.Save();
-        else pcc.Save(path);
+        Saving(target, copy, () =>
+        {
+            if (path is null) pcc.Save();
+            else pcc.Save(path);
+        });
         return copy;
     }
 
@@ -49,7 +76,7 @@ public static class PackageWriter
     public static void Create(string path, MEGame game)
     {
         EnsureWritable(game, path);
-        MEPackageHandler.CreateAndSavePackage(path, game);
+        Saving(path, null, () => MEPackageHandler.CreateAndSavePackage(path, game));
     }
 
     /// <summary>
@@ -98,3 +125,6 @@ public static class PackageWriter
         return target;
     }
 }
+
+/// <summary>A package that could not be saved or created. The message names the file and, when one was taken, its backup.</summary>
+public sealed class PackageSaveException(string message, Exception? inner = null) : IOException(message, inner);

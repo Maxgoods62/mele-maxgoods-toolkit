@@ -403,6 +403,9 @@ To test a second copy beside the one in use, set `MELE_OUT` to another Windows f
   `cnd_set` checks the tokens first, then decompiles the result and writes only on a match.
 - The publish holds LEC's plain `Release` build, although `MeleMcp.Core.csproj` asks for `WinRelease`. LEC's registry
   lookup is compiled out of that build, so `LecHost` reads the same keys itself.
+- LEC's package `Save` catches every exception outside its DEBUG builds, passes a message to the `packageSavingFailed`
+  callback of `InitLib`, and returns as if the file were saved. `LecHost` and lectool pass `PackageWriter.SaveFailed`,
+  which throws, so a failed save is a `PackageSaveException` that names the file and its backup.
 
 ## Build and startup gotchas
 
