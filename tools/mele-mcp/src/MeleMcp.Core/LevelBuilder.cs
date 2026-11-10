@@ -314,7 +314,7 @@ public static class LevelBuilder
             // Read once, and only when a found NPC light needs its template's values back.
             var templateLook = new Lazy<PropertyCollection?>(() => TemplateLook(game, pcc, spec.LightTemplate ?? DefaultLightTemplate));
             var builtNpcs = spec.Npcs.Select(npc => BuildNpc(game, pcc, level, spec, npc, cache, templateLook, poses, missing, notes)).ToList();
-            var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache)).ToList();
+            var builtUsables = spec.Usables.Select(u => BuildUsable(game, pcc, level, u, cache, notes)).ToList();
             var builtLights = spec.Lights.Select(l => BuildLight(game, pcc, level, spec, l, cache)).ToList();
             NoteOrphanLights(pcc, level, spec, notes);
             // Each prop is lit by prop lights or by its light environment, from the lights: entries (docs/design/in-game-editor.md §11).
@@ -346,6 +346,9 @@ public static class LevelBuilder
         // What describes the level right after it, before anything that may still fail: a GlobalTlk refused below leaves the
         // Sideloader config and levels.json describing the level on disk (MeleBridge measures NPC light offsets from its poses).
         var config = spec.Sideloader is { } prefixes ? EnsureSideloader(package, prefixes, Wrote, notes) : null;
+        // No 'sideloader' (any more): the .m3cd files are left as they are, since a mod may keep its line by hand. The build only
+        // says when the file it would have written for this level still lists it.
+        if (spec.Sideloader is null) NoteSideloaderLeft(package, notes);
         var levelsFile = describe ? WriteLevelsFile(package, spec, levels, poses, Wrote) : null;
 
         // A file with no vanilla entry left, or that left streaming.levels, streams under its own name again: its fork goes now that
@@ -555,7 +558,7 @@ public static class LevelBuilder
         return new BuiltNpc(npc.Name, ExportInspector.Row(pawn), action, changes);
     }
 
-    private static BuiltUsable BuildUsable(MEGame game, IMEPackage pcc, ExportEntry level, UsableSpec usable, PackageCache cache)
+    private static BuiltUsable BuildUsable(MEGame game, IMEPackage pcc, ExportEntry level, UsableSpec usable, PackageCache cache, List<string> notes)
     {
         var changes = new List<string>();
         var tag = usable.Tag ?? throw new ArgumentException($"line {usable.Line}: '{usable.Name}' needs a 'tag' (how the build finds it again).");
@@ -585,6 +588,11 @@ public static class LevelBuilder
         if (behaviorDirty) behavior.WriteProperties(behaviorProps);
 
         if (usable.GoTo is { } steps) LinkGoTo(pcc, actor, steps, usable.Line, cache, changes);
+        // No 'goTo' (any more): the chain an earlier build linked stops firing; its Kismet stays, unlinked.
+        else if (pcc.FindExport(MainSequence) is { } sequence && UnlinkGoTo(sequence, actor, changes))
+        {
+            notes.Add($"{usable.Name}: the file has no 'goTo', so using it no longer loads a map. Its Kismet stays in Main_Sequence, unlinked.");
+        }
         return new BuiltUsable(usable.Name, ExportInspector.Row(actor), action, changes);
     }
 
@@ -1058,6 +1066,22 @@ public static class LevelBuilder
 
     private static ExportEntry? NextOfGoTo(ExportEntry from, string output) =>
         KismetPrefabs.Next(from, output, CheckConditional) ?? KismetPrefabs.Next(from, output, AreaTransition);
+
+    /// <summary>
+    /// A usable whose YAML has no 'goTo' (any more): cuts use → plot check and use → area transition on its use event
+    /// (BioSeqEvt_ArtPlaceableUsed, Originator = the usable), the event <see cref="LinkGoTo"/> builds on and finds again. The checks
+    /// and transitions stay in Main_Sequence, unlinked, and any other Kismet on the event stays linked. An event nobody ever
+    /// linked has no outputs written: nothing to cut. Returns whether it cut a link.
+    /// </summary>
+    private static bool UnlinkGoTo(ExportEntry sequence, ExportEntry usable, List<string> changes)
+    {
+        var used = KismetHelper.GetSequenceObjects(sequence).OfType<ExportEntry>()
+            .FirstOrDefault(o => o.ClassName == "BioSeqEvt_ArtPlaceableUsed" && o.GetProperty<ObjectProperty>("Originator")?.Value == usable.UIndex);
+        if (used is null || !KismetHelper.GetOutputLinkNames(used).Contains("Out")) return false;
+        if (KismetPrefabs.Unlink(used, "Out", o => o.ClassName is CheckConditional or AreaTransition).Count == 0) return false;
+        changes.Add("Kismet: use → go to unlinked");
+        return true;
+    }
 
     private static string GoToText(GoToStep step, int count)
     {
@@ -1614,6 +1638,29 @@ public static class LevelBuilder
         wrote(path, null);
         notes.Add($"Wrote {Path.GetFileName(path)}: install the mod with M3 (it merges ConfigDelta files into Coalesced at install).");
         return path;
+    }
+
+    /// <summary>
+    /// A YAML with no 'sideloader' key: notes that ConfigDelta-&lt;level&gt;.m3cd, the file <see cref="EnsureSideloader"/> creates,
+    /// still tells LE1CP's Sideloader to load the level. Nothing is changed: without the key the .m3cd files are the mod's own (a
+    /// line kept by hand can carry fields the build does not write), and the build cannot tell its line from such a one. A line
+    /// in an .m3cd of another name is not reported. A file that cannot be read is not reported either: a note must not fail a
+    /// build whose level is already saved.
+    /// </summary>
+    private static void NoteSideloaderLeft(string package, List<string> notes)
+    {
+        var name = Path.GetFileNameWithoutExtension(package);
+        var config = Path.Combine(Path.GetDirectoryName(package)!, $"ConfigDelta-{name}.m3cd");
+        try
+        {
+            if (!File.Exists(config) || !File.ReadAllText(config).Contains($"LevelName=\"{name}\"", StringComparison.OrdinalIgnoreCase)) return;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+        notes.Add($"{Path.GetFileName(config)} still tells LE1CP's Sideloader to load {name}, and the file has no 'sideloader' key: the build leaves .m3cd files "
+                  + "as they are without it. Delete that file if the level should no longer be sideloaded, or put 'sideloader' back.");
     }
 
     /// <summary>

@@ -216,6 +216,10 @@ install. For a level `MyNPC_NOR10.pcc` with `sideloader: [BIOA_NOR10_07]`:
 
 Give a sideloaded level a name that does not start with `BIOA_`, so it never matches a Sideloader prefix itself.
 
+Without `sideloader`, the build changes no `.m3cd`. A line an earlier build wrote stays, and LE1CP still loads the level
+until you delete it. That is also how a mod keeps a line of its own, with a field the build does not write. When
+`ConfigDelta-<level>.m3cd` still names the level, the build says so in its notes.
+
 ### npcs
 
 | Key | Value | What |
@@ -285,6 +289,9 @@ goTo:
   - { if: conditional 812, map: BIOA_MYM02, startPoint: start_mym02 }
   - { map: BIOA_MYM01, startPoint: start_mym01 }
 ```
+
+Without `goTo`, the build unlinks the chain an earlier build made for the usable, so using it loads no map. Its Kismet
+stays in `Main_Sequence`, unlinked.
 
 ### props
 
