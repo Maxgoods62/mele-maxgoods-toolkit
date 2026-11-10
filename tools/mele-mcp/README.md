@@ -357,8 +357,8 @@ Run these scripts from WSL, inside the `tools/mele-mcp` folder. A variable in th
 
 | Script | What it does |
 |---|---|
-| `scripts/deploy.sh [package]` | Stops the servers of `MELE_OUT`, publishes there, then runs the smoke test on that package. |
-| `scripts/stop-server.ps1 -OutDir <folder> [-ListOnly]` | Stops the servers of one folder, and others keep running. `deploy.sh` runs it first. |
+| `scripts/deploy.sh [package]` | Builds the server. Only when that worked does it stop the servers of `MELE_OUT` and publish there. Then it runs the smoke test on that package. |
+| `scripts/stop-server.ps1 -OutDir <folder> [-ListOnly]` | Stops the servers of one folder, and others keep running. `deploy.sh` runs it after a good build. |
 | `scripts/mcp_call.py <tool> ['<json>']` | Calls one tool with a fresh server. It exits 1 on a tool error. |
 | `scripts/mcp_smoke.py [package]` | Runs `initialize`, `tools/list`, `le_status`, `pkg_info` on an LE1 package, `pkg_info` on a missing file and `pkg_info` without `game`, which must both fail. It also fails when a tool that takes `game` does not require it. |
 | `scripts/scenario.py` | Runs in-game test suites, LE1 only: see [docs/scenarios.md](../../docs/scenarios.md). |
@@ -380,10 +380,12 @@ package, `BIOA_CRD00.pcc` by default.
 
 1. Edit the code. A new tool is a `[McpServerTool]` method in a `[McpServerToolType]` class under `src/MeleMcp/Tools/`.
    A tool that works on a game takes `game` as its first parameter, with no default.
-2. Run `./scripts/deploy.sh`.
+2. Run `./scripts/deploy.sh`. A build error stops no server.
 3. In Claude Code, run `/mcp`, pick `mele` and reconnect, because the deploy stopped the old process.
 
 To test a second copy beside the one in use, set `MELE_OUT` to another Windows folder for `deploy.sh` and `mcp_call.py`.
+In a git worktree `deploy.sh` asks for it, because the default folder belongs to the main checkout. `deploy.sh` prints
+the commit it publishes, and the published `MeleMcp.dll` keeps it after the `+` of its product version.
 
 ## Known LEC traps
 

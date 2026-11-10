@@ -63,9 +63,10 @@ scripts/deploy.sh                 # or: scripts/deploy.sh <LE1 package>
 python3 -I scripts/mcp_call.py pkg_info '{"package":"BioP_Nor.pcc","game":"LE2"}'
 ```
 
-`deploy.sh` stops the servers of `MELE_OUT`, because Windows locks a loaded DLL. Its smoke test uses an LE1 package
-and fails when the server finds no LE1 folder, or when a tool that takes `game` does not require it. Reconnect your
-client afterwards (`/mcp` in Claude Code). `mcp_call.py` calls one tool on a fresh server.
+`deploy.sh` builds first. When the build worked it stops the servers of `MELE_OUT`, because Windows locks a loaded
+DLL; a build error stops nothing. Its smoke test uses an LE1 package and fails when the server finds no LE1 folder, or
+when a tool that takes `game` does not require it. Reconnect your client afterwards (`/mcp` in Claude Code).
+`mcp_call.py` calls one tool on a fresh server.
 
 `./package.sh` at the repo root (WSL) builds a zip in `dist/`. [THIRD_PARTY.md](../THIRD_PARTY.md) says what it holds.
 
@@ -91,7 +92,7 @@ All are optional environment variables. The scripts read the environment first, 
 | `MELE_OWN_DLC` | folders `levels.json` names | Comma-separated DLC folders that `catalog_index` leaves out. |
 | `MELE_DUMP_DIR` | `%LOCALAPPDATA%\mele-mcp\dumps` | Dump root. Refused inside the install. |
 | `MELE_DOTNET` | `dotnet.exe` on the PATH | Scripts: the Windows `dotnet.exe`, as a WSL path. |
-| `MELE_OUT` | `%LOCALAPPDATA%\mele-mcp\server` | Scripts: the publish folder, as a Windows path. |
+| `MELE_OUT` | `%LOCALAPPDATA%\mele-mcp\server` | Scripts: the publish folder, as a Windows path. In a git worktree `deploy.sh` has no default and asks for it. |
 | `MELE_DLL` | `<MELE_OUT>\MeleMcp.dll` | The server that `mcp_call.py`, `mcp_smoke.py` and `scenario.py` run. |
 | `MELE_SCENARIO_OUT` | `%LOCALAPPDATA%\mele-mcp\scenarios` | `scenario.py` report root, after `--out` and the first file's `out`. |
 | `MELE_VS` | `vswhere`, Visual Studio 18 | Bridge build: the Visual Studio folder, as a WSL path. |
