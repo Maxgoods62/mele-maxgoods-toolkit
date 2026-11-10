@@ -105,8 +105,9 @@ Set-up and settings:
   tracked `build.env.example`. A variable exported in the environment wins over the file.
 - mele-mcp finds the Legendary Edition folder in the registry when `MELE_LE_DIR` is unset: BioWare's `Install Dir`,
   then Steam's uninstall entry.
-- `scripts/deploy.sh` publishes to `MELE_OUT` (default `%LOCALAPPDATA%\mele-mcp\server`) and stops only the servers
-  that run that folder's `MeleMcp.dll`.
+- `scripts/deploy.sh` builds first, then publishes to `MELE_OUT` (default `%LOCALAPPDATA%\mele-mcp\server`; a git
+  worktree must name its own) and stops only the servers that run that folder's `MeleMcp.dll`. A build error stops
+  none.
 - Backups go to `%LOCALAPPDATA%\mele-mcp\backups` unless `MELE_BACKUP_DIR` says otherwise.
 - `MELE_OWN_DLC` names your mods' DLC folders, which `catalog_index` leaves out; unset, they come from `levels.json`.
 - A mod YAML may start with `requires: mele-mcp >= X.Y.Z`. `mod_build` checks every file first, and an older server
