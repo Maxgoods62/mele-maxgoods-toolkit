@@ -12,7 +12,7 @@ Placeholders: `<toolkit>` is your clone, `<you>` your Windows user, `<LE folder>
 | Windows x64 | everything | All of it runs on Windows. |
 | Mass Effect Legendary Edition | every tool | One folder holds all three: `Game\ME1`, `Game\ME2`, `Game\ME3`. |
 | .NET SDK 10.0.402 or a later 10.0.x | building | `global.json` pins it. LEC needs the SDK 10 compiler. |
-| .NET 8 runtime, x64 | running mele-mcp | The .NET 10 SDK does not include it. |
+| .NET 10 runtime, x64 | running mele-mcp | The .NET 10 SDK includes it. A PC that only runs a published build needs the runtime alone. |
 | ME3Tweaks Mod Manager (M3) | `mod_install`, `game_cycle`, the ASI loader, its mod library | Start it once, so the server finds it through `HKCU\SOFTWARE\ME3Tweaks`. |
 | An MCP client that starts stdio servers | calling the tools | The examples use Claude Code. |
 | LE1 Community Patch (LE1CP) | LE1 only: its Sideloader, `level_build`'s default NPC light, the example's pawn | M3 merges the Sideloader config at install. |
@@ -143,7 +143,7 @@ Then try a read-only call: `pkg_info` with `game` set to `LE1` and `package` to 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/mcp` shows `mele` as failed | wrong command path, or no .NET 8 runtime | Run `MeleMcp.exe --selftest` and read the error. From WSL: `python3 -I tools/mele-mcp/scripts/mcp_call.py le_status '{}'`. |
+| `/mcp` shows `mele` as failed | wrong command path, or no .NET 10 runtime | Run `MeleMcp.exe --selftest` and read the error. From WSL: `python3 -I tools/mele-mcp/scripts/mcp_call.py le_status '{}'`. |
 | `legendaryEditionDirFrom` is null | no registry entry leads to `Game\ME1` | Set `MELE_LE_DIR`. On WSL, name it in `WSLENV`. |
 | Publish fails on a locked file | a running server holds `MeleMcp.dll` | Stop it: `powershell -ExecutionPolicy Bypass -File tools\mele-mcp\scripts\stop-server.ps1 -OutDir "$env:LOCALAPPDATA\mele-mcp\server"`. |
 
