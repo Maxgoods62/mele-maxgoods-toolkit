@@ -92,7 +92,7 @@ mele-mcp, an MCP server on LegendaryExplorerCore 6.5, with 91 tools:
   output that is also an input, and exits 1 on an unknown command or an unknown `buildsound` flag.
 - Tests: `tools/mele-mcp/scripts/test.sh` runs `tests/MeleMcp.Core.Tests` (MSTest) and `scenario.py --selftest`. They
   cover the write guard, lectool's exit codes and guard, and the bugs below. Tests that read game files skip without
-  the game. No CI: run it before a push.
+  the game, and `test.sh` then fails unless `--allow-skips` is given. No CI: run it before a push.
 - Fixed before release: `mod_check` took a sibling folder whose name starts with the mod's (`DLC_MOD_XB` for
   `DLC_MOD_X`) for the mod itself, and missed its id clashes. `conv_build`'s lip-sync copy replaced an existing line of
   the new strref, voiced or not. `mergemod_build` gave two exports' arrays of the same name one shared `.uc` file.
