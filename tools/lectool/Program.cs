@@ -35,6 +35,10 @@ void NotAnInput(string outPath, params string[] inputs) {
       Console.WriteLine($"ERROR {outPath}: the output is also an input"); Environment.Exit(1);
     }
 }
+// Every package lectool saves or creates goes through mele-mcp's PackageWriter: written beside the file, then moved over it,
+// so a save that fails or is cut short leaves the file as it was. No backup: lectool makes none.
+void SavePackage(IMEPackage pkg, string path = null) => MeleMcp.Core.PackageWriter.Save(pkg, backup: false, path: path);
+void NewPackage(string path, MEGame g) => MeleMcp.Core.PackageWriter.Create(path, g);
 if (cmd == "ogg") {
   var dllDir = Environment.GetEnvironmentVariable("EXTRADLLDIR"); if (dllDir != null) SetDllDirectoryW(dllDir);
   var h = System.Runtime.InteropServices.NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, "ISACTTools.dll"));
@@ -73,7 +77,7 @@ if (cmd == "2da") {
   var inv = System.Globalization.CultureInfo.InvariantCulture;
   var errors = new List<string>();
   var parts = new List<string>();
-  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  NewPackage(outPath, MEGame.LE1);
   var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   try {
     var tablesSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -126,7 +130,7 @@ if (cmd == "2da") {
       parts.Add(exp.InstancedFullPath);
     }
     if (parts.Count == 0 && errors.Count == 0) errors.Add("the recipe has no tables");
-    if (errors.Count == 0) pkg.Save();
+    if (errors.Count == 0) SavePackage(pkg);
   } catch {
     pkg.Dispose(); File.Delete(outPath);
     throw;
@@ -202,7 +206,7 @@ if (cmd == "2da") {
   }
   if (errors.Count == 0 && merged.All(m => m.parts.Count == 0)) Fail("the manifest merged no table");
   if (errors.Count > 0) Environment.Exit(1);
-  basePkg.Save(outPath);
+  SavePackage(basePkg, outPath);
   using var outPkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   foreach (var (_, ifp, before, parts) in merged) {
     var after = new Bio2DA(outPkg.FindExport(ifp));
@@ -286,7 +290,7 @@ if (cmd == "2da") {
   }
   if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
   var lTypeUIndex = lType.UIndex;
-  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  NewPackage(outPath, MEGame.LE1);
   var pcc = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   ExportEntry type = null;
   try {
@@ -358,7 +362,7 @@ if (cmd == "2da") {
     referencer.ObjectFlags = LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForClient | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForServer | LegendaryExplorerCore.Unreal.UnrealFlags.EObjectFlags.LoadForEdit;
     referencer.WriteProperty(new ArrayProperty<ObjectProperty>(new[] { new ObjectProperty(referencer), new ObjectProperty(type) }, "ReferencedObjects"));
     if (errors.Count == 0) {
-      pcc.Save();
+      SavePackage(pcc);
       Console.WriteLine($"{Path.GetFileName(outPath)}: exports {pcc.ExportCount}, imports {pcc.ImportCount}{(moved.Count > 0 ? $"; moved under {recipe.look.moveUnder}: {string.Join(", ", moved)}" : "")}");
       foreach (var x in pcc.Exports.Where(e => e.Parent == null)) Console.WriteLine($"top\t{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{(x.IsForcedExport ? "forced" : "not forced")}\t{x.GetAllDescendants().Count} below");
       foreach (var p in type.GetProperties()) Console.WriteLine($"{type.ObjectName.Instanced}\t{p.Name.Instanced}\t{PropText(p, pcc)}");
@@ -521,7 +525,7 @@ if (cmd == "2da") {
     dLook.Params.WriteTo(over, false, Texture, errors);
     if (mic != null) dLook.Params.WriteTo(mic, true, Texture, errors);
     if (errors.Count > 0) { Stop(); return; }
-    pcc.Save();
+    SavePackage(pcc);
     Console.WriteLine($"{Path.GetFileName(path)}: {face.InstancedFullPath} now looks like {donor.ObjectName.Instanced}: {moved} of {dLook.Lods[0].Length} LOD0 verts off the base head, {skel.Count} bones, {dLook.Params.Colors.Count} colors, {dLook.Params.Scalars.Count} scalars, {dLook.Params.Textures.Count} texture(s){(mic != null ? ", the same on " + mic.ObjectName.Instanced : "")}");
   }
   using var saved = MEPackageHandler.OpenMEPackage(path, forceLoadFromDisk: true);
@@ -592,7 +596,7 @@ if (cmd == "2da") {
   foreach (var dup in refEntries.Where(e => e != null).GroupBy(e => e.ObjectName.Instanced, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
     errors.Add($"the movie references two objects named {dup.Key}: their top-level copies would share a path");
   if (errors.Count > 0) { foreach (var e in errors) Console.WriteLine("ERROR " + e); Environment.Exit(1); }
-  MEPackageHandler.CreateAndSavePackage(outPath, game);
+  NewPackage(outPath, game);
   var pcc = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   try {
     using var cache = new PackageCache();
@@ -677,7 +681,7 @@ if (cmd == "2da") {
     if (rawPath != null) mProps.AddOrReplaceProp(new ImmutableByteArrayProperty(raw, "RawData"));
     copy.WriteProperties(mProps);
     if (errors.Count == 0) {
-      pcc.Save();
+      SavePackage(pcc);
       string Sha1(byte[] b) => Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(b)).ToLowerInvariant();
       Console.WriteLine($"{Path.GetFileName(outPath)}: movie {copy.InstancedFullPath}, RawData {raw.Length} bytes, sha1 {Sha1(raw)}"
                         + (rawPath != null ? $" (from {Path.GetFileName(rawPath)}; the source's sha1 {Sha1(srcRaw)})" : "")
@@ -782,7 +786,7 @@ if (cmd == "2da") {
   NotAnInput(outPath, donorPath);
   using var donor = MEPackageHandler.OpenMEPackage(donorPath);
   var cue = donor.Exports.Single(x => x.ClassName == "SoundCue" && x.ObjectName.Instanced == donorCue);
-  if (!File.Exists(outPath)) MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  if (!File.Exists(outPath)) NewPackage(outPath, MEGame.LE1);
   using var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   var report = LegendaryExplorerCore.Packages.CloningImportingAndRelinking.EntryExporter.ExportExportToPackage(cue, pkg, out var ported, null, null);
   foreach (var r in report) Console.WriteLine("relink: " + r);
@@ -834,7 +838,7 @@ if (cmd == "2da") {
     w.WriteProperty(new FloatProperty((float)seconds, "Duration"));
     Console.WriteLine($"wave {w.InstancedFullPath}: raw={bin.RawData.Length} ogg={ogg.Length} ms={sinf.TimeLength} bytes={sinf.ByteLength} ch={channels}");
   }
-  pkg.Save();
+  SavePackage(pkg);
   foreach (var prop in newCue.GetProperties()) Console.WriteLine($"cue prop {prop.Name.Instanced} = {(prop is FloatProperty f ? f.Value.ToString() : prop is ObjectProperty o ? o.Value.ToString() : prop is NameProperty n ? n.Value.Instanced : prop.GetType().Name)}");
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
@@ -855,7 +859,7 @@ if (cmd == "2da") {
   var shaders = LegendaryExplorerCore.Shaders.ShaderCacheManipulator.GetLocalShadersForMaterials(srcMats, null);
   Console.WriteLine($"materials {srcMats.Count}: {string.Join(", ", srcMats.Select(m => m.InstancedFullPath))}; local shader maps {shaders?.MaterialShaderMaps.Count ?? 0}, shaders {shaders?.Shaders.Count ?? 0}");
   if (shaders != null) LegendaryExplorerCore.Shaders.ShaderCacheManipulator.AddShadersToFile(pkg, shaders);
-  pkg.Save();
+  SavePackage(pkg);
   foreach (var b in LegendaryExplorerCore.Shaders.ShaderCacheManipulator.GetBrokenMaterials(pkg, null)) Console.WriteLine("BROKEN material " + b);
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
@@ -901,12 +905,13 @@ if (cmd == "2da") {
   var unloadable = pkg.Imports.Where(i => !importsBefore.Contains(i.InstancedFullPath) && !Loadable(i)).ToList();
   foreach (var i in unloadable) Console.WriteLine($"ERROR import {i.InstancedFullPath}: {pkg.Game} can't load it");
   if (unloadable.Count > 0) Environment.Exit(1);
-  pkg.Save();
+  // Checked before the save: a port that fails leaves the package as it was.
   var broken = LegendaryExplorerCore.Shaders.ShaderCacheManipulator.GetBrokenMaterials(pkg, null).ToList();
   foreach (var b in broken) Console.WriteLine("ERROR broken material " + b);
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
   if (broken.Count > 0) Environment.Exit(1);
+  SavePackage(pkg);
 } else if (cmd == "addtexture") {
   // addtexture <pcc> <name> <png> [--argb]: a new top-level texture in an existing package, made from a PNG: DXT5 (with
   // --argb uncompressed, as the vanilla UI gradients are: DXT5 bands dark colours), one mip, not sRGB, TEXTUREGROUP_UI,
@@ -933,7 +938,7 @@ if (cmd == "2da") {
   tp.AddOrReplaceProp(new IntProperty(h, "OriginalSizeY"));
   if (argb) tp.AddOrReplaceProp(new BoolProperty(true, "CompressionNone"));
   tex.WriteProperties(tp);
-  pkg.Save();
+  SavePackage(pkg);
   Console.WriteLine($"{tex.UIndex}\t{tex.InstancedFullPath}\t{w}x{h}\t{tex.DataSize} bytes");
 } else if (cmd == "tlkpackage") {
   // tlkpackage <outPcc> <strings.tsv> [--ids-from <other.tsv>]: one language of a mod's GlobalTlk, in the layout of
@@ -955,7 +960,7 @@ if (cmd == "2da") {
   var outPath = Writable(args[1]);
   NotAnInput(outPath, idsFrom ? new[] { args[2], args[4] } : new[] { args[2] });
   if (File.Exists(outPath)) File.Delete(outPath);
-  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  NewPackage(outPath, MEGame.LE1);
   string[] tlkNames = { "GlobalTlk_tlk", "GlobalTlk_tlk_M" };
   using (var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true)) {
     foreach (var name in tlkNames) {
@@ -967,7 +972,7 @@ if (cmd == "2da") {
       huffman.LoadInputData(strings.Select(s => new LegendaryExplorerCore.TLK.TLKStringRef(s.Key, s.Value)).ToList());
       huffman.SerializeTalkfileToExport(exp);
     }
-    pkg.Save();
+    SavePackage(pkg);
   }
   using (var back = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true)) {
     foreach (var name in tlkNames) {
@@ -1044,7 +1049,7 @@ if (cmd == "2da") {
       faces[i].WriteProperties(p);
       Console.WriteLine($"{faces[i].UIndex}\t{faceProps[i]}\t{faces[i].InstancedFullPath}\t{before} -> {faces[i].DataSize} bytes");
     }
-    pkg.Save();
+    SavePackage(pkg);
   }
   using (var back = MEPackageHandler.OpenMEPackage(pkgPath, forceLoadFromDisk: true)) {
     var cube = back.FindExport(args[2]);
@@ -1087,7 +1092,7 @@ if (cmd == "2da") {
       foreach (var d in e.GetAllDescendants().OfType<ExportEntry>().Append(e)) d.ExportFlags &= ~forced;
     }
     foreach (var d in top.GetAllDescendants().OfType<ExportEntry>().Append(top)) d.ExportFlags |= forced;
-    pkg.Save();
+    SavePackage(pkg);
   }
   using (var back = MEPackageHandler.OpenMEPackage(pkgPath, forceLoadFromDisk: true)) {
     var top = back.FindExport(args[2]);
@@ -1142,7 +1147,7 @@ if (cmd == "2da") {
   var outPath = Writable(args[1]);
   NotAnInput(outPath, args.Skip(3).Where(a => !a.StartsWith("--")).ToArray());
   if (File.Exists(outPath)) File.Delete(outPath);
-  MEPackageHandler.CreateAndSavePackage(outPath, MEGame.LE1);
+  NewPackage(outPath, MEGame.LE1);
   using var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   var looseByPackage = new List<LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.LooseClassPackage>();
   var unforce = new List<string>();
@@ -1159,7 +1164,8 @@ if (cmd == "2da") {
   var usop = new LegendaryExplorerCore.UnrealScript.UnrealScriptOptionsPackage { Cache = cache };
   var log = LegendaryExplorerCore.UnrealScript.UnrealScriptCompiler.CompileLooseClasses(pkg, looseByPackage, usop);
   foreach (var m in log.Content) Console.WriteLine("log: " + m);
-  if (log.HasErrors) { Console.WriteLine("COMPILE FAILED"); Environment.Exit(1); }
+  // The output was deleted and made new above: a failed compile must not leave the empty package where a good one was.
+  if (log.HasErrors) { Console.WriteLine("COMPILE FAILED"); pkg.Dispose(); File.Delete(outPath); Environment.Exit(1); }
   foreach (var name in unforce) {
     var p = pkg.Exports.SingleOrDefault(x => x.ClassName == "Package" && x.Parent == null && x.ObjectName.Instanced == name)
       ?? throw new Exception($"--unforce: no top-level Package export {name}");
@@ -1172,7 +1178,7 @@ if (cmd == "2da") {
     foreach (var c in pkg.Exports.Where(x => x.ClassName == "Class")) refs.Add(new ObjectProperty(c));
     referencer.WriteProperty(refs);
   }
-  pkg.Save();
+  SavePackage(pkg);
   foreach (var x in pkg.Exports) Console.WriteLine($"{x.UIndex}\t{x.ClassName}\t{x.InstancedFullPath}\t{x.DataSize}");
   foreach (var i in pkg.Imports) Console.WriteLine($"import {i.UIndex}\t{i.ClassName}\t{i.InstancedFullPath}");
 } else if (cmd == "addactor") {
@@ -1204,7 +1210,7 @@ if (cmd == "2da") {
   var level = ObjectBinary.From<Level>(levelExp);
   level.Actors.Add(actor.UIndex);
   levelExp.WriteBinary(level);
-  pcc.Save();
+  SavePackage(pcc);
   Console.WriteLine($"{actor.UIndex}\t{actor.InstancedFullPath}\tclass={clsImp.InstancedFullPath}\tactors={level.Actors.Count}");
 } else if (cmd == "bankdump") {
   // bankdump <pcc> <waveNameFilter>: every ICB and ISB chunk of the matching waves with all fields (data chunks by size)
