@@ -34,14 +34,14 @@ MELE_LE_DIR='<LE folder>' WSLENV="$WSLENV:MELE_LE_DIR" /mnt/c/tools/lectool/lect
 | Variable | Used by | Meaning |
 |---|---|---|
 | `MELE_LE_DIR` | all | Legendary Edition folder, as a Windows path. Without it, LEC looks in the registry. |
-| `LECGAME` | all | `LE1`, `LE2` or `LE3`, default `LE1`. Picks the object database: set it to your package's game. |
+| `LECGAME` | all | `LE1`, `LE2` or `LE3`, default `LE1`. Picks the object database: set it to your package's game. Any other value is an error. |
 | `WEMDIR`, `WEMIDS` | `wwise` | An existing folder, and the comma-separated IDs of the files to write there as `.wem`. |
 | `EXTRADLLDIR` | `ogg` | A folder to add to the DLL search path. |
 
 From WSL, name each variable you set in `WSLENV`, and pass paths as Windows paths (`wslpath -w`).
 
-There is no usage text. An unknown command, or a `--flag` that `buildsound` does not know, prints `ERROR` and exits 1,
-so a build script that is newer than your lectool fails. Commands with checks print `ERROR` lines and exit 1. A package that cannot be saved (a file another program holds open, a full disk) ends the command with an unhandled `PackageSaveException` and a non-zero exit code. A `uIndex` is an export's number, the first column of `pkglist`.
+There is no help command. An unknown command, a `--flag` that `buildsound` does not know, or a wrong number of arguments for `2dapart`, `2damerge`, `actortype`, `addactor`, `portmesh`, `texpng` or `ogg` prints `ERROR` and exits 1, so a build script that is newer than your lectool fails.
+Commands with checks print `ERROR` lines and exit 1. A package that cannot be saved (a file another program holds open, a full disk) ends the command with an unhandled `PackageSaveException` and a non-zero exit code. A `uIndex` is an export's number, the first column of `pkglist`.
 
 `LE1` below means the command writes an LE1 package or reads LE1 data, whatever `LECGAME` says. `Any` means the code has
 no game check and follows your package. Per-game status is in [games.md](../../docs/games.md).
@@ -61,11 +61,11 @@ which keeps an AutoLoad package's classes loaded.
 
 | Command | Games | What it does |
 |---|---|---|
-| `portmesh <srcPcc> <srcUIndex> <pcc> <newName>` | Any | Ports a `StaticMesh` with its materials, textures and local shaders to the top level of an existing package. It exits 0 even after printing `BROKEN material`. |
-| `portfx <srcPcc> <srcUIndex> <pcc> <newName>` | Any; source of any game | Ports any export, such as a `ParticleSystem`, with what it uses to the top level of an existing package. An object the target game can't load, such as an LE3 material that only LE3's `SFXGame.pcc` holds, is first copied from the source game's file that holds it. Exits 1, with `<pcc>` unchanged, on a broken material or an import the target game can't load. Shaders port between LE1 and LE3 only. |
+| `portmesh <srcPcc> <srcUIndex> <pcc> <newName>` | Any | Ports a `StaticMesh` with its materials, textures and local shaders to the top level of an existing package. It exits 1, before saving, when LEC's porter reports something it could not link (`ERROR relink:`). It exits 0 even after printing `BROKEN material`. |
+| `portfx <srcPcc> <srcUIndex> <pcc> <newName>` | Any; source of any game | Ports any export, such as a `ParticleSystem`, with what it uses to the top level of an existing package. An object the target game can't load, such as an LE3 material that only LE3's `SFXGame.pcc` holds, is first copied from the source game's file that holds it. Exits 1, with `<pcc>` unchanged, on a relink error, a broken material or an import the target game can't load. Shaders port between LE1 and LE3 only. |
 | `addtexture <pcc> <name> <png> [--argb]` | Any | Adds a new top-level UI `Texture2D` from a PNG, as DXT5 with one mip. `--argb` stores it uncompressed, since DXT5 bands dark colours. |
 | `cubeshrink <pcc> <cubePath> <size> <DXT1\|DXT5>` | Any | Makes the six faces of a `TextureCube` smaller, in place: each face's top mip halved with a box filter down to `<size>`, then stored in the package in the new format with a full mip chain. DXT1 faces are made opaque. Reads the package back and checks every face. |
-| `forcepackage <pcc> <package> [--move-out <path>]...` | Any | Marks a top-level `Package` export and everything under it `ForcedExport`, as the game's levels store shared art: its objects load under their own path, so the game uses its copy already in memory and a texture override (`.m3to`) matches them. `--move-out` first moves an export and its children to the top level, not forced. Run it after `portmesh` and `portfx`, which clear the flag. |
+| `forcepackage <pcc> <package> [--move-out <path>]...` | Any | Marks a top-level `Package` export and everything under it `ForcedExport`, as the game's levels store shared art: its objects load under their own path, so the game uses its copy already in memory and a texture override (`.m3to`) matches them. `--move-out` first moves an export and its children to the top level, not forced. Run it after `portmesh`, `portfx` and `buildsound`, which clear the flag on every export of the file. |
 | `morphface <donor.pcc> <donorFace> <pcc> <face> [--mic <path>] [--sha1 <hex>]` | Any; donor of any game | Gives a `BioMorphFace` the donor's look, in place: LOD0 and LOD1 vertices, bones, and material values. It prints the look's SHA-1. |
 | `gfxpackage <src.pcc> <movie> <out.pcc> [--raw-data <file>] [--copy-textures] [--add-texture <name> <like>]... [--texture <name> <png\|#RRGGBB>]...` | `LECGAME` | Replaces `<out.pcc>` with a package holding a top-level copy of a `GFxMovieInfo` (a Scaleform UI movie), so `PanelResource="<out file name>.<movie name>"` opens it. |
 | `swf <pcc> <outDir> [movie]` | Any | Writes each movie's `RawData` as `<name>.gfx` into an existing folder. With a movie path, only that one. |
@@ -150,13 +150,13 @@ ISACT is LE1's sound system. LE2 and LE3 use Wwise.
 
 | Command | Games | What it does |
 |---|---|---|
-| `buildsound <donorPcc> <donorCueName> <ogg> <samplesPerChannel> <channels> <rate> <outPcc> <newCueName> <wavTitle> [volume] [--loop] [--unique-wave]` | LE1 | Copies a donor `SoundCue` to the top level of `<outPcc>`, created if missing, and puts the Ogg in its waves. |
+| `buildsound <donorPcc> <donorCueName> <ogg> <samplesPerChannel> <channels> <rate> <outPcc> <newCueName> <wavTitle> [volume] [--loop] [--unique-wave]` | LE1 | Copies a donor `SoundCue` to the top level of `<outPcc>`, created if missing, and puts the Ogg in its waves. It exits 1, before saving, on a relink error. |
 | `wwise <pcc> <bankUIndex> [eventId]...` | LE2, LE3 | Prints a bank's contents and follows each event, a signed 32-bit number, to its sounds. |
 | `snd <pcc> <filter...>` | LE1 | Prints the main ISACT chunks of waves whose names hold a filter. |
 | `bankdump <pcc> <waveNameFilter>` | LE1 | Prints every ISACT chunk of the matching waves. |
 | `eventflags <pcc>...` | LE1 | Prints each wave's event and track flags. |
 | `dumpwave <pcc> <outdir> <nameFilter...>` | LE1 | Writes `<name>.raw` and `<name>.data<i>.bin` into an existing folder. |
-| `ogg <wav> <out>` | Any | Calls `CreateIPSOgg` in the `ISACTTools.dll` that the build copies from LEC. It prints the byte count, and writes `<out>` only when that count is above 0. |
+| `ogg <wav> <out>` | Any | Calls `CreateIPSOgg` in the `ISACTTools.dll` that the build copies from LEC. It prints the byte count. When that count is 0 or less it writes nothing and exits 1. |
 
 For `buildsound`, the argument after `<wavTitle>` is always read as the volume, so give one before either flag.
 `<wavTitle>` must be present, but the code does not read it. `--loop` adds a looping node. `--unique-wave` puts the new

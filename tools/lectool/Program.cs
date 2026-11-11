@@ -17,6 +17,8 @@ var leDir = Environment.GetEnvironmentVariable("MELE_LE_DIR");
 if (!string.IsNullOrWhiteSpace(leDir)) LegendaryExplorerCoreLibSettings.Instance.LEDirectory = leDir;
 LE1Directory.ReloadDefaultGamePath();
 var gameArg = Environment.GetEnvironmentVariable("LECGAME") ?? "LE1";
+// Only the three LE games: Enum.Parse also takes ME1, UDK or a number, and a package made for one of those is no LE package.
+if (gameArg is not ("LE1" or "LE2" or "LE3")) { Console.WriteLine($"ERROR LECGAME={gameArg}: use LE1, LE2 or LE3"); Environment.Exit(1); }
 var game = Enum.Parse<MEGame>(gameArg);
 if (game == MEGame.LE2) LE2Directory.ReloadDefaultGamePath(); if (game == MEGame.LE3) LE3Directory.ReloadDefaultGamePath();
 // morphface and portfx read a file of another game, so they need that game's object database too.
@@ -41,7 +43,21 @@ void NotAnInput(string outPath, params string[] inputs) {
 // so a save that fails or is cut short leaves the file as it was. No backup: lectool makes none.
 void SavePackage(IMEPackage pkg, string path = null) => MeleMcp.Core.PackageWriter.Save(pkg, backup: false, path: path);
 void NewPackage(string path, MEGame g) => MeleMcp.Core.PackageWriter.Create(path, g);
+// What LEC's porter reports: each line is something the ported object lost or could not link (an import no file holds, a
+// class it cannot find, a property it could not relink), except its note that a port from another game dropped
+// properties the target game does not have. An error line stops the command before it saves.
+int relinkErrors = 0;
+void Relink(IEnumerable<LegendaryExplorerCore.Misc.EntryStringPair> report) {
+  foreach (var r in report) {
+    if (r.Message.Contains("Some properties were removed from this object because they do not exist in")) Console.WriteLine("relink note: " + r.Message);
+    else { Console.WriteLine("ERROR relink: " + r.Message); relinkErrors++; }
+  }
+}
 if (cmd == "ogg") {
+  // ogg <wav> <out>: the wav as an Ogg, through CreateIPSOgg of LEC's ISACTTools.dll
+  if (args.Length != 3) { Console.WriteLine("ERROR usage: ogg <wav> <out>"); Environment.Exit(1); }
+  var oggPath = Writable(args[2]);
+  NotAnInput(oggPath, args[1]);
   var dllDir = Environment.GetEnvironmentVariable("EXTRADLLDIR"); if (dllDir != null) SetDllDirectoryW(dllDir);
   var h = System.Runtime.InteropServices.NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, "ISACTTools.dll"));
   var fp = System.Runtime.InteropServices.NativeLibrary.GetExport(h, "CreateIPSOgg");
@@ -49,7 +65,9 @@ if (cmd == "ogg") {
   var wav = File.ReadAllBytes(args[1]); var outb = new byte[wav.Length];
   int r = fn(wav, (uint)wav.Length, outb, (uint)outb.Length, 0.8f);
   Console.WriteLine($"CreateIPSOgg -> {r} bytes from {wav.Length} wav bytes");
-  if (r > 0) File.WriteAllBytes(Writable(args[2]), outb.Take(r).ToArray());
+  // No Ogg: the build must stop here, not go on with an <out> an earlier run left.
+  if (r <= 0) { Console.WriteLine($"ERROR CreateIPSOgg made no Ogg from {Path.GetFileName(args[1])}: nothing written"); Environment.Exit(1); }
+  File.WriteAllBytes(oggPath, outb.Take(r).ToArray());
   return;
 }
 if (cmd == "2da") {
@@ -69,6 +87,7 @@ if (cmd == "2da") {
   // cells by column name, typed like the copied cell, else like most of the column's cells; `~` empties a cell. A table
   // stored without cell indexes has every cell filled, so an empty cell in its rows is an error: written that way, the
   // cells after it would shift left. Prints the tables as read back from out.pcc.
+  if (args.Length != 4) { Console.WriteLine("ERROR usage: 2dapart <src.pcc> <recipe.yaml> <out.pcc>"); Environment.Exit(1); }
   var outPath = Writable(args[3]);
   NotAnInput(outPath, args[1], args[2]);
   if (File.Exists(outPath)) File.Delete(outPath);
@@ -165,6 +184,7 @@ if (cmd == "2da") {
     "BIOG_2DA_UNC_TreasureTables_X.pcc", "BIOG_2DA_UNC_UI_X.pcc" };    // Bio2DAMerge.Mergable2DAFiles
   bool addOnly = args.Contains("--add-only");
   var a = args.Where(x => x != "--add-only").ToArray();
+  if (a.Length != 5 || a.Skip(1).Any(x => x.StartsWith("--"))) { Console.WriteLine("ERROR usage: 2damerge [--add-only] <m3da> <modDir> <base.pcc> <out.pcc>"); Environment.Exit(1); }
   var manifest = Newtonsoft.Json.JsonConvert.DeserializeObject<List<M3DAEntry>>(File.ReadAllText(a[1])) ?? new();
   var (modDir, basePath, outPath) = (a[2], a[3], Writable(a[4]));
   NotAnInput(outPath, a[1], basePath);
@@ -253,10 +273,9 @@ if (cmd == "2da") {
   // so they share no path with the look package's own copies; an import under them is an error, as it could no longer
   // be found. `set` gives plain values, typed by the class. An ObjectReferencer lists the actor type, as in LE1CP's
   // rebuilt henchman packages. No shader cache is copied: pkgcheck tells whether the game's RefShaderCache covers it.
+  if (args.Length != 5) { Console.WriteLine("ERROR usage: actortype <recipe.yaml> <template.pcc> <look.pcc> <out.pcc>"); Environment.Exit(1); }
   var (templatePath, lookPath, outPath) = (args[2], args[3], Writable(args[4]));
-  if (new[] { args[1], templatePath, lookPath }.Any(p => Path.GetFullPath(p).Equals(Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase))) {
-    Console.WriteLine($"ERROR {outPath}: the output is also an input"); Environment.Exit(1);
-  }
+  NotAnInput(outPath, args[1], templatePath, lookPath);
   if (File.Exists(outPath)) File.Delete(outPath);
   ActorTypeRecipe recipe;
   try { recipe = new YamlDotNet.Serialization.DeserializerBuilder().WithDuplicateKeyChecking().Build().Deserialize<ActorTypeRecipe>(File.ReadAllText(args[1])); }
@@ -791,10 +810,13 @@ if (cmd == "2da") {
   NotAnInput(outPath, donorPath);
   using var donor = MEPackageHandler.OpenMEPackage(donorPath);
   var cue = donor.Exports.Single(x => x.ClassName == "SoundCue" && x.ObjectName.Instanced == donorCue);
-  if (!File.Exists(outPath)) NewPackage(outPath, MEGame.LE1);
+  var madeNew = !File.Exists(outPath);
+  if (madeNew) NewPackage(outPath, MEGame.LE1);
   using var pkg = MEPackageHandler.OpenMEPackage(outPath, forceLoadFromDisk: true);
   var report = LegendaryExplorerCore.Packages.CloningImportingAndRelinking.EntryExporter.ExportExportToPackage(cue, pkg, out var ported, null, null);
-  foreach (var r in report) Console.WriteLine("relink: " + r);
+  Relink(report);
+  // Nothing is saved yet: a package this run made new goes again, an existing one stays as it was.
+  if (relinkErrors > 0) { if (madeNew) { pkg.Dispose(); File.Delete(outPath); } Environment.Exit(1); }
   var newCue = (ExportEntry)ported;
   newCue.ObjectName = NameReference.FromInstancedString(newName);
   newCue.Parent = null; // top level: <package>.<newName>, not under the donor's "snd_gui" group
@@ -850,11 +872,13 @@ if (cmd == "2da") {
 } else if (cmd == "portmesh") {
   // portmesh <srcPcc> <srcUIndex> <pcc> <newName>: ports a StaticMesh with its materials, textures and the
   // materials' local shaders to the top level of an existing package
+  if (args.Length != 5) { Console.WriteLine("ERROR usage: portmesh <srcPcc> <srcUIndex> <pcc> <newName>"); Environment.Exit(1); }
   using var src = MEPackageHandler.OpenMEPackage(args[1]);
   var mesh = src.GetUExport(int.Parse(args[2]));
   using var pkg = MEPackageHandler.OpenMEPackage(Writable(args[3]), forceLoadFromDisk: true);
   var report = LegendaryExplorerCore.Packages.CloningImportingAndRelinking.EntryExporter.ExportExportToPackage(mesh, pkg, out var ported, null, null);
-  foreach (var r in report) Console.WriteLine("relink: " + r);
+  Relink(report);
+  if (relinkErrors > 0) Environment.Exit(1);
   var newMesh = (ExportEntry)ported;
   newMesh.ObjectName = NameReference.FromInstancedString(args[4]);
   newMesh.Parent = null;
@@ -892,11 +916,12 @@ if (cmd == "2da") {
     var imp = src.Imports.FirstOrDefault(i => i.InstancedFullPath == path);
     var dep = imp == null ? null : EntryImporter.ResolveImport(imp, cache);
     if (dep == null) { Console.WriteLine($"ERROR {path}: {pkg.Game} can't load it, and no {src.Game} file holds it"); Environment.Exit(1); }
-    foreach (var r in EntryExporter.ExportExportToPackage(dep, pkg, out _, cache, null)) Console.WriteLine("relink: " + r);
+    Relink(EntryExporter.ExportExportToPackage(dep, pkg, out _, cache, null));
     Console.WriteLine($"copied {path} from {Path.GetFileName(dep.FileRef.FilePath)}");
   }
   var fxReport = EntryExporter.ExportExportToPackage(root, pkg, out var portedFx, cache, null);
-  foreach (var r in fxReport) Console.WriteLine("relink: " + r);
+  Relink(fxReport);
+  if (relinkErrors > 0) Environment.Exit(1);
   var newFx = (ExportEntry)portedFx;
   newFx.ObjectName = NameReference.FromInstancedString(args[4]);
   newFx.Parent = null;
@@ -1004,10 +1029,13 @@ if (cmd == "2da") {
   }
 } else if (cmd == "texpng") {
   // texpng <pcc> <uIndex|path> <out.png>: a Texture2D's top mip as PNG
+  if (args.Length != 4) { Console.WriteLine("ERROR usage: texpng <pcc> <uIndex|path> <out.png>"); Environment.Exit(1); }
+  var pngPath = Writable(args[3]);
+  NotAnInput(pngPath, args[1]);
   using var pcc = MEPackageHandler.OpenMEPackage(args[1]);
   var tex = int.TryParse(args[2], out var ui) ? pcc.GetUExport(ui) : pcc.FindExport(args[2]);
   if (tex is not { ClassName: "Texture2D" }) { Console.WriteLine($"ERROR {args[2]}: not a Texture2D export of {Path.GetFileName(args[1])}"); Environment.Exit(1); }
-  Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(tex).ExportToPNG(Writable(args[3])));
+  Console.WriteLine(new LegendaryExplorerCore.Unreal.Classes.Texture2D(tex).ExportToPNG(pngPath));
 } else if (cmd == "cubeshrink") {
   // cubeshrink <pcc> <cubePath> <size> <DXT1|DXT5>: makes the six faces of a TextureCube smaller, in place. Each face's
   // top mip is halved with a 2x2 box filter down to <size> (what the cooker does when a LOD group cuts top mips), then
@@ -1189,6 +1217,7 @@ if (cmd == "2da") {
 } else if (cmd == "addactor") {
   // addactor <levelPcc> <package> <class>: places one actor of a script class at the origin of the level, with its class
   // defaults. The class is imported from <package>, which must already be in memory (an AutoLoad GlobalPackage).
+  if (args.Length != 4) { Console.WriteLine("ERROR usage: addactor <levelPcc> <package> <class>"); Environment.Exit(1); }
   using var pcc = MEPackageHandler.OpenMEPackage(Writable(args[1]), forceLoadFromDisk: true);
   var (pkgName, clsName) = (args[2], args[3]);
   ImportEntry Imp(IEntry parent, string name, string className, string packageFile) {
