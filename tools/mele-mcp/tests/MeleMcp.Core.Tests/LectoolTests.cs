@@ -30,14 +30,18 @@ public class LectoolTests
         File.WriteAllText(gameFile, "vanilla");
     }
 
-    private static (int Exit, string Out) Run(params string[] args) => RunIn(fakeLe, args);
+    private static (int Exit, string Out) Run(params string[] args) => Start(fakeLe, null, args);
 
     /// <summary>The same with another Legendary Edition folder: the real one, for a test that needs LEC to read or compress a package.</summary>
-    private static (int Exit, string Out) RunIn(string leDir, params string[] args)
+    private static (int Exit, string Out) RunIn(string leDir, params string[] args) => Start(leDir, null, args);
+
+    /// <summary>One lectool run. <paramref name="lecGame"/>: the LECGAME variable, or null to leave it unset.</summary>
+    private static (int Exit, string Out) Start(string leDir, string? lecGame, string[] args)
     {
         var info = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var a in args) info.ArgumentList.Add(a);
         info.Environment["MELE_LE_DIR"] = leDir;
+        if (lecGame is not null) info.Environment["LECGAME"] = lecGame;
         using var p = Process.Start(info)!;
         var output = p.StandardOutput.ReadToEndAsync();
         var err = p.StandardError.ReadToEndAsync();
@@ -84,8 +88,8 @@ public class LectoolTests
         var tsv = Path.Combine(work, "strings.tsv");
         File.WriteAllText(tsv, "1\tHello\n");
         string Missing(string name) => Path.Combine(work, name); // inputs that do not exist: the guard comes before they are read
-        // The commands whose guard runs before they open an input. The others (swf, coalesced, texpng, ogg, dumpwave,
-        // portmesh, addtexture, 2damerge) read an input first and need real game data to reach it.
+        // The commands whose guard runs before they open an input. The others (swf, coalesced, dumpwave, portmesh,
+        // addtexture, 2damerge) read an input first and need real game data to reach it.
         string[][] calls = [
             ["2dapart", Missing("src.pcc"), Missing("recipe.yaml"), gameFile],
             ["tlkpackage", gameFile, tsv],
@@ -97,6 +101,8 @@ public class LectoolTests
             ["buildsound", Missing("donor.pcc"), "cue", Missing("x.ogg"), "1", "1", "1", gameFile, "new", "title"],
             ["cubeshrink", gameFile, "Pkg.Cube", "256", "DXT1"],
             ["forcepackage", gameFile, "Pkg"],
+            ["texpng", Missing("src.pcc"), "1", gameFile],
+            ["ogg", Missing("a.wav"), gameFile],
         ];
         foreach (var call in calls)
         {
@@ -171,5 +177,67 @@ public class LectoolTests
         Assert.AreEqual(0, exit, output);
         Assert.Contains("1 strings", output);
         CollectionAssert.AreEquivalent(new[] { tsv, package }, Directory.GetFiles(dir));
+    }
+
+    /// <summary>
+    /// Seven commands that write did not count their arguments: an extra flag from a newer build script was ignored, and the
+    /// build passed without it (as --unique-wave once was). A missing argument was an unhandled exception with no usage line.
+    /// </summary>
+    [TestMethod]
+    public void WrongArgumentCount_ExitsOne_WithUsage()
+    {
+        string In(string name) => Path.Combine(work, name); // none of these exists: the count is checked before any file is opened
+        string[][] calls = [
+            ["2dapart", In("s.pcc"), In("r.yaml"), In("o.pcc"), "--new-flag"],
+            ["2damerge", In("m.m3da"), In("mod"), In("base.pcc"), In("o.pcc"), "--new-flag"],
+            ["2damerge", In("m.m3da"), In("mod"), In("base.pcc")],
+            ["actortype", In("r.yaml"), In("t.pcc"), In("l.pcc"), In("o.pcc"), "--new-flag"],
+            ["portmesh", In("s.pcc"), "1", In("o.pcc"), "Name", "--new-flag"],
+            ["portmesh", In("s.pcc"), "1"],
+            ["texpng", In("s.pcc"), "1", In("o.png"), "--new-flag"],
+            ["addactor", In("level.pcc"), "Pkg", "Cls", "--new-flag"],
+            ["ogg", In("a.wav"), In("o.ogg"), "--new-flag"],
+        ];
+        foreach (var call in calls) AssertError($"usage: {call[0]}", call);
+    }
+
+    /// <summary>
+    /// texpng and ogg had no such check. actortype compared the spellings Path.GetFullPath gives: with \\?\ before the path the
+    /// output got past it, and the command deleted its template.
+    /// </summary>
+    [TestMethod]
+    public void OutputThatIsAnInput_IsRefused_ByTexpngOggAndActortype()
+    {
+        var package = Path.Combine(work, "tex.pcc");
+        File.WriteAllText(package, "package");
+        AssertError("the output is also an input", "texpng", package, "1", package);
+        Assert.AreEqual("package", File.ReadAllText(package));
+
+        var wav = Path.Combine(work, "sound.wav");
+        File.WriteAllText(wav, "wav");
+        AssertError("the output is also an input", "ogg", wav, wav.ToUpperInvariant());
+        Assert.AreEqual("wav", File.ReadAllText(wav));
+
+        var template = Path.Combine(work, "template.pcc");
+        File.WriteAllText(template, "template");
+        AssertError("the output is also an input", "actortype", Path.Combine(work, "type.yaml"), template, Path.Combine(work, "look.pcc"), @"\\?\" + template);
+        Assert.IsTrue(File.Exists(template), "actortype deleted its template");
+        Assert.AreEqual("template", File.ReadAllText(template));
+    }
+
+    /// <summary>LECGAME took every MEGame name and any number; gfxpackage then made a package for that game.</summary>
+    [TestMethod]
+    public void LecGame_OtherThanTheThreeLeGames_ExitsOne()
+    {
+        foreach (var value in new[] { "ME1", "UDK", "3", "le1" })
+        {
+            var (exit, output) = Start(fakeLe, value, ["nosuchcommand", "x"]);
+            Assert.AreEqual(1, exit, output);
+            Assert.Contains($"ERROR LECGAME={value}", output);
+        }
+        // A good value still reaches the command.
+        var (ok, said) = Start(fakeLe, "LE2", ["nosuchcommand", "x"]);
+        Assert.AreEqual(1, ok, said);
+        Assert.Contains("ERROR unknown command", said);
     }
 }
