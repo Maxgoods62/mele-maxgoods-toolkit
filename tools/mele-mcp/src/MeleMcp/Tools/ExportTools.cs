@@ -78,7 +78,10 @@ public static class ExportTools
         [Description(PackageDescription)] string package,
         [Description(ExportDescription)] string export,
         [Description("Dot path to a leaf property, with [i] for array elements, e.g. VectorParameterValues[11].ParameterValue.G")] string propertyPath,
-        [Description("New value: number, True/False, name, string, $123 for a TLK string ref, #123 for an object reference (0 = None).")] string value)
+        [Description("New value: number, True/False, name, string, $123 for a TLK string ref, #123 for an object reference (0 = None). "
+                     + "An enum takes one of its value names, alone or as export_get prints it (EnumType.VALUE); a name the enum lacks is refused. "
+                     + "A string may come in the double quotes export_get prints: they are not stored. "
+                     + "A change's Note says when the value was changed on the way in or could not be checked.")] string value)
         => ToolErrors.Run(() => PropertyEditor.SetProperties(PackageTools.ParseGame(game), package, [new PropertyChange(export, propertyPath, value)]));
 
     [McpServerTool(Name = "export_set_batch", Destructive = true),
