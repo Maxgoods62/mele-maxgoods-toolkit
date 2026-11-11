@@ -60,7 +60,7 @@ public static partial class KismetLog
         }
     }
 
-    private static double Seconds(KismetStep s) => double.Parse(s.Time, CultureInfo.InvariantCulture);
+    private static double Seconds(KismetStep s) => NumberText.Double(s.Time);
 
     private static List<KismetStep> Parse(string path)
     {

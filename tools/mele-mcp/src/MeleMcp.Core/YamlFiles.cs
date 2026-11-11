@@ -330,10 +330,10 @@ internal static partial class YamlFiles
         bool.TryParse(Scalar(value), out var b) ? b : throw Fail(value, "expected true or false.");
 
     internal static float Float(YamlNode value) =>
-        float.TryParse(Scalar(value), NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0 ? f : throw Fail(value, "expected a positive number of seconds.");
+        NumberText.TryFloat(Scalar(value), out var f) && f > 0 ? f : throw Fail(value, "expected a positive number of seconds.");
 
     internal static float Number(YamlNode value) =>
-        float.TryParse(Scalar(value), NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : throw Fail(value, "expected a number.");
+        NumberText.TryFloat(Scalar(value), out var f) ? f : throw Fail(value, "expected a number.");
 
     /// <summary>A list of <paramref name="min"/> to <paramref name="max"/> numbers: [x, y, z], [r, g, b]...</summary>
     internal static float[] Numbers(YamlNode value, int min, int max)

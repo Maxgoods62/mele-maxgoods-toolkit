@@ -5,6 +5,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
+// First: numbers print the same on every Windows language (a French one writes 2.5 as "2,5"), in this code and in LEC's.
+NumberText.UseInvariantCulture();
+
 // `MeleMcp --selftest [package]` checks the LEC stack without an MCP client; everything else runs the stdio server.
 if (args.Length > 0 && args[0] == "--selftest")
 {

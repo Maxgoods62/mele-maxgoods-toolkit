@@ -1593,7 +1593,7 @@ public static class EditorImport
 
     /// <summary>A number of the YAML as a double: a float would turn 1257.1 into 1257.0999.</summary>
     private static double Number(YamlNode value) =>
-        double.TryParse(Scalar(value), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : throw Fail(value, "expected a number.");
+        NumberText.TryDouble(Scalar(value), out var d) ? d : throw Fail(value, "expected a number.");
 
     private static bool SameOffset(double[] a, double[] b) => a.Length == b.Length && a.Zip(b).All(p => Math.Abs(p.First - p.Second) <= OffsetNear + 1e-9);
 
@@ -1620,7 +1620,7 @@ public static class EditorImport
     private static JsonArray Doubles(double[] values) => new(values.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray());
 
     /// <summary>A number of a session's JSON, whichever way it was written.</summary>
-    private static double Num(JsonNode? value) => double.Parse(value!.ToJsonString(), CultureInfo.InvariantCulture);
+    private static double Num(JsonNode? value) => NumberText.Double(value!.ToJsonString());
 
     private static JsonArray Ints(double[] values) => new(values.Select(v => (JsonNode?)JsonValue.Create((int)Math.Round(v))).ToArray());
 

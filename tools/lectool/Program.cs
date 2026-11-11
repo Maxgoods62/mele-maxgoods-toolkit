@@ -9,6 +9,8 @@ using LegendaryExplorerCore.Unreal.ObjectInfo;
 using BmfBinary = LegendaryExplorerCore.Unreal.BinaryConverters.BioMorphFace;
 using MeshBinary = LegendaryExplorerCore.Unreal.BinaryConverters.SkeletalMesh;
 
+// First: numbers print the same on every Windows language (a French one writes 2.5 as "2,5"), in this code and in LEC's.
+MeleMcp.Core.NumberText.UseInvariantCulture();
 if (args.Length == 0) { Console.WriteLine("ERROR usage: lectool <command> <args>; the commands are listed in tools/lectool/README.md"); Environment.Exit(1); }
 // The Legendary Edition folder: MELE_LE_DIR as for mele-mcp (from WSL also set WSLENV=MELE_LE_DIR), else LEC's registry lookup.
 var leDir = Environment.GetEnvironmentVariable("MELE_LE_DIR");
@@ -116,7 +118,7 @@ if (cmd == "2da") {
           if (type == null) { errors.Add($"{where}: column {col} has only empty cells, so its type is unknown"); continue; }
           Bio2DACell cell = type switch {
             Bio2DACell.Bio2DADataType.TYPE_INT => int.TryParse(value, System.Globalization.NumberStyles.Integer, inv, out var i) ? new Bio2DACell(i) : null,
-            Bio2DACell.Bio2DADataType.TYPE_FLOAT => float.TryParse(value, System.Globalization.NumberStyles.Float, inv, out var f) ? new Bio2DACell(f) : null,
+            Bio2DACell.Bio2DADataType.TYPE_FLOAT => MeleMcp.Core.NumberText.TryFloat(value, out var f) ? new Bio2DACell(f) : null,
             _ => new Bio2DACell(NameReference.FromInstancedString(value), pkg),
           };
           if (cell == null) { errors.Add($"{where}: {col} is a {type} column, '{value}' is not one"); continue; }
@@ -326,7 +328,7 @@ if (cmd == "2da") {
       Property p = info.Type switch {
         PropertyType.IntProperty => int.TryParse(value, System.Globalization.NumberStyles.Integer, inv, out var i) ? new IntProperty(i, name) : null,
         PropertyType.StringRefProperty => int.TryParse(value, System.Globalization.NumberStyles.Integer, inv, out var s) ? new StringRefProperty(s, name) : null,
-        PropertyType.FloatProperty => float.TryParse(value, System.Globalization.NumberStyles.Float, inv, out var f) ? new FloatProperty(f, name) : null,
+        PropertyType.FloatProperty => MeleMcp.Core.NumberText.TryFloat(value, out var f) ? new FloatProperty(f, name) : null,
         PropertyType.BoolProperty => bool.TryParse(value, out var b) ? new BoolProperty(b, name) : null,
         PropertyType.NameProperty => new NameProperty(NameReference.FromInstancedString(value), name),
         PropertyType.StrProperty => new StrProperty(value, name),
@@ -783,6 +785,9 @@ if (cmd == "2da") {
   var (outPath, newName, title) = (Writable(args[7]), args[8], args[9]);
   // A flag this lectool does not know (a build script newer than the toolkit) must stop the build, not be skipped.
   foreach (var f in args.Skip(10).Where(f => f.StartsWith("--") && f is not ("--loop" or "--unique-wave"))) { Console.WriteLine($"ERROR unknown option {f}"); Environment.Exit(1); }
+  // Read before any file is opened. float.Parse took "0,5" for 5: a comma is a thousands separator for it.
+  float volume = 1;
+  if (args.Length > 10 && !MeleMcp.Core.NumberText.TryFloat(args[10], out volume)) { Console.WriteLine($"ERROR volume '{args[10]}' is not a number such as 0.5"); Environment.Exit(1); }
   NotAnInput(outPath, donorPath);
   using var donor = MEPackageHandler.OpenMEPackage(donorPath);
   var cue = donor.Exports.Single(x => x.ClassName == "SoundCue" && x.ObjectName.Instanced == donorCue);
@@ -793,7 +798,7 @@ if (cmd == "2da") {
   var newCue = (ExportEntry)ported;
   newCue.ObjectName = NameReference.FromInstancedString(newName);
   newCue.Parent = null; // top level: <package>.<newName>, not under the donor's "snd_gui" group
-  if (args.Length > 10) newCue.WriteProperty(new FloatProperty(float.Parse(args[10], System.Globalization.CultureInfo.InvariantCulture), "VolumeMultiplier"));
+  if (args.Length > 10) newCue.WriteProperty(new FloatProperty(volume, "VolumeMultiplier"));
   newCue.RemoveProperty("PitchMultiplier"); // a donor's pitch (c_snd_guiswish has 2) is not ours
   if (args.Contains("--loop")) {
     // cue -> SoundNodeLooping (indefinite) -> the donor's first node, as snd_gui.c_txt_scroll does

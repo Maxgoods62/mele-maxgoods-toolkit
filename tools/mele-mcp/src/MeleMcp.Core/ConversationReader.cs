@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using LegendaryExplorerCore.Dialogue;
 using LegendaryExplorerCore.Packages;
@@ -37,7 +38,9 @@ public static class ConversationReader
             if (interp is null) return " (no node data)";
             var length = interp.GetProperty<FloatProperty>("InterpLength")?.Value;
             var vo = voTracks.FirstOrDefault(x => x.InstancedFullPath.StartsWith(interp.InstancedFullPath + ".", StringComparison.Ordinal));
-            return $" interp=#{interp.UIndex} {length:0.#}s" + (vo is null ? "" : $" vo=#{vo.UIndex}(${vo.GetProperty<IntProperty>("m_nStrRefID")?.Value})");
+            // With a decimal point on every Windows: the length is pasted back into export_set and YAML files.
+            return string.Create(CultureInfo.InvariantCulture, $" interp=#{interp.UIndex} {length:0.#}s")
+                   + (vo is null ? "" : $" vo=#{vo.UIndex}(${vo.GetProperty<IntProperty>("m_nStrRefID")?.Value})");
         }
 
         var sb = new StringBuilder();

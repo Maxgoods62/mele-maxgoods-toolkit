@@ -490,7 +490,7 @@ public static class LevelBuilder
 
     /// <summary>Floats as JSON numbers that read back as the same floats, written short: -36739.9, not -36739.8984375.</summary>
     private static JsonArray Floats(params float[] values) =>
-        new(values.Select(f => (JsonNode?)JsonValue.Create(double.Parse(f.ToString("R", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture))).ToArray());
+        new(values.Select(f => (JsonNode?)JsonValue.Create(NumberText.Double(f.ToString("R", CultureInfo.InvariantCulture)))).ToArray());
 
     private static BuiltNpc BuildNpc(MEGame game, IMEPackage pcc, ExportEntry level, Spec spec, NpcSpec npc, PackageCache cache,
         Lazy<PropertyCollection?> templateLook, List<BuiltPose> poses, List<string> missing, List<string> notes)
@@ -2251,8 +2251,8 @@ public static class LevelBuilder
                     var f = Numbers(v, 3, 3);
                     offset = new Vector3(f[0], f[1], f[2]);
                     break;
-                case "radius": radius = Number(v); break;
-                case "brightness": brightness = Number(v); break;
+                case "radius": radius = Number(v) is > 0 and var r ? r : throw Fail(v, "'radius' must be over 0."); break;
+                case "brightness": brightness = Number(v) is >= 0 and var b ? b : throw Fail(v, "'brightness' can't be negative."); break;
                 case "color": color = ColorOf(v); break;
                 case "falloff": falloff = FalloffOf(v); break;
                 case "enabled": enabled = Bool(v); break;

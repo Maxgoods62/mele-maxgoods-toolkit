@@ -94,12 +94,12 @@ public static partial class PropertyEditor
         return prop;
     }
 
-    private static void Assign(IMEPackage pcc, Property leaf, string value)
+    internal static void Assign(IMEPackage pcc, Property leaf, string value)
     {
         var inv = CultureInfo.InvariantCulture;
         switch (leaf)
         {
-            case FloatProperty f: f.Value = float.Parse(value, inv); break;
+            case FloatProperty f: f.Value = NumberText.Float(value); break;
             case IntProperty i: i.Value = int.Parse(value, inv); break;
             case BoolProperty b: b.Value = bool.Parse(value); break;
             case ByteProperty b: b.Value = byte.Parse(value, inv); break;
